@@ -1,0 +1,19 @@
+{
+  "name": "obsidian-gantt",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@obsidian-gantt/core": "*",
+    "@obsidian-gantt/ui": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0",
+    "obsidian": "^1.4.0",
+    "typescript": "^5.4.0"
+  }
+}

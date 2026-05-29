@@ -1,0 +1,24 @@
+{
+  "name": "obsidian-gantt",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/gantt-core",
+    "packages/gantt-ui",
+    "packages/obsidian-plugin",
+    "packages/web-app"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "build:core": "npm run build -w packages/gantt-core",
+    "build:ui": "npm run build -w packages/gantt-ui",
+    "build:plugin": "npm run build -w packages/obsidian-plugin",
+    "build:web": "npm run build -w packages/web-app",
+    "dev:web": "npm run dev -w packages/web-app",
+    "test": "npm run test -w packages/gantt-core",
+    "clean": "npm run clean --workspaces"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

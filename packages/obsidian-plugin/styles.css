@@ -1,0 +1,96 @@
+/* ============================================================
+   Gantt Chart Plugin Styles
+   Uses Obsidian CSS variables for theme compatibility.
+   ============================================================ */
+
+/* Timeline grid */
+:root {
+  --gantt-grid-line-day: var(--background-modifier-border);
+  --gantt-grid-line-week: var(--text-faint);
+  --gantt-today-color: var(--text-accent);
+  --gantt-highlight-border: var(--text-accent);
+  --gantt-row-highlight-bg: var(--background-modifier-hover);
+}
+
+/* Task bar */
+.gantt-task-bar {
+  transition: opacity 0.15s ease, box-shadow 0.15s ease;
+}
+
+.gantt-task-bar:hover {
+  filter: brightness(1.1);
+}
+
+.gantt-task-bar.dimmed {
+  opacity: 0.3;
+}
+
+.gantt-task-bar.highlighted {
+  opacity: 1;
+  filter: brightness(1.05);
+}
+
+/* Row styles */
+.gantt-row {
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.gantt-row.dimmed {
+  opacity: 0.4;
+}
+
+.gantt-row.highlighted {
+  background: var(--background-modifier-hover);
+}
+
+/* Task list row */
+.gantt-task-list-row {
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.gantt-task-list-row.dimmed {
+  opacity: 0.4;
+}
+
+.gantt-task-list-row.highlighted {
+  background: var(--background-modifier-hover);
+}
+
+/* Unassigned card */
+.gantt-unassigned-card {
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.gantt-unassigned-card:hover {
+  background: var(--background-modifier-hover);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Resize handle */
+.gantt-resize-handle:hover {
+  background: var(--interactive-accent) !important;
+}
+
+/* Toolbar buttons */
+.gantt-btn {
+  transition: background 0.15s ease;
+}
+
+.gantt-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* Timeline scrollbar */
+.gantt-timeline::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+
+.gantt-timeline::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb-bg);
+  border-radius: 4px;
+}
+
+.gantt-timeline::-webkit-scrollbar-track {
+  background: transparent;
+}
