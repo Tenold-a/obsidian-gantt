@@ -8,6 +8,7 @@ import {
   TodayLine,
   TaskBar,
   TaskRow,
+  KeyDateMarker,
   isTodayDate,
 } from './components';
 import type { LocalTask } from '@obsidian-gantt/core';
@@ -21,6 +22,7 @@ import {
 
 const DAY_WIDTH = 30;
 const ROW_HEIGHT = 40;
+const LANE_OFFSET = 12;       // vertical offset per overlapping lane, ~50% of bar height for partial overlap
 const LEFT_PANEL_WIDTH = 180;
 const RIGHT_PANEL_WIDTH = 220;
 const GRID_BUFFER_PX = 600;    // buffer for both grid and header on each side
@@ -40,11 +42,12 @@ function pxToDate(px: number): string {
 // ============================================================
 
 function TaskList(props: {
-  labels: { key: string; name: string; color?: string }[];
-  rowHeight: number;
+  labels: { key: string; name: string; color?: string; tooltip?: string }[];
+  rowHeights: number[];
   highlightedRowKeys?: Set<string>;
   dimmedRowKeys?: Set<string>;
   onRowClick?: (key: string) => void;
+  headerContent?: any;
 }) {
   return (
     <div
@@ -57,23 +60,25 @@ function TaskList(props: {
       }}
     >
       {/* Spacer to match header height */}
-      <div style={{ height: '44px', borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)' }} />
+      <div style={{ height: '44px', borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)', display: 'flex', alignItems: 'center', paddingLeft: '8px', paddingRight: '8px' }}>
+        {props.headerContent}
+      </div>
       {/* Rows — static, no scroll transform */}
       <div
         style={{
-          height: `${props.labels.length * props.rowHeight}px`,
+          height: `${props.rowHeights.reduce((a, b) => a + b, 0)}px`,
         }}
       >
-        {props.labels.map((label) => {
+        {props.labels.map((label, i) => {
           const isHighlighted = props.highlightedRowKeys?.has(label.key) ?? false;
           const isDimmed = props.dimmedRowKeys?.has(label.key) ?? false;
+          const h = props.rowHeights[i] ?? ROW_HEIGHT;
           return (
             <div
               key={label.key}
               class={`gantt-task-list-row ${isHighlighted ? 'highlighted' : ''} ${isDimmed ? 'dimmed' : ''}`}
               style={{
-                height: `${props.rowHeight}px`,
-                lineHeight: `${props.rowHeight}px`,
+                height: `${h}px`,
                 borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)',
                 opacity: isDimmed ? 0.4 : 1,
                 background: isHighlighted ? 'var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))' : 'transparent',
@@ -102,7 +107,7 @@ function TaskList(props: {
                   }}
                 />
               )}
-              <span>{label.name}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={label.tooltip}>{label.name}</span>
             </div>
           );
         })}
@@ -238,15 +243,19 @@ function Timeline(props: {
     }
   }, [scrollLeft]);
 
-  // Task bar data
+  // Task bar data with lane assignment
   const taskBars: Array<{
     task: LocalTask;
     left: number;
     width: number;
-    rowIndex: number;
+    groupIndex: number;
+    groupStartY: number;
+    laneIndex: number;
     color: string;
   }> = [];
-  let rowIndex = 0;
+
+  // Per-group lane counts and cumulative Y offsets
+  const groupLayout: { startY: number; height: number; laneCount: number }[] = [];
 
   const projectColorMap = new Map<string, string>();
   for (const p of store.projects.value) {
@@ -260,35 +269,81 @@ function Timeline(props: {
     return DEFAULT_COLORS[Math.abs(hash) % DEFAULT_COLORS.length];
   }
 
+  // Greedy lane assignment per group
   for (const group of groups) {
+    const groupTasks: Array<{
+      task: LocalTask;
+      left: number;
+      width: number;
+      color: string;
+    }> = [];
+
     for (const task of group.tasks) {
       const startVal = task.startDate.value;
-      const endVal = task.endDate.value;
       if (!startVal) continue;
-
-      const end = endVal ?? startVal;
+      const endVal = task.endDate.value ?? startVal;
       const left = originToBody(dateToPx(startVal));
-      const right = originToBody(dateToPx(end));
+      const right = originToBody(dateToPx(endVal));
       const width = Math.max(right - left, 4);
-
       const projectColor = task.projectId.value
         ? projectColorMap.get(task.projectId.value) ?? getDefaultColor(task.projectId.value)
         : getDefaultColor(task.id);
 
-      taskBars.push({
-        task,
-        left,
-        width,
-        rowIndex,
-        color: projectColor,
-      });
+      groupTasks.push({ task, left, width, color: projectColor });
     }
-    rowIndex++;
+
+    // Sort by start date for greedy lane assignment
+    groupTasks.sort((a, b) => a.left - b.left);
+
+    // Greedy first-fit lane assignment
+    const lanes: number[] = []; // lanes[i] = endPx of last bar in lane i
+    for (const gt of groupTasks) {
+      let assigned = false;
+      for (let li = 0; li < lanes.length; li++) {
+        if (gt.left >= lanes[li]) {
+          lanes[li] = gt.left + gt.width;
+          taskBars.push({
+            ...gt,
+            groupIndex: groupLayout.length,
+            groupStartY: 0, // filled in below
+            laneIndex: li,
+          });
+          assigned = true;
+          break;
+        }
+      }
+      if (!assigned) {
+        lanes.push(gt.left + gt.width);
+        taskBars.push({
+          ...gt,
+          groupIndex: groupLayout.length,
+          groupStartY: 0,
+          laneIndex: lanes.length - 1,
+        });
+      }
+    }
+
+    const laneCount = Math.max(1, lanes.length);
+    const height = ROW_HEIGHT + (laneCount - 1) * LANE_OFFSET;
+    const startY = groupLayout.length === 0 ? 0 : groupLayout[groupLayout.length - 1].startY + groupLayout[groupLayout.length - 1].height;
+    groupLayout.push({ startY, height, laneCount });
+
+    // Fill in groupStartY for bars just added
+    for (let i = taskBars.length - 1; i >= 0; i--) {
+      if (taskBars[i].groupIndex === groupLayout.length - 1) {
+        taskBars[i] = { ...taskBars[i], groupStartY: startY };
+      } else {
+        break;
+      }
+    }
   }
+
+  const totalHeight = groupLayout.length > 0
+    ? groupLayout[groupLayout.length - 1].startY + groupLayout[groupLayout.length - 1].height
+    : 0;
 
   const highlightedIds = store.highlightedTaskIds.value;
   const hasSelection = store.selectedEntity.value !== null;
-  const totalRows = groups.length;
 
   // Precompute grid-aligned left for header sync
   const gridAbsAligned = Math.floor((bodyOriginPx + scrollLeft - GRID_BUFFER_PX) / DAY_WIDTH) * DAY_WIDTH;
@@ -326,7 +381,7 @@ function Timeline(props: {
         style={{
           position: 'relative',
           width: `${bodyTotalWidth}px`,
-          height: `${totalRows * ROW_HEIGHT}px`,
+          height: `${totalHeight}px`,
         }}
       >
         {/* Grid */}
@@ -340,6 +395,8 @@ function Timeline(props: {
 
         {/* Row backgrounds */}
         {groups.map((group, gi) => {
+          const layout = groupLayout[gi];
+          if (!layout) return null;
           const isHighlighted = props.highlightedRowKeys.has(group.key);
           const isDimmed = props.dimmedRowKeys.has(group.key);
           // Check if drag is hovering over this row
@@ -351,10 +408,10 @@ function Timeline(props: {
               key={group.key}
               style={{
                 position: 'absolute',
-                top: `${gi * ROW_HEIGHT}px`,
+                top: `${layout.startY}px`,
                 left: 0,
                 width: '100%',
-                height: `${ROW_HEIGHT}px`,
+                height: `${layout.height}px`,
                 borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)',
                 opacity: isDimmed ? 0.4 : 1,
                 background: dragHovering
@@ -370,10 +427,12 @@ function Timeline(props: {
         })}
 
         {/* Task bars */}
-        {taskBars.map(({ task, left, width, rowIndex: ri, color }) => (
+        {taskBars.map(({ task, left, width, groupStartY, laneIndex, color }) => (
           <TaskBar
             key={task.id}
-            rowIndex={ri}
+            rowIndex={0}
+            groupStartY={groupStartY}
+            laneIndex={laneIndex}
             paneType={paneType}
             data={{
               id: task.id,
@@ -386,16 +445,41 @@ function Timeline(props: {
               progress: task.progress.value,
             }}
             rowHeight={ROW_HEIGHT}
+            laneOffset={LANE_OFFSET}
             onPointerDown={props.onTaskPointerDown}
             onClick={props.onTaskClick}
           />
         ))}
 
+        {/* Key date markers (project pane only) */}
+        {paneType === 'project' && groups.map((group, gi) => {
+          const layout = groupLayout[gi];
+          if (!layout) return null;
+          const projectId = (group as any).projectId as string;
+          if (!projectId || projectId === '__no_project__') return null;
+          const project = store.mergedProjects.value.find(p => p.id === projectId);
+          if (!project?.keyDates?.length) return null;
+          return project.keyDates.map((kd, ki) => (
+            <KeyDateMarker
+              key={`${projectId}-kd-${ki}`}
+              leftPx={originToBody(dateToPx(kd.date))}
+              groupTopY={layout.startY}
+              name={kd.name}
+              date={kd.date}
+              color={kd.color}
+              icon={kd.icon}
+            />
+          ));
+        })}
+
         {/* Drag ghost bar */}
         {dragState.value && (() => {
           const ds = dragState.value;
           const barHeight = ROW_HEIGHT * 0.6;
-          const barTop = ds.rowIndex * ROW_HEIGHT + (ROW_HEIGHT - barHeight) / 2;
+          const ghostLayout = groupLayout[ds.rowIndex];
+          const barTop = ghostLayout
+            ? ghostLayout.startY + (ROW_HEIGHT - barHeight) / 2
+            : ds.rowIndex * ROW_HEIGHT + (ROW_HEIGHT - barHeight) / 2;
           const ghostTask = store.mergedTasks.value.find(t => t.id === ds.taskId);
           const ghostTitle = ghostTask?.title.value ?? '';
           // Only show ghost in the pane where the drag originated
@@ -454,13 +538,54 @@ function GanttPane(props: {
   const paneType: 'person' | 'project' = type;
 
   const labels = useMemo(() =>
-    groups.map(g => ({
-      key: g.personId ?? g.projectId,
-      name: type === 'person' ? g.personName : g.projectName,
-      color: type === 'project' ? (g as ProjectGroup).color : undefined,
-    })),
+    groups.map(g => {
+      const key = type === 'person' ? (g as PersonGroup).personId : (g as ProjectGroup).projectId;
+      if (type === 'person') {
+        const pg = g as PersonGroup;
+        const displayName = pg.position ? `${pg.position} · ${pg.personName}` : pg.personName;
+        return {
+          key,
+          name: displayName,
+          color: undefined as string | undefined,
+          tooltip: pg.personId === '__unassigned__' ? undefined : `ID: ${pg.personId}`,
+        };
+      }
+      return {
+        key,
+        name: (g as ProjectGroup).projectName,
+        color: (g as ProjectGroup).color,
+        tooltip: undefined as string | undefined,
+      };
+    }),
     [groups],
   );
+
+  // Compute row heights with lane expansion for overlapping bars
+  const groupHeights = useMemo(() => {
+    return groups.map(group => {
+      const ranges: Array<{ start: string; end: string }> = [];
+      for (const task of group.tasks) {
+        const s = task.startDate.value;
+        if (!s) continue;
+        ranges.push({ start: s, end: task.endDate.value ?? s });
+      }
+      ranges.sort((a, b) => a.start.localeCompare(b.start));
+
+      const lanes: string[] = []; // lanes[i] = end date of last bar in lane i
+      for (const dr of ranges) {
+        let assigned = false;
+        for (let li = 0; li < lanes.length; li++) {
+          if (dr.start >= lanes[li]) {
+            lanes[li] = dr.end;
+            assigned = true;
+            break;
+          }
+        }
+        if (!assigned) lanes.push(dr.end);
+      }
+      return ROW_HEIGHT + (Math.max(1, lanes.length) - 1) * LANE_OFFSET;
+    });
+  }, [groups]);
 
   // Compute highlighted and dimmed row keys
   const highlightedIds = store.highlightedTaskIds.value;
@@ -509,10 +634,30 @@ function GanttPane(props: {
     <div class="gantt-pane" style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
       <TaskList
         labels={labels}
-        rowHeight={ROW_HEIGHT}
+        rowHeights={groupHeights}
         highlightedRowKeys={highlightedRowKeys}
         dimmedRowKeys={dimmedRowKeys}
         onRowClick={handleRowClick}
+        headerContent={type === 'person' ? (
+          <button
+            class="gantt-sort-toggle"
+            onClick={() => {
+              store.personSortMode.value = store.personSortMode.value === 'name' ? 'position' : 'name';
+            }}
+            title={`Sort: ${store.personSortMode.value === 'name' ? 'by name' : 'by position'}`}
+            style={{
+              padding: '2px 8px',
+              border: '1px solid var(--background-modifier-border, #ccc)',
+              borderRadius: '4px',
+              background: 'var(--background-secondary, #f5f5f5)',
+              cursor: 'pointer',
+              fontSize: '11px',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Sort: {store.personSortMode.value === 'name' ? 'Name' : 'Position'}
+          </button>
+        ) : undefined}
       />
       <Timeline
         store={store}
@@ -532,6 +677,17 @@ function GanttPane(props: {
     </div>
   );
 }
+
+const PRESET_COLORS = ['#E06C75', '#61AFEF', '#98C379', '#E5C07B', '#C678DD', '#56B6C2', '#D19A66', '#4A90D9'];
+
+const KEY_DATE_PRESETS = [
+  { name: '验收时间', color: '#98C379', icon: '✓' },
+  { name: '上线时间', color: '#61AFEF', icon: '▲' },
+  { name: '提测时间', color: '#C678DD', icon: '◆' },
+  { name: '评审时间', color: '#E5C07B', icon: '◎' },
+  { name: '交付时间', color: '#56B6C2', icon: '●' },
+  { name: '启动时间', color: '#4A90D9', icon: '▶' },
+];
 
 // ============================================================
 // UnassignedPanel
@@ -633,6 +789,404 @@ function UnassignedPanel(props: {
 // DualPane — top-level layout
 // ============================================================
 
+function ProjectDetail(props: { store: GanttStore }) {
+  const { store } = props;
+  const sel = store.selectedEntity.value;
+  const editing = useSignal(false);
+
+  if (!sel || sel.type !== 'project') return null;
+
+  const project = store.mergedProjects.value.find(p => p.id === sel.id);
+  if (!project) return null;
+
+  const projectOverrides = store.edits.value?.projectOverrides?.[project.id];
+  const description = projectOverrides?.description ?? project.description ?? '';
+  const requester = projectOverrides?.requester ?? project.requester ?? '';
+  const keyDates = projectOverrides?.keyDates ?? project.keyDates ?? [];
+  const keyLinks = projectOverrides?.keyLinks ?? project.keyLinks ?? [];
+
+  // Local edit state
+  const editDescription = useSignal(description);
+  const editRequester = useSignal(requester);
+  const editKeyDates = useSignal<{ name: string; date: string; color?: string; icon?: string }[]>(
+    keyDates.map(kd => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon })),
+  );
+  const editKeyLinks = useSignal<{ name: string; url: string }[]>(
+    keyLinks.map(kl => ({ ...kl })),
+  );
+
+  function handleEdit() {
+    editDescription.value = description;
+    editRequester.value = requester;
+    editKeyDates.value = keyDates.map(kd => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon }));
+    editKeyLinks.value = keyLinks.map(kl => ({ ...kl }));
+    editing.value = true;
+  }
+
+  async function handleSave() {
+    await store.persistProjectEdit(project!.id, 'description', editDescription.value || undefined);
+    await store.persistProjectEdit(project!.id, 'requester', editRequester.value || undefined);
+    await store.persistProjectEdit(project!.id, 'keyDates', editKeyDates.value.length > 0
+      ? editKeyDates.value.map(kd => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon }))
+      : undefined);
+    await store.persistProjectEdit(project!.id, 'keyLinks', editKeyLinks.value.length > 0 ? editKeyLinks.value : undefined);
+    editing.value = false;
+  }
+
+  function handleCancel() {
+    editing.value = false;
+  }
+
+  const fieldStyle = { marginBottom: '12px' };
+  const labelStyle: Record<string, string> = { fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' };
+  const valueStyle: Record<string, string> = { fontSize: '13px', wordBreak: 'break-word' };
+
+  return (
+    <div
+      class="gantt-detail-panel"
+      style={{
+        width: `${RIGHT_PANEL_WIDTH}px`,
+        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
+        padding: '12px',
+        fontSize: '13px',
+        color: 'var(--text-normal, #333)',
+        overflowY: 'auto',
+        background: 'var(--background-secondary, #f5f5f5)',
+      }}
+    >
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1 }}>
+          {project.color && (
+            <span style={{
+              width: '12px', height: '12px', borderRadius: '3px', background: project.color, flexShrink: 0,
+            }} />
+          )}
+          <span style={{ fontWeight: 'bold', fontSize: '14px', wordBreak: 'break-word' }}>{project.name}</span>
+        </div>
+        <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+          {editing.value ? (
+            <>
+              <button
+                onClick={handleSave}
+                style={{
+                  padding: '2px 8px', border: '1px solid var(--interactive-accent, #4A90D9)',
+                  borderRadius: '4px', background: 'var(--interactive-accent, #4A90D9)', color: '#fff',
+                  cursor: 'pointer', fontSize: '11px',
+                }}
+              >Save</button>
+              <button
+                onClick={handleCancel}
+                style={{
+                  padding: '2px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
+                  borderRadius: '4px', background: 'var(--background-secondary, #f5f5f5)',
+                  cursor: 'pointer', fontSize: '11px',
+                }}
+              >Cancel</button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={handleEdit}
+                style={{
+                  padding: '2px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
+                  borderRadius: '4px', background: 'var(--background-secondary, #f5f5f5)',
+                  cursor: 'pointer', fontSize: '11px',
+                }}
+              >Edit</button>
+              <button
+                onClick={() => store.selectEntity(null)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px',
+                  lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
+                }}
+                title="Close detail panel"
+              >x</button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Description */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>Description</div>
+        {editing.value ? (
+          <textarea
+            value={editDescription.value}
+            onInput={(e) => { editDescription.value = (e.target as HTMLTextAreaElement).value; }}
+            rows={4}
+            style={{
+              width: '100%', boxSizing: 'border-box', resize: 'vertical', fontSize: '12px',
+              padding: '4px', borderRadius: '4px', border: '1px solid var(--background-modifier-border, #ccc)',
+              background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+            }}
+            placeholder="Project description..."
+          />
+        ) : (
+          <div style={valueStyle}>{description || '—'}</div>
+        )}
+      </div>
+
+      {/* Requester */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>Requester</div>
+        {editing.value ? (
+          <input
+            type="text"
+            value={editRequester.value}
+            onInput={(e) => { editRequester.value = (e.target as HTMLInputElement).value; }}
+            style={{
+              width: '100%', boxSizing: 'border-box', fontSize: '12px',
+              padding: '4px', borderRadius: '4px', border: '1px solid var(--background-modifier-border, #ccc)',
+              background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+            }}
+            placeholder="Stakeholder or department..."
+          />
+        ) : (
+          <div style={valueStyle}>{requester || '—'}</div>
+        )}
+      </div>
+
+      {/* Key Dates */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>Key Dates</div>
+        {editing.value ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {/* Preset buttons */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '4px' }}>
+              {KEY_DATE_PRESETS.map(preset => (
+                <button
+                  key={preset.name}
+                  onClick={() => {
+                    editKeyDates.value = [...editKeyDates.value, {
+                      name: preset.name,
+                      date: todayString(),
+                      color: preset.color,
+                      icon: preset.icon,
+                    }];
+                  }}
+                  title={preset.name}
+                  style={{
+                    padding: '2px 6px', fontSize: '10px', borderRadius: '3px', cursor: 'pointer',
+                    border: `1px solid ${preset.color}`,
+                    background: 'var(--background-primary, #fff)',
+                    color: preset.color,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  <span style={{
+                    display: 'inline-block', width: '12px', height: '12px', lineHeight: '12px',
+                    textAlign: 'center', fontSize: '9px', borderRadius: '2px',
+                    background: preset.color, color: '#fff', marginRight: '3px',
+                  }}>
+                    {preset.icon}
+                  </span>
+                  {preset.name}
+                </button>
+              ))}
+            </div>
+            {/* Key date rows */}
+            {editKeyDates.value.map((kd, i) => (
+              <div key={i} style={{ display: 'flex', gap: '3px', alignItems: 'center' }}>
+                <input
+                  type="color"
+                  value={kd.color ?? '#E5C07B'}
+                  onInput={(e) => {
+                    const next = [...editKeyDates.value];
+                    next[i] = { ...next[i], color: (e.target as HTMLInputElement).value };
+                    editKeyDates.value = next;
+                  }}
+                  title="Marker color"
+                  style={{ width: '22px', height: '22px', padding: '0', border: 'none', borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }}
+                />
+                <input
+                  type="text"
+                  value={kd.icon ?? ''}
+                  onInput={(e) => {
+                    const next = [...editKeyDates.value];
+                    next[i] = { ...next[i], icon: (e.target as HTMLInputElement).value || undefined };
+                    editKeyDates.value = next;
+                  }}
+                  placeholder="◆"
+                  maxLength={2}
+                  title="Icon (1-2 chars shown in marker)"
+                  style={{
+                    width: '22px', fontSize: '11px', padding: '3px', textAlign: 'center', borderRadius: '3px', flexShrink: 0,
+                    border: '1px solid var(--background-modifier-border, #ccc)',
+                    background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+                  }}
+                />
+                <input
+                  type="text"
+                  value={kd.name}
+                  onInput={(e) => {
+                    const next = [...editKeyDates.value];
+                    next[i] = { ...next[i], name: (e.target as HTMLInputElement).value };
+                    editKeyDates.value = next;
+                  }}
+                  placeholder="Name"
+                  style={{
+                    flex: 1, fontSize: '11px', padding: '3px', borderRadius: '3px',
+                    border: '1px solid var(--background-modifier-border, #ccc)',
+                    background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+                  }}
+                />
+                <input
+                  type="date"
+                  value={kd.date}
+                  onInput={(e) => {
+                    const next = [...editKeyDates.value];
+                    next[i] = { ...next[i], date: (e.target as HTMLInputElement).value };
+                    editKeyDates.value = next;
+                  }}
+                  style={{
+                    width: '110px', fontSize: '11px', padding: '3px', borderRadius: '3px', flexShrink: 0,
+                    border: '1px solid var(--background-modifier-border, #ccc)',
+                    background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    editKeyDates.value = editKeyDates.value.filter((_, idx) => idx !== i);
+                  }}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px',
+                    color: 'var(--text-error, #e00)', padding: '0 2px', lineHeight: 1, flexShrink: 0,
+                  }}
+                  title="Remove key date"
+                >x</button>
+              </div>
+            ))}
+            <button
+              onClick={() => {
+                editKeyDates.value = [...editKeyDates.value, { name: '', date: '', color: '#E5C07B', icon: '' }];
+              }}
+              style={{
+                padding: '2px 8px', border: '1px dashed var(--background-modifier-border, #ccc)',
+                borderRadius: '4px', background: 'transparent', cursor: 'pointer', fontSize: '11px',
+                marginTop: '2px',
+              }}
+            >+ Custom Key Date</button>
+          </div>
+        ) : (
+          <div>
+            {keyDates.length > 0 ? (
+              keyDates.map((kd, i) => (
+                <div key={i} style={{ fontSize: '12px', padding: '2px 0', display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  <span style={{
+                    display: 'inline-block', width: '10px', height: '10px', borderRadius: '2px',
+                    background: kd.color ?? 'var(--gantt-key-date-color, #E5C07B)', flexShrink: 0,
+                    transform: 'rotate(45deg)',
+                  }} />
+                  {kd.icon && (
+                    <span style={{ fontSize: '9px', fontWeight: 'bold', color: kd.color ?? 'var(--text-muted, #999)', flexShrink: 0 }}>
+                      {kd.icon}
+                    </span>
+                  )}
+                  <span style={{ color: 'var(--text-muted, #999)', minWidth: '80px' }}>{kd.date}</span>
+                  <span>{kd.name}</span>
+                </div>
+              ))
+            ) : (
+              <div style={valueStyle}>—</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Key Links */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>Key Links</div>
+        {editing.value ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {editKeyLinks.value.map((kl, i) => (
+              <div key={i} style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                <input
+                  type="text"
+                  value={kl.name}
+                  onInput={(e) => {
+                    const next = [...editKeyLinks.value];
+                    next[i] = { ...next[i], name: (e.target as HTMLInputElement).value };
+                    editKeyLinks.value = next;
+                  }}
+                  placeholder="Link name"
+                  style={{
+                    width: '80px', fontSize: '11px', padding: '3px', borderRadius: '3px', flexShrink: 0,
+                    border: '1px solid var(--background-modifier-border, #ccc)',
+                    background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+                  }}
+                />
+                <input
+                  type="url"
+                  value={kl.url}
+                  onInput={(e) => {
+                    const next = [...editKeyLinks.value];
+                    next[i] = { ...next[i], url: (e.target as HTMLInputElement).value };
+                    editKeyLinks.value = next;
+                  }}
+                  placeholder="https://..."
+                  style={{
+                    flex: 1, fontSize: '11px', padding: '3px', borderRadius: '3px',
+                    border: '1px solid var(--background-modifier-border, #ccc)',
+                    background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    editKeyLinks.value = editKeyLinks.value.filter((_, idx) => idx !== i);
+                  }}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px',
+                    color: 'var(--text-error, #e00)', padding: '0 2px', lineHeight: 1, flexShrink: 0,
+                  }}
+                  title="Remove link"
+                >x</button>
+              </div>
+            ))}
+            <button
+              onClick={() => {
+                editKeyLinks.value = [...editKeyLinks.value, { name: '', url: '' }];
+              }}
+              style={{
+                padding: '2px 8px', border: '1px dashed var(--background-modifier-border, #ccc)',
+                borderRadius: '4px', background: 'transparent', cursor: 'pointer', fontSize: '11px',
+                marginTop: '2px',
+              }}
+            >+ Add Link</button>
+          </div>
+        ) : (
+          <div>
+            {keyLinks.length > 0 ? (
+              keyLinks.map((kl, i) => (
+                <div key={i} style={{ fontSize: '12px', padding: '2px 0' }}>
+                  <a
+                    href={kl.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      color: 'var(--interactive-accent, #4A90D9)',
+                      textDecoration: 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                    }}
+                  >
+                    <span style={{ fontSize: '10px' }}>↗</span>
+                    {kl.name || kl.url}
+                  </a>
+                </div>
+              ))
+            ) : (
+              <div style={valueStyle}>—</div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DetailPanel(props: { store: GanttStore }) {
   const { store } = props;
   const sel = store.selectedEntity.value;
@@ -692,17 +1246,15 @@ function DetailPanel(props: { store: GanttStore }) {
           }}
           title="Close detail panel"
         >
-          ×
+          x
         </button>
       </div>
 
       {/* Fields */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        {/* Dates */}
         <FieldRow label="Start" value={task.startDate.value ?? '—'} />
         <FieldRow label="End" value={task.endDate.value ?? '—'} />
 
-        {/* Progress */}
         <div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Progress</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -724,27 +1276,20 @@ function DetailPanel(props: { store: GanttStore }) {
           </div>
         </div>
 
-        {/* Person */}
         <FieldRow label="Person" value={personName ?? '—'} />
 
-        {/* Project */}
         <div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Project</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             {project?.color && (
               <span style={{
-                width: '10px',
-                height: '10px',
-                borderRadius: '2px',
-                background: project.color,
-                flexShrink: 0,
+                width: '10px', height: '10px', borderRadius: '2px', background: project.color, flexShrink: 0,
               }} />
             )}
             <span>{project?.name ?? task.projectId.value ?? '—'}</span>
           </div>
         </div>
 
-        {/* Dependencies */}
         <div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Dependencies</div>
           <div style={{ fontSize: '12px' }}>
@@ -756,17 +1301,14 @@ function DetailPanel(props: { store: GanttStore }) {
           </div>
         </div>
 
-        {/* Tags */}
         {task.tags.value.length > 0 && (
           <div>
             <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Tags</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
               {task.tags.value.map(tag => (
                 <span key={tag} style={{
-                  padding: '1px 6px',
-                  borderRadius: '10px',
-                  background: 'var(--background-modifier-border, #e0e0e0)',
-                  fontSize: '11px',
+                  padding: '1px 6px', borderRadius: '10px',
+                  background: 'var(--background-modifier-border, #e0e0e0)', fontSize: '11px',
                 }}>
                   {tag}
                 </span>
@@ -775,19 +1317,10 @@ function DetailPanel(props: { store: GanttStore }) {
           </div>
         )}
 
-        {/* Source info */}
-        <div style={{
-          fontSize: '11px',
-          color: 'var(--text-muted, #999)',
-          marginTop: '4px',
-        }}>
-          <div style={{ textDecoration: sourceStyle }}>
-            {sourceLabel}
-          </div>
+        <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginTop: '4px' }}>
+          <div style={{ textDecoration: sourceStyle }}>{sourceLabel}</div>
           {task.upstreamDeleted && (
-            <div style={{ color: 'var(--text-error, #e00)', marginTop: '2px' }}>
-              Deleted upstream
-            </div>
+            <div style={{ color: 'var(--text-error, #e00)', marginTop: '2px' }}>Deleted upstream</div>
           )}
         </div>
       </div>
@@ -845,7 +1378,8 @@ export function DualPane(props: {
   }
 
   const sel = store.selectedEntity.value;
-  const showDetail = sel?.type === 'task';
+  const showTaskDetail = sel?.type === 'task';
+  const showProjectDetail = sel?.type === 'project';
 
   return (
     <div class="gantt-dual-pane" style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%' }}>
@@ -866,8 +1400,8 @@ export function DualPane(props: {
               onDrop={props.onDrop}
               onDragOver={props.onDragOver}
             />
-            {/* Unassigned only when detail not shown */}
-            {!showDetail && <UnassignedPanel store={store} onDragStart={() => {}} />}
+            {/* Unassigned only when no detail shown */}
+            {!showTaskDetail && !showProjectDetail && <UnassignedPanel store={store} onDragStart={() => {}} />}
           </div>
 
           {/* Resize handle */}
@@ -903,8 +1437,9 @@ export function DualPane(props: {
           </div>
         </div>
 
-        {/* Detail sidebar — appears when task is selected */}
-        {showDetail && <DetailPanel store={store} />}
+        {/* Detail sidebar — appears when task or project is selected */}
+        {showTaskDetail && <DetailPanel store={store} />}
+        {showProjectDetail && <ProjectDetail store={store} />}
       </div>
     </div>
   );

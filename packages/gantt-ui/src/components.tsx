@@ -235,14 +235,17 @@ export interface TaskBarData {
 export function TaskBar(props: {
   data: TaskBarData;
   rowIndex: number;
+  groupStartY: number;
+  laneIndex: number;
   rowHeight: number;
+  laneOffset: number;
   paneType: 'person' | 'project';
   onPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
   onClick: (taskId: string) => void;
 }) {
-  const { data, rowIndex, rowHeight, paneType } = props;
+  const { data, groupStartY, laneIndex, rowHeight, laneOffset, paneType } = props;
   const barHeight = rowHeight * 0.6;
-  const barTop = rowIndex * rowHeight + (rowHeight - barHeight) / 2;
+  const barTop = groupStartY + (rowHeight - barHeight) / 2 + laneIndex * laneOffset;
 
   return (
     <div
@@ -265,7 +268,7 @@ export function TaskBar(props: {
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         color: 'var(--text-on-accent, #fff)',
-        zIndex: 2,
+        zIndex: 2 + props.laneIndex,
         boxShadow: data.isHighlighted
           ? '0 0 0 2px var(--gantt-highlight-border, #4A90D9)'
           : 'none',
@@ -407,4 +410,54 @@ function getDayLabel(date: string): string {
 export function isTodayDate(date: string): boolean {
   const today = formatDateStr(new Date());
   return date === today;
+}
+
+// ============================================================
+// KeyDateMarker
+// ============================================================
+
+export function KeyDateMarker(props: {
+  leftPx: number;
+  groupTopY: number;
+  name: string;
+  date: string;
+  color?: string;
+  icon?: string;
+}) {
+  const size = 10;
+  const bg = props.color ?? 'var(--gantt-key-date-color, #E5C07B)';
+  return (
+    <div
+      class="gantt-key-date-marker"
+      title={`${props.name}: ${props.date}`}
+      style={{
+        position: 'absolute',
+        left: `${props.leftPx - size / 2}px`,
+        top: `${props.groupTopY + 3}px`,
+        width: `${size}px`,
+        height: `${size}px`,
+        background: bg,
+        transform: 'rotate(45deg)',
+        zIndex: 3,
+        pointerEvents: 'auto',
+        cursor: 'help',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      {props.icon && (
+        <span style={{
+          transform: 'rotate(-45deg)',
+          fontSize: '7px',
+          color: '#fff',
+          lineHeight: 1,
+          fontWeight: 'bold',
+          pointerEvents: 'none',
+        }}>
+          {props.icon}
+        </span>
+      )}
+    </div>
+  );
 }

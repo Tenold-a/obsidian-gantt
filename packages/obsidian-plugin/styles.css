@@ -94,3 +94,66 @@
 .gantt-timeline::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* Person position badge in task list rows */
+.gantt-task-list-row .gantt-position-badge {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+  padding: 0 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+/* Sort toggle button */
+.gantt-sort-toggle {
+  color: var(--text-normal);
+  transition: background 0.15s ease;
+}
+
+.gantt-sort-toggle:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* Project detail panel form fields */
+.gantt-detail-panel textarea:focus,
+.gantt-detail-panel input:focus {
+  outline: 1px solid var(--interactive-accent, #4A90D9);
+  border-color: var(--interactive-accent, #4A90D9);
+}
+
+.gantt-detail-panel .gantt-keydate-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.gantt-detail-panel .gantt-keydate-add-btn {
+  border: 1px dashed var(--background-modifier-border, #ccc) !important;
+  color: var(--text-muted);
+}
+
+.gantt-detail-panel .gantt-keydate-add-btn:hover {
+  border-color: var(--interactive-accent, #4A90D9) !important;
+  color: var(--interactive-accent, #4A90D9);
+}
+
+/* Key date diamond markers */
+.gantt-key-date-marker {
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.gantt-key-date-marker:hover {
+  transform: rotate(45deg) scale(1.4) !important;
+  background: var(--interactive-accent, #4A90D9) !important;
+  z-index: 6;
+}
+
+/* Lane-stacked bars: higher lane index = higher z-index */
+.gantt-task-bar {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+
+.gantt-task-bar:hover {
+  z-index: 8 !important;
+}

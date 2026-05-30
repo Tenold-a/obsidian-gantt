@@ -59,8 +59,30 @@ export interface Person {
   id: string;
   /** Display name (required) */
   name: string;
+  /** Job title or role (e.g. "Engineer", "Manager") */
+  position?: string;
   /** Optional avatar URL */
   avatar?: string;
+}
+
+/** A named date marker for a project (e.g. "Kickoff: 2026-06-01"). */
+export interface KeyDate {
+  /** Human-readable label */
+  name: string;
+  /** ISO date string (YYYY-MM-DD) */
+  date: string;
+  /** CSS-compatible color for the marker; defaults to amber if not set */
+  color?: string;
+  /** Single-character icon label rendered inside the marker diamond */
+  icon?: string;
+}
+
+/** A named hyperlink attached to a project (e.g. "UI Design", "API Docs"). */
+export interface KeyLink {
+  /** Display label */
+  name: string;
+  /** URL */
+  url: string;
 }
 
 /** A project. Independently declared; may have zero tasks. */
@@ -71,6 +93,14 @@ export interface Project {
   name: string;
   /** CSS-compatible color for bars and headers */
   color?: string;
+  /** Project introduction / summary */
+  description?: string;
+  /** Stakeholder or department requesting the project */
+  requester?: string;
+  /** Custom named date markers (milestones, deadlines, etc.) */
+  keyDates?: KeyDate[];
+  /** Named hyperlinks (design files, docs, etc.) */
+  keyLinks?: KeyLink[];
   /** Connector-specific extra data */
   metadata?: Record<string, unknown>;
 }
@@ -171,6 +201,8 @@ export interface EditsOverlay {
   hidden: string[];
   /** Tasks created locally (no upstream source) */
   localTasks: Task[];
+  /** Project-level field overrides keyed by project ID */
+  projectOverrides?: Record<string, Partial<Pick<Project, 'description' | 'requester' | 'keyDates' | 'keyLinks'>>>;
 }
 
 /** cache/<connector-id>.json — upstream data snapshot. */

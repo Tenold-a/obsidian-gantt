@@ -20,6 +20,7 @@ import {
 export interface PersonGroup {
   personId: string;
   personName: string;
+  position?: string;
   tasks: LocalTask[];
 }
 
@@ -46,9 +47,13 @@ export interface GanttStore {
   mergedTasks: ReturnType<typeof computed<LocalTask[]>>;
   persons: ReturnType<typeof computed<Person[]>>;
   projects: ReturnType<typeof computed<Project[]>>;
+  mergedProjects: ReturnType<typeof computed<Project[]>>;
   personGroups: ReturnType<typeof computed<PersonGroup[]>>;
   projectGroups: ReturnType<typeof computed<ProjectGroup[]>>;
   unassignedProjects: ReturnType<typeof computed<Project[]>>;
+
+  // Sort mode
+  personSortMode: ReturnType<typeof signal<'name' | 'position'>>;
 
   // Selection & highlight
   selectedEntity: ReturnType<typeof signal<SelectedEntity | null>>;
@@ -73,6 +78,7 @@ export interface GanttStore {
   persistEdit(taskId: string, fieldName: string, value: unknown): Promise<void>;
   resetField(taskId: string, fieldName: string): Promise<void>;
   createLocalTask(task: Task): Promise<void>;
+  persistProjectEdit(projectId: string, fieldName: string, value: unknown): Promise<void>;
   selectEntity(entity: SelectedEntity | null): void;
 }
 
@@ -87,6 +93,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
   const currentViewId = signal<string | null>(null);
   const selectedEntity = signal<SelectedEntity | null>(null);
   const sharedScrollLeft = signal<number>(0);
+  const personSortMode = signal<'name' | 'position'>('name');
   const isLoading = signal<boolean>(false);
   const error = signal<string | null>(null);
 
@@ -133,9 +140,18 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     return [...projectMap.values()];
   });
 
+  const mergedProjects = computed<Project[]>(() => {
+    const overrides = edits.value?.projectOverrides ?? {};
+    return projects.value.map(p => {
+      const override = overrides[p.id];
+      if (!override) return p;
+      return { ...p, ...override };
+    });
+  });
+
   const personGroups = computed<PersonGroup[]>(() => {
     const map = new Map<string, LocalTask[]>();
-    const personNameMap = new Map(persons.value.map(p => [p.id, p.name]));
+    const personMap = new Map(persons.value.map(p => [p.id, p]));
 
     for (const t of mergedTasks.value) {
       const key = t.personId.value || '__unassigned__';
@@ -145,14 +161,29 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
     const groups: PersonGroup[] = [];
     for (const [personId, tasks] of map) {
-      const personName = personNameMap.get(personId) ?? 'Unassigned';
-      groups.push({ personId, personName, tasks });
+      const person = personMap.get(personId);
+      groups.push({
+        personId,
+        personName: person?.name ?? 'Unassigned',
+        position: person?.position,
+        tasks,
+      });
     }
 
-    // Unassigned at the end
+    const mode = personSortMode.value;
+
     groups.sort((a, b) => {
       if (a.personId === '__unassigned__') return 1;
       if (b.personId === '__unassigned__') return -1;
+
+      if (mode === 'position') {
+        const pa = a.position;
+        const pb = b.position;
+        if (pa && pb) return pa.localeCompare(pb);
+        if (pa && !pb) return -1;
+        if (!pa && pb) return 1;
+      }
+
       return a.personName.localeCompare(b.personName);
     });
 
@@ -373,6 +404,25 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     edits.value = updated;
   }
 
+  async function persistProjectEdit(projectId: string, fieldName: string, value: unknown): Promise<void> {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId) return;
+
+    const projectOverrides = { ...(currentEdits.projectOverrides ?? {}) };
+    const projectFields = { ...(projectOverrides[projectId] ?? {}) };
+    (projectFields as Record<string, unknown>)[fieldName] = value;
+    projectOverrides[projectId] = projectFields as Partial<Pick<Project, 'description' | 'requester' | 'keyDates' | 'keyLinks'>>;
+
+    const updated: EditsOverlay = {
+      ...currentEdits,
+      projectOverrides,
+    };
+
+    await platform.storage.write(`edits/${viewId}.json`, JSON.stringify(updated, null, 2));
+    edits.value = updated;
+  }
+
   function selectEntity(entity: SelectedEntity | null): void {
     selectedEntity.value = entity;
   }
@@ -385,12 +435,14 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     mergedTasks,
     persons,
     projects,
+    mergedProjects,
     personGroups,
     projectGroups,
     unassignedProjects,
     selectedEntity,
     highlightedTaskIds,
     sharedScrollLeft,
+    personSortMode,
     timelineRange,
     conflicts,
     isLoading,
@@ -400,6 +452,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     persistEdit,
     resetField,
     createLocalTask,
+    persistProjectEdit,
     selectEntity,
   };
 }
