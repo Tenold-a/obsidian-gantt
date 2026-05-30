@@ -364,7 +364,7 @@ export function createDragHandler(store: GanttStore) {
 
   // ─── Card-to-timeline drop ───
 
-  function handleTimelineDrop(e: DragEvent) {
+  function handleTimelineDrop(e: DragEvent, bodyOriginPx?: number) {
     e.preventDefault();
     const data = e.dataTransfer?.getData('text/plain');
     if (!data) return;
@@ -383,8 +383,11 @@ export function createDragHandler(store: GanttStore) {
 
     const totalScrollLeft = timelineEl.scrollLeft || 0;
     const totalScrollTop = timelineEl.scrollTop || 0;
-    const absX = relX + totalScrollLeft;
+    const contentX = relX + totalScrollLeft;
     const contentY = relY + totalScrollTop;
+
+    // Content-space → absolute-space: bodyOriginPx is the absolute pixel at content x=0
+    const absX = contentX + (bodyOriginPx ?? 0);
     const dropDate = pxToDate(absX);
 
     const personGroups = store.personGroups.value;

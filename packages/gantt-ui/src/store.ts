@@ -450,6 +450,21 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     const viewId = currentViewId.value;
     if (!currentEdits || !viewId) return;
 
+    // For locally-created tasks, update the task in localTasks directly
+    // (overrides on local tasks are ignored by the merge engine)
+    const isLocal = currentEdits.localTasks.some(t => t.id === taskId);
+    if (isLocal) {
+      const updated: EditsOverlay = {
+        ...currentEdits,
+        localTasks: currentEdits.localTasks.map(t =>
+          t.id === taskId ? { ...t, [fieldName]: value } : t
+        ),
+      };
+      await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
+      edits.value = updated;
+      return;
+    }
+
     const overrides = { ...currentEdits.overrides };
     const taskOverrides = { ...(overrides[taskId] ?? {}) };
     (taskOverrides as Record<string, unknown>)[fieldName] = value;
@@ -616,11 +631,16 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       deletedProjectIds: currentEdits.deletedProjects ?? [],
     };
 
-    // Collect tasks with overrides as full merged objects
+    // Track which task/project IDs are in the payload for selective clearing
+    const pushedTaskIds = new Set<string>();
+    const pushedProjectIds = new Set<string>();
+
+    // Collect tasks with overrides as full merged objects (upstream tasks only)
     const allMerged = mergeAll(caches.value, currentEdits);
     const overrideIds = new Set(Object.keys(currentEdits.overrides));
     for (const task of allMerged) {
-      if (overrideIds.has(task.id) || task.connectorId === null) {
+      // Only include upstream tasks with overrides (local tasks handled separately)
+      if (task.connectorId !== null && overrideIds.has(task.id)) {
         payload.tasks.push({
           id: task.id,
           title: task.title.value,
@@ -634,12 +654,14 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
           tags: task.tags.value,
           url: task.url.value ?? undefined,
         });
+        pushedTaskIds.add(task.id);
       }
     }
 
-    // Include locally created tasks
+    // Include locally created tasks (connectorId === null)
     for (const lt of currentEdits.localTasks) {
       payload.tasks.push(lt);
+      pushedTaskIds.add(lt.id);
     }
 
     // Collect project overrides
@@ -651,8 +673,13 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
         if (project) {
           payload.projects.push({ ...project, ...overrides });
         }
+        pushedProjectIds.add(projectId);
       }
     }
+
+    // Add deleted task/project IDs
+    for (const id of payload.deletedTaskIds) pushedTaskIds.add(id);
+    for (const id of payload.deletedProjectIds) pushedProjectIds.add(id);
 
     // Try pushing through each connector
     for (const cache of caches.value) {
@@ -681,15 +708,23 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     // If any connector succeeded, clear the pushed edits and refresh caches
     const anySuccess = results.some(r => r.success);
     if (anySuccess) {
+      // Selectively clear only pushed items, preserving unpushed ones
+      const newOverrides = { ...currentEdits.overrides };
+      for (const id of pushedTaskIds) delete newOverrides[id];
+
+      const newProjectOverrides = { ...(currentEdits.projectOverrides ?? {}) };
+      for (const id of pushedProjectIds) delete newProjectOverrides[id];
+
       const cleared: EditsOverlay = {
         ...currentEdits,
-        overrides: {},
+        overrides: newOverrides,
+        // Remove pushed local tasks (NOT keep — filter was inverted)
         localTasks: currentEdits.localTasks.filter(
-          lt => payload.tasks.some(pt => pt.id === lt.id)
+          lt => !pushedTaskIds.has(lt.id)
         ),
-        projectOverrides: {},
-        deletedTasks: [],
-        deletedProjects: [],
+        projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : undefined,
+        deletedTasks: (currentEdits.deletedTasks ?? []).filter(id => !pushedTaskIds.has(id)),
+        deletedProjects: (currentEdits.deletedProjects ?? []).filter(id => !pushedProjectIds.has(id)),
       };
       await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(cleared, null, 2));
       edits.value = cleared;

@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+[brief description]
+
+## Requirements
 
 ### Requirement: Standalone HTML application
 The system SHALL provide a standalone web application that renders the full Gantt chart without requiring Obsidian. The web app SHALL be a single HTML file with bundled JS and CSS.

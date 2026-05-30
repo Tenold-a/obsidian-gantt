@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+[brief description]
+
+## Requirements
 
 ### Requirement: Move task bar drag
 The system SHALL support dragging a task bar horizontally to change both its start and end dates simultaneously, preserving the task's duration.

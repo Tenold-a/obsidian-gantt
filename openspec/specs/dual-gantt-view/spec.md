@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+[brief description]
+
+## Requirements
 
 ### Requirement: Split view layout
 The system SHALL display two Gantt charts stacked vertically: the upper pane showing tasks grouped by person, and the lower pane showing tasks grouped by project. A resize handle SHALL separate them, allowing adjustment of the vertical space allocation.

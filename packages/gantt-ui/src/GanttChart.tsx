@@ -155,7 +155,7 @@ function Timeline(props: {
   onTaskClick: (taskId: string) => void;
   onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
   onKeyDatePointerDown?: (e: PointerEvent, projectId: string, keyDateIndex: number, currentDate: string) => void;
-  onDrop: (e: DragEvent) => void;
+  onDrop: (e: DragEvent, bodyOriginPx?: number) => void;
   onDragOver: (e: DragEvent) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -397,8 +397,22 @@ function Timeline(props: {
           position: 'relative',
         }}
         onScroll={handleScroll}
-        onDrop={props.onDrop}
-        onDragOver={props.onDragOver}
+        onDrop={(e) => props.onDrop(e, bodyOriginPx)}
+        onDragOver={(e) => {
+          props.onDragOver(e);
+          // Auto-scroll when dragging from outside (sidebar) — native
+          // HTML5 auto-scroll only triggers for drags started within the
+          // same scrollable container. We handle edge-triggered scroll here.
+          const el = containerRef.current;
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const edge = 40; // px threshold from edge
+          const speed = 8; // px per event
+          if (e.clientX - r.left < edge) el.scrollLeft -= speed;
+          else if (r.right - e.clientX < edge) el.scrollLeft += speed;
+          if (e.clientY - r.top < edge) el.scrollTop -= speed;
+          else if (r.bottom - e.clientY < edge) el.scrollTop += speed;
+        }}
       >
       <div
         style={{
@@ -978,21 +992,23 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
             >{project.name}</span>
           )}
         </div>
-        <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: '2px', flexShrink: 0 }}>
           {editing.value ? (
             <>
               <button
                 onClick={handleSave}
+                title="Save changes"
                 style={{
-                  padding: '2px 8px', border: '1px solid var(--interactive-accent, #4A90D9)',
+                  padding: '3px 8px', border: '1px solid var(--interactive-accent, #4A90D9)',
                   borderRadius: '4px', background: 'var(--interactive-accent, #4A90D9)', color: '#fff',
                   cursor: 'pointer', fontSize: '11px',
                 }}
               >Save</button>
               <button
                 onClick={handleCancel}
+                title="Cancel editing"
                 style={{
-                  padding: '2px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
+                  padding: '3px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
                   borderRadius: '4px', background: 'var(--background-secondary, #f5f5f5)',
                   cursor: 'pointer', fontSize: '11px',
                 }}
@@ -1002,28 +1018,31 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
             <>
               <button
                 onClick={handleEdit}
+                title="Edit project details"
                 style={{
-                  padding: '2px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
-                  borderRadius: '4px', background: 'var(--background-secondary, #f5f5f5)',
-                  cursor: 'pointer', fontSize: '11px',
+                  padding: '2px 4px', border: 'none', borderRadius: '3px',
+                  background: 'transparent', cursor: 'pointer', fontSize: '13px',
+                  color: 'var(--text-muted, #999)', lineHeight: 1,
                 }}
-              >Edit</button>
+              >✎</button>
               <button
                 onClick={() => props.onDelete?.(project.id, project.name)}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px',
-                  lineHeight: 1, padding: '0 2px', color: 'var(--text-error, #e00)',
-                }}
                 title="Delete project"
+                style={{
+                  padding: '2px 4px', border: 'none', borderRadius: '3px',
+                  background: 'transparent', cursor: 'pointer', fontSize: '13px',
+                  color: 'var(--text-error, #e00)', lineHeight: 1,
+                }}
               >🗑</button>
               <button
                 onClick={() => store.selectEntity(null)}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px',
-                  lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
-                }}
                 title="Close detail panel"
-              >x</button>
+                style={{
+                  padding: '2px 4px', border: 'none', borderRadius: '3px',
+                  background: 'transparent', cursor: 'pointer', fontSize: '14px',
+                  color: 'var(--text-muted, #999)', lineHeight: 1,
+                }}
+              >✕</button>
             </>
           )}
         </div>
@@ -1046,6 +1065,33 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+      </div>
+
+      {/* Draggable create-task area */}
+      <div
+        draggable={true}
+        onDragStart={(e) => {
+          e.dataTransfer?.setData('text/plain', JSON.stringify({ projectId: project.id, projectName: project.name }));
+        }}
+        class="gantt-drag-create-area"
+        title="Drag to person timeline to create a new task for this project"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          padding: '8px 10px',
+          marginBottom: '12px',
+          border: '2px dashed var(--interactive-accent, #4A90D9)',
+          borderRadius: '6px',
+          background: 'rgba(74, 144, 217, 0.04)',
+          cursor: 'grab',
+          fontSize: '12px',
+          color: 'var(--interactive-accent, #4A90D9)',
+          transition: 'background 0.15s, border-color 0.15s',
+        }}
+      >
+        <span style={{ fontSize: '14px', lineHeight: 1, flexShrink: 0 }}>⠿</span>
+        <span style={{ fontWeight: 500 }}>Drag to person timeline to create task</span>
       </div>
 
       {/* Description */}
@@ -2192,8 +2238,8 @@ export function GanttChart(props: {
     dragHandler.onKeyDatePointerDown(e, projectId, keyDateIndex, currentDate);
   }
 
-  function handleDrop(e: DragEvent) {
-    dragHandler.handleTimelineDrop(e);
+  function handleDrop(e: DragEvent, bodyOriginPx?: number) {
+    dragHandler.handleTimelineDrop(e, bodyOriginPx);
   }
 
   function handleDragOver(e: DragEvent) {

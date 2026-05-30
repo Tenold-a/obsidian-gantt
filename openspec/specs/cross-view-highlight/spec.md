@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+[brief description]
+
+## Requirements
 
 ### Requirement: Selection state model
 The system SHALL maintain a global selection state with fields: `type` ("project" | "task" | "person" | null) and `id` (string). The selection SHALL be stored as a Preact signal.

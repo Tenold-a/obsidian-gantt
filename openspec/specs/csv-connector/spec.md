@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+[brief description]
+
+## Requirements
 
 ### Requirement: CSV connector reads multiple CSV files by ID reference
 The CSV connector SHALL read three CSV files (persons, projects, tasks) linked by ID references, not a single merged spreadsheet.

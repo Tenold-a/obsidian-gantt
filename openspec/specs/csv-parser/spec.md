@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+[brief description]
+
+## Requirements
 
 ### Requirement: CSV parser parses header row and data rows
 The system SHALL provide a `parseCSV` function in `gantt-core` that accepts a CSV text string and returns an array of record objects keyed by header row values.

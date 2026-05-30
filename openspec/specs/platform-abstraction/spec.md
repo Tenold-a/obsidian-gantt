@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+[brief description]
+
+## Requirements
 
 ### Requirement: GanttPlatform interface
 The system SHALL define a `GanttPlatform` interface that abstracts all platform-specific concerns. Core logic and UI components SHALL depend only on this interface and never on platform-specific APIs directly.

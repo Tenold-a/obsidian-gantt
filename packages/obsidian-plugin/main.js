@@ -1684,6 +1684,18 @@ function createGanttStore(platform) {
     const viewId = currentViewId.value;
     if (!currentEdits || !viewId)
       return;
+    const isLocal = currentEdits.localTasks.some((t4) => t4.id === taskId);
+    if (isLocal) {
+      const updated2 = {
+        ...currentEdits,
+        localTasks: currentEdits.localTasks.map(
+          (t4) => t4.id === taskId ? { ...t4, [fieldName]: value } : t4
+        )
+      };
+      await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated2, null, 2));
+      edits.value = updated2;
+      return;
+    }
     const overrides = { ...currentEdits.overrides };
     const taskOverrides = { ...overrides[taskId] ?? {} };
     taskOverrides[fieldName] = value;
@@ -1821,10 +1833,12 @@ function createGanttStore(platform) {
       deletedTaskIds: currentEdits.deletedTasks ?? [],
       deletedProjectIds: currentEdits.deletedProjects ?? []
     };
+    const pushedTaskIds = /* @__PURE__ */ new Set();
+    const pushedProjectIds = /* @__PURE__ */ new Set();
     const allMerged = mergeAll(caches.value, currentEdits);
     const overrideIds = new Set(Object.keys(currentEdits.overrides));
     for (const task of allMerged) {
-      if (overrideIds.has(task.id) || task.connectorId === null) {
+      if (task.connectorId !== null && overrideIds.has(task.id)) {
         payload.tasks.push({
           id: task.id,
           title: task.title.value,
@@ -1838,10 +1852,12 @@ function createGanttStore(platform) {
           tags: task.tags.value,
           url: task.url.value ?? void 0
         });
+        pushedTaskIds.add(task.id);
       }
     }
     for (const lt of currentEdits.localTasks) {
       payload.tasks.push(lt);
+      pushedTaskIds.add(lt.id);
     }
     if (currentEdits.projectOverrides) {
       for (const [projectId, overrides] of Object.entries(currentEdits.projectOverrides)) {
@@ -1849,8 +1865,13 @@ function createGanttStore(platform) {
         if (project) {
           payload.projects.push({ ...project, ...overrides });
         }
+        pushedProjectIds.add(projectId);
       }
     }
+    for (const id of payload.deletedTaskIds)
+      pushedTaskIds.add(id);
+    for (const id of payload.deletedProjectIds)
+      pushedProjectIds.add(id);
     for (const cache of caches.value) {
       try {
         const configPath = `connectors/${safeName(cache.connectorId)}.json`;
@@ -1873,15 +1894,22 @@ function createGanttStore(platform) {
     }
     const anySuccess = results.some((r4) => r4.success);
     if (anySuccess) {
+      const newOverrides = { ...currentEdits.overrides };
+      for (const id of pushedTaskIds)
+        delete newOverrides[id];
+      const newProjectOverrides = { ...currentEdits.projectOverrides ?? {} };
+      for (const id of pushedProjectIds)
+        delete newProjectOverrides[id];
       const cleared = {
         ...currentEdits,
-        overrides: {},
+        overrides: newOverrides,
+        // Remove pushed local tasks (NOT keep — filter was inverted)
         localTasks: currentEdits.localTasks.filter(
-          (lt) => payload.tasks.some((pt) => pt.id === lt.id)
+          (lt) => !pushedTaskIds.has(lt.id)
         ),
-        projectOverrides: {},
-        deletedTasks: [],
-        deletedProjects: []
+        projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : void 0,
+        deletedTasks: (currentEdits.deletedTasks ?? []).filter((id) => !pushedTaskIds.has(id)),
+        deletedProjects: (currentEdits.deletedProjects ?? []).filter((id) => !pushedProjectIds.has(id))
       };
       await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(cleared, null, 2));
       edits.value = cleared;
@@ -2674,7 +2702,7 @@ function createDragHandler(store) {
     if (fn)
       await fn();
   }
-  function handleTimelineDrop(e4) {
+  function handleTimelineDrop(e4, bodyOriginPx) {
     e4.preventDefault();
     const data = e4.dataTransfer?.getData("text/plain");
     if (!data)
@@ -2691,8 +2719,9 @@ function createDragHandler(store) {
     const relY = e4.clientY - rect.top;
     const totalScrollLeft = timelineEl.scrollLeft || 0;
     const totalScrollTop = timelineEl.scrollTop || 0;
-    const absX = relX + totalScrollLeft;
+    const contentX = relX + totalScrollLeft;
     const contentY = relY + totalScrollTop;
+    const absX = contentX + (bodyOriginPx ?? 0);
     const dropDate = pxToDate(absX);
     const personGroups = store.personGroups.value;
     const rowIndex = findRowIndex(personGroups, contentY);
@@ -3006,8 +3035,24 @@ function Timeline(props) {
           position: "relative"
         },
         onScroll: handleScroll,
-        onDrop: props.onDrop,
-        onDragOver: props.onDragOver,
+        onDrop: (e4) => props.onDrop(e4, bodyOriginPx),
+        onDragOver: (e4) => {
+          props.onDragOver(e4);
+          const el = containerRef.current;
+          if (!el)
+            return;
+          const r4 = el.getBoundingClientRect();
+          const edge = 40;
+          const speed = 8;
+          if (e4.clientX - r4.left < edge)
+            el.scrollLeft -= speed;
+          else if (r4.right - e4.clientX < edge)
+            el.scrollLeft += speed;
+          if (e4.clientY - r4.top < edge)
+            el.scrollTop -= speed;
+          else if (r4.bottom - e4.clientY < edge)
+            el.scrollTop += speed;
+        },
         children: /* @__PURE__ */ u4(
           "div",
           {
@@ -3540,13 +3585,14 @@ function ProjectDetail(props) {
               }
             )
           ] }),
-          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px", flexShrink: 0 }, children: editing.value ? /* @__PURE__ */ u4(S, { children: [
+          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "2px", flexShrink: 0 }, children: editing.value ? /* @__PURE__ */ u4(S, { children: [
             /* @__PURE__ */ u4(
               "button",
               {
                 onClick: handleSave,
+                title: "Save changes",
                 style: {
-                  padding: "2px 8px",
+                  padding: "3px 8px",
                   border: "1px solid var(--interactive-accent, #4A90D9)",
                   borderRadius: "4px",
                   background: "var(--interactive-accent, #4A90D9)",
@@ -3561,8 +3607,9 @@ function ProjectDetail(props) {
               "button",
               {
                 onClick: handleCancel,
+                title: "Cancel editing",
                 style: {
-                  padding: "2px 8px",
+                  padding: "3px 8px",
                   border: "1px solid var(--background-modifier-border, #ccc)",
                   borderRadius: "4px",
                   background: "var(--background-secondary, #f5f5f5)",
@@ -3577,31 +3624,35 @@ function ProjectDetail(props) {
               "button",
               {
                 onClick: handleEdit,
+                title: "Edit project details",
                 style: {
-                  padding: "2px 8px",
-                  border: "1px solid var(--background-modifier-border, #ccc)",
-                  borderRadius: "4px",
-                  background: "var(--background-secondary, #f5f5f5)",
+                  padding: "2px 4px",
+                  border: "none",
+                  borderRadius: "3px",
+                  background: "transparent",
                   cursor: "pointer",
-                  fontSize: "11px"
+                  fontSize: "13px",
+                  color: "var(--text-muted, #999)",
+                  lineHeight: 1
                 },
-                children: "Edit"
+                children: "\u270E"
               }
             ),
             /* @__PURE__ */ u4(
               "button",
               {
                 onClick: () => props.onDelete?.(project.id, project.name),
-                style: {
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: "14px",
-                  lineHeight: 1,
-                  padding: "0 2px",
-                  color: "var(--text-error, #e00)"
-                },
                 title: "Delete project",
+                style: {
+                  padding: "2px 4px",
+                  border: "none",
+                  borderRadius: "3px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "13px",
+                  color: "var(--text-error, #e00)",
+                  lineHeight: 1
+                },
                 children: "\u{1F5D1}"
               }
             ),
@@ -3609,17 +3660,18 @@ function ProjectDetail(props) {
               "button",
               {
                 onClick: () => store.selectEntity(null),
-                style: {
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: "16px",
-                  lineHeight: 1,
-                  padding: "0 2px",
-                  color: "var(--text-muted, #999)"
-                },
                 title: "Close detail panel",
-                children: "x"
+                style: {
+                  padding: "2px 4px",
+                  border: "none",
+                  borderRadius: "3px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "14px",
+                  color: "var(--text-muted, #999)",
+                  lineHeight: 1
+                },
+                children: "\u2715"
               }
             )
           ] }) })
@@ -3645,6 +3697,35 @@ function ProjectDetail(props) {
             }
           )
         ] }),
+        /* @__PURE__ */ u4(
+          "div",
+          {
+            draggable: true,
+            onDragStart: (e4) => {
+              e4.dataTransfer?.setData("text/plain", JSON.stringify({ projectId: project.id, projectName: project.name }));
+            },
+            class: "gantt-drag-create-area",
+            title: "Drag to person timeline to create a new task for this project",
+            style: {
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "8px 10px",
+              marginBottom: "12px",
+              border: "2px dashed var(--interactive-accent, #4A90D9)",
+              borderRadius: "6px",
+              background: "rgba(74, 144, 217, 0.04)",
+              cursor: "grab",
+              fontSize: "12px",
+              color: "var(--interactive-accent, #4A90D9)",
+              transition: "background 0.15s, border-color 0.15s"
+            },
+            children: [
+              /* @__PURE__ */ u4("span", { style: { fontSize: "14px", lineHeight: 1, flexShrink: 0 }, children: "\u283F" }),
+              /* @__PURE__ */ u4("span", { style: { fontWeight: 500 }, children: "Drag to person timeline to create task" })
+            ]
+          }
+        ),
         /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
           /* @__PURE__ */ u4("div", { style: labelStyle, children: "Description" }),
           editing.value ? /* @__PURE__ */ u4(
@@ -4746,8 +4827,8 @@ function GanttChart(props) {
   function handleKeyDatePointerDown(e4, projectId, keyDateIndex, currentDate) {
     dragHandler.onKeyDatePointerDown(e4, projectId, keyDateIndex, currentDate);
   }
-  function handleDrop(e4) {
-    dragHandler.handleTimelineDrop(e4);
+  function handleDrop(e4, bodyOriginPx) {
+    dragHandler.handleTimelineDrop(e4, bodyOriginPx);
   }
   function handleDragOver(e4) {
     dragHandler.handleTimelineDragOver(e4);
