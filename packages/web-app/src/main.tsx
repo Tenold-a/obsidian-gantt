@@ -65,6 +65,9 @@ function createWebConnectorContext(config: Record<string, unknown>): ConnectorCo
       }
       return await response.text();
     },
+    writeFile: async (path: string, content: string): Promise<void> => {
+      localStorage.setItem(`gantt:file:${path}`, content);
+    },
     parseCSV: (text: string, options?: CsvParseOptions): Record<string, string>[] => {
       return parseCSV(text, options);
     },

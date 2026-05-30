@@ -246,6 +246,8 @@ export function TaskBar(props: {
   const { data, groupStartY, laneIndex, rowHeight, laneOffset, paneType } = props;
   const barHeight = rowHeight * 0.6;
   const barTop = groupStartY + (rowHeight - barHeight) / 2 + laneIndex * laneOffset;
+  const barWidth = Math.max(data.width, 4);
+  const showHandles = barWidth >= 12;
 
   return (
     <div
@@ -254,7 +256,7 @@ export function TaskBar(props: {
         position: 'absolute',
         left: `${data.left}px`,
         top: `${barTop}px`,
-        width: `${Math.max(data.width, 4)}px`,
+        width: `${barWidth}px`,
         height: `${barHeight}px`,
         background: data.color,
         borderRadius: '4px',
@@ -277,7 +279,7 @@ export function TaskBar(props: {
       onPointerDown={(e) => {
         const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
         const relX = e.clientX - rect.left;
-        const edge = relX < 6 ? 'left' : relX > rect.width - 6 ? 'right' : 'body';
+        const edge = relX < 8 ? 'left' : relX > rect.width - 8 ? 'right' : 'body';
         props.onPointerDown(e, data.id, edge, paneType);
       }}
       onClick={(e) => {
@@ -286,7 +288,9 @@ export function TaskBar(props: {
       }}
       title={`${data.title}`}
     >
+      {showHandles && <span class="gantt-bar-handle gantt-bar-handle-left" />}
       {data.width > 40 ? data.title : ''}
+      {showHandles && <span class="gantt-bar-handle gantt-bar-handle-right" />}
     </div>
   );
 }
@@ -423,6 +427,7 @@ export function KeyDateMarker(props: {
   date: string;
   color?: string;
   icon?: string;
+  onPointerDown?: (e: PointerEvent) => void;
 }) {
   const size = 10;
   const bg = props.color ?? 'var(--gantt-key-date-color, #E5C07B)';
@@ -430,6 +435,7 @@ export function KeyDateMarker(props: {
     <div
       class="gantt-key-date-marker"
       title={`${props.name}: ${props.date}`}
+      onPointerDown={props.onPointerDown}
       style={{
         position: 'absolute',
         left: `${props.leftPx - size / 2}px`,
@@ -440,7 +446,7 @@ export function KeyDateMarker(props: {
         transform: 'rotate(45deg)',
         zIndex: 3,
         pointerEvents: 'auto',
-        cursor: 'help',
+        cursor: props.onPointerDown ? 'ew-resize' : 'help',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

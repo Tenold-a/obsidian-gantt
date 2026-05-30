@@ -211,4 +211,257 @@ function transform(rawData, ctx) {
   };
 }
 
-module.exports = { fetch: fetch, transform: transform };
+/**
+ * Serialize an array of field values into a CSV row string.
+ * Fields containing commas, double quotes, or newlines are quoted and escaped.
+ */
+function toCSVRow(fields, delimiter) {
+  var d = delimiter || ',';
+  var escaped = [];
+  for (var i = 0; i < fields.length; i++) {
+    var val = fields[i] == null ? '' : String(fields[i]);
+    if (val.indexOf(d) !== -1 || val.indexOf('"') !== -1 || val.indexOf('\n') !== -1 || val.indexOf('\r') !== -1) {
+      escaped.push('"' + val.replace(/"/g, '""') + '"');
+    } else {
+      escaped.push(val);
+    }
+  }
+  return escaped.join(d);
+}
+
+/**
+ * Push local changes back to CSV files.
+ *
+ * Reads the current CSV, updates matching rows by ID, appends new rows,
+ * and removes deleted rows. Then writes the updated CSV back.
+ */
+async function push(payload, ctx) {
+  if (!ctx.writeFile) {
+    return { success: false, error: 'ctx.writeFile is not available on this platform' };
+  }
+
+  var paths = ctx.config.paths;
+  if (!paths || !paths.tasks) {
+    return { success: false, error: 'No CSV paths configured (config.paths.tasks is required)' };
+  }
+
+  var mapping = getMapping(ctx.config);
+  var delimiter = ctx.config.delimiter || ',';
+
+  try {
+    // ── Push tasks ──
+    if (payload.tasks && payload.tasks.length > 0 || payload.deletedTaskIds && payload.deletedTaskIds.length > 0) {
+      await pushCSV(
+        ctx, paths.tasks, delimiter,
+        mapping.taskId,
+        [mapping.taskId, mapping.taskTitle, mapping.taskStartDate, mapping.taskEndDate, mapping.taskProgress, mapping.taskPersonId, mapping.taskProjectId],
+        payload.tasks || [],
+        payload.deletedTaskIds || [],
+        function (task) {
+          var row = {};
+          row[mapping.taskId] = task.id;
+          if (task.title !== undefined) row[mapping.taskTitle] = task.title;
+          if (task.startDate !== undefined) row[mapping.taskStartDate] = task.startDate;
+          if (task.endDate !== undefined) row[mapping.taskEndDate] = task.endDate;
+          if (task.progress !== undefined) row[mapping.taskProgress] = String(task.progress);
+          if (task.personId !== undefined) row[mapping.taskPersonId] = task.personId;
+          if (task.projectId !== undefined) row[mapping.taskProjectId] = task.projectId;
+          return row;
+        }
+      );
+    }
+
+    // ── Push persons ──
+    if (payload.persons && payload.persons.length > 0) {
+      await pushCSV(
+        ctx, paths.persons, delimiter,
+        mapping.personId,
+        [mapping.personId, mapping.personName, mapping.personPosition],
+        payload.persons,
+        [],
+        function (person) {
+          var row = {};
+          row[mapping.personId] = person.id;
+          if (person.name !== undefined) row[mapping.personName] = person.name;
+          if (person.position !== undefined) row[mapping.personPosition] = person.position;
+          return row;
+        }
+      );
+    }
+
+    // ── Push projects ──
+    if (payload.projects && payload.projects.length > 0) {
+      await pushCSV(
+        ctx, paths.projects, delimiter,
+        mapping.projectId,
+        [mapping.projectId, mapping.projectName, mapping.projectRequesterId, mapping.projectColor],
+        payload.projects,
+        payload.deletedProjectIds || [],
+        function (project) {
+          var row = {};
+          row[mapping.projectId] = project.id;
+          if (project.name !== undefined) row[mapping.projectName] = project.name;
+          if (project.requester !== undefined) row[mapping.projectRequesterId] = project.requester;
+          if (project.color !== undefined) row[mapping.projectColor] = project.color;
+          return row;
+        }
+      );
+    }
+
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message || String(e) };
+  }
+}
+
+/**
+ * Update a single CSV file: read, find matching rows by ID, update/insert/delete, write back.
+ * Preserves the original CSV header line and any extra columns not being modified.
+ */
+async function pushCSV(ctx, path, delimiter, idColumn, knownColumns, entities, deletedIds, buildRow) {
+  var content = await ctx.readFile(path);
+  var lines = content.split(/\r?\n/);
+
+  // Extract the actual header line (first non-empty line)
+  var headerLine = '';
+  var headerStartIdx = 0;
+  for (var li = 0; li < lines.length; li++) {
+    if (lines[li].trim() !== '') {
+      headerLine = lines[li];
+      headerStartIdx = li;
+      break;
+    }
+  }
+
+  if (!headerLine) {
+    // File is empty — write header from knownColumns + entities
+    var newLines = [toCSVRow(knownColumns, delimiter)];
+    for (var i = 0; i < entities.length; i++) {
+      var rowData = buildRow(entities[i]);
+      var fields = knownColumns.map(function (col) {
+        return rowData[col] != null ? String(rowData[col]) : '';
+      });
+      newLines.push(toCSVRow(fields, delimiter));
+    }
+    await ctx.writeFile(path, newLines.join('\n') + '\n');
+    return;
+  }
+
+  // Parse the actual headers from the file
+  var actualHeaders = parseCSVLine(headerLine, delimiter);
+
+  // Build a combined header set: actual headers + any knownColumns not in actual
+  var allHeaders = actualHeaders.slice();
+  for (var kc = 0; kc < knownColumns.length; kc++) {
+    var kcol = knownColumns[kc];
+    var found = false;
+    for (var ah = 0; ah < allHeaders.length; ah++) {
+      if (allHeaders[ah] === kcol) { found = true; break; }
+    }
+    if (!found) allHeaders.push(kcol);
+  }
+
+  // Parse data rows (skip header line)
+  var dataLines = [];
+  for (var dl = headerStartIdx + 1; dl < lines.length; dl++) {
+    if (lines[dl].trim() !== '') dataLines.push(lines[dl]);
+  }
+  var csvData = headerLine + '\n' + dataLines.join('\n');
+  var records = ctx.parseCSV(csvData, { delimiter: delimiter });
+
+  // Build a map of ID → row index
+  var idIndexMap = {};
+  for (var ri = 0; ri < records.length; ri++) {
+    var rowId = (records[ri][idColumn] || '').trim();
+    if (rowId) {
+      idIndexMap[rowId] = ri;
+    }
+  }
+
+  // Build a set of deleted IDs for fast lookup
+  var deletedSet = {};
+  if (deletedIds) {
+    for (var di = 0; di < deletedIds.length; di++) {
+      deletedSet[deletedIds[di]] = true;
+    }
+  }
+
+  // Apply updates to existing rows
+  for (var ei = 0; ei < entities.length; ei++) {
+    var entity = entities[ei];
+    var rowData = buildRow(entity);
+    var entityId = entity.id;
+
+    if (idIndexMap.hasOwnProperty(entityId)) {
+      // Update existing row — only overwrite fields present in rowData
+      var targetIdx = idIndexMap[entityId];
+      var dataKeys = Object.keys(rowData);
+      for (var dk = 0; dk < dataKeys.length; dk++) {
+        var dcol = dataKeys[dk];
+        records[targetIdx][dcol] = rowData[dcol];
+      }
+    } else {
+      // Append new row with all known columns
+      var newRow = {};
+      for (var h2 = 0; h2 < allHeaders.length; h2++) {
+        var col2 = allHeaders[h2];
+        newRow[col2] = rowData.hasOwnProperty(col2) ? rowData[col2] : '';
+      }
+      records.push(newRow);
+    }
+  }
+
+  // Write back: use actualHeaders order, then any extra known columns
+  var outHeaders = actualHeaders.slice();
+  for (var ek = 0; ek < knownColumns.length; ek++) {
+    var ekcol = knownColumns[ek];
+    var ekfound = false;
+    for (var eka = 0; eka < outHeaders.length; eka++) {
+      if (outHeaders[eka] === ekcol) { ekfound = true; break; }
+    }
+    if (!ekfound) outHeaders.push(ekcol);
+  }
+
+  var outLines = [toCSVRow(outHeaders, delimiter)];
+  for (var oi = 0; oi < records.length; oi++) {
+    var recordId = (records[oi][idColumn] || '').trim();
+    if (deletedSet.hasOwnProperty(recordId)) continue;
+    var outFields = [];
+    for (var oh = 0; oh < outHeaders.length; oh++) {
+      var val = records[oi][outHeaders[oh]];
+      outFields.push(val != null ? val : '');
+    }
+    outLines.push(toCSVRow(outFields, delimiter));
+  }
+
+  await ctx.writeFile(path, outLines.join('\n') + '\n');
+}
+
+/**
+ * Parse a single CSV line into fields (no header mapping).
+ */
+function parseCSVLine(line, delimiter) {
+  var fields = [];
+  var current = '';
+  var inQuotes = false;
+  for (var i = 0; i < line.length; i++) {
+    var ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && i + 1 < line.length && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === delimiter && !inQuotes) {
+      fields.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
+}
+
+module.exports = { fetch: fetch, transform: transform, push: push };

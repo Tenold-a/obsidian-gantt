@@ -1,11 +1,80 @@
 import type { Task, LocalTask, TaskOverride, EditsOverlay, Conflict, FieldWithSource, FieldSource, CacheFile } from './index';
 
 // ============================================================
+// Status cascade
+// ============================================================
+
+/**
+ * Apply project→tasks status cascade: when a project is 'completed',
+ * all its non-cancelled tasks become 'completed'.
+ * Also handles tasks→project: when all non-cancelled tasks in a project
+ * are 'completed' and no manual project override exists, mark project completed.
+ * Returns the updated tasks with cascade applied.
+ */
+export function applyStatusCascade(
+  tasks: LocalTask[],
+  caches: CacheFile[],
+  edits: EditsOverlay,
+): LocalTask[] {
+  // Build a map of effective project status
+  const projectStatuses = new Map<string, string>();
+
+  for (const cache of caches) {
+    for (const project of cache.projects) {
+      // Check for project overrides first
+      const projectOverride = edits.projectOverrides?.[project.id];
+      const effectiveStatus = projectOverride?.status ?? project.status ?? 'pending';
+      projectStatuses.set(project.id, effectiveStatus);
+    }
+  }
+
+  // Project→tasks cascade: completed project forces all non-cancelled tasks to completed
+  for (const task of tasks) {
+    const projectId = task.projectId.value;
+    if (!projectId) continue;
+    const projectStatus = projectStatuses.get(projectId);
+    if (projectStatus === 'completed' && task.status.value !== 'cancelled') {
+      task.status = { value: 'completed', source: 'upstream' };
+    }
+  }
+
+  // Tasks→project cascade: if all non-cancelled tasks in a project are completed
+  // and no manual project override exists, mark the project as completed
+  const projectTaskCounts = new Map<string, { total: number; completed: number; cancelled: number }>();
+
+  for (const task of tasks) {
+    const projectId = task.projectId.value;
+    if (!projectId) continue;
+    if (!projectTaskCounts.has(projectId)) {
+      projectTaskCounts.set(projectId, { total: 0, completed: 0, cancelled: 0 });
+    }
+    const counts = projectTaskCounts.get(projectId)!;
+    counts.total++;
+    if (task.status.value === 'completed') counts.completed++;
+    if (task.status.value === 'cancelled') counts.cancelled++;
+  }
+
+  for (const [projectId, counts] of projectTaskCounts) {
+    const nonCancelled = counts.total - counts.cancelled;
+    if (nonCancelled > 0 && counts.completed >= nonCancelled) {
+      // All non-cancelled tasks are completed — mark project completed
+      // Only if no manual override prevents it
+      const hasManualOverride = edits.projectOverrides?.[projectId]?.status !== undefined;
+      if (!hasManualOverride) {
+        projectStatuses.set(projectId, 'completed');
+      }
+    }
+  }
+
+  return tasks;
+}
+
+// ============================================================
 // Merge single task
 // ============================================================
 
 const EDITABLE_FIELDS = [
-  'title', 'startDate', 'endDate', 'progress',
+  'title', 'startDate', 'endDate', 'progress', 'status',
   'personId', 'projectId', 'parentId', 'dependencies', 'tags',
 ] as const;
 
@@ -39,6 +108,7 @@ export function mergeFields(
     startDate: get('startDate', task.startDate ?? null),
     endDate: get('endDate', task.endDate ?? null),
     progress: get('progress', task.progress ?? 0),
+    status: get('status', task.status ?? 'pending'),
     personId: get('personId', task.personId ?? null),
     projectId: get('projectId', task.projectId ?? null),
     parentId: get('parentId', task.parentId ?? null),
@@ -62,6 +132,7 @@ function localToLocalTask(task: Task): LocalTask {
     startDate: fieldWithSource(task.startDate ?? null, 'manual'),
     endDate: fieldWithSource(task.endDate ?? null, 'manual'),
     progress: fieldWithSource(task.progress ?? 0, 'manual'),
+    status: fieldWithSource(task.status ?? 'pending', 'manual'),
     personId: fieldWithSource(task.personId ?? null, 'manual'),
     projectId: fieldWithSource(task.projectId ?? null, 'manual'),
     parentId: fieldWithSource(task.parentId ?? null, 'manual'),
@@ -93,11 +164,13 @@ export function mergeTasks(
 ): LocalTask[] {
   const overrideMap = edits.overrides ?? {};
   const hidden = new Set(edits.hidden ?? []);
+  const deleted = new Set(edits.deletedTasks ?? []);
   const result: LocalTask[] = [];
 
   // 1. Merge cached tasks with overrides
   for (const task of cachedTasks) {
     if (hidden.has(task.id)) continue;
+    if (deleted.has(task.id)) continue;
     const overrides = overrideMap[task.id];
     result.push(mergeFields(task, overrides, connectorId));
   }
@@ -220,5 +293,5 @@ export function mergeAll(
     allTasks.push(...merged);
   }
 
-  return allTasks;
+  return applyStatusCascade(allTasks, caches, edits);
 }

@@ -5,6 +5,42 @@ import { TIMELINE_ORIGIN, dateToAbsolutePixel, absolutePixelToDate } from './com
 
 const DAY_WIDTH = 30;
 const ROW_HEIGHT = 40;
+const LANE_OFFSET = 12;
+
+/** Compute the actual height of a person group accounting for lane stacking. */
+function computeGroupHeight(tasks: Array<{ startDate: { value: string | null }; endDate: { value: string | null } }>): number {
+  const ranges: Array<{ start: string; end: string }> = [];
+  for (const t of tasks) {
+    const s = t.startDate.value;
+    if (!s) continue;
+    ranges.push({ start: s, end: t.endDate.value ?? s });
+  }
+  ranges.sort((a, b) => a.start.localeCompare(b.start));
+  const lanes: string[] = [];
+  for (const dr of ranges) {
+    let assigned = false;
+    for (let li = 0; li < lanes.length; li++) {
+      if (dr.start >= lanes[li]) {
+        lanes[li] = dr.end;
+        assigned = true;
+        break;
+      }
+    }
+    if (!assigned) lanes.push(dr.end);
+  }
+  return ROW_HEIGHT + (Math.max(1, lanes.length) - 1) * LANE_OFFSET;
+}
+
+/** Find which group index a content-space Y position falls into. */
+function findRowIndex(groups: Array<{ tasks: Array<{ startDate: { value: string | null }; endDate: { value: string | null } }> }>, contentY: number): number {
+  let accumulatedY = 0;
+  for (let i = 0; i < groups.length; i++) {
+    const h = computeGroupHeight(groups[i].tasks);
+    if (contentY < accumulatedY + h) return i;
+    accumulatedY += h;
+  }
+  return groups.length - 1;
+}
 
 /** Convert date to absolute pixel from TIMELINE_ORIGIN. */
 function dateToPx(date: string): number {
@@ -21,6 +57,7 @@ function pxToDate(px: number): string {
 // ============================================================
 
 export interface DragState {
+  dragMode: 'task' | 'keyDate';
   taskId: string;
   edge: 'left' | 'right' | 'body';
   paneType: 'person' | 'project';
@@ -42,6 +79,14 @@ export interface DragState {
   scrollTopStart: number;
   /** Y position of the timeline body top at drag start */
   bodyTopStart: number;
+  /** Key date drag: index within project.keyDates */
+  keyDateIndex?: number;
+  /** Key date drag: project that owns the key date */
+  projectId?: string;
+  /** Key date drag: original date string */
+  originalKeyDate?: string;
+  /** Key date drag: current date string */
+  currentKeyDate?: string;
 }
 
 export const dragState = signal<DragState | null>(null);
@@ -93,6 +138,7 @@ export function createDragHandler(store: GanttStore) {
     const scrollEl = target.closest('.gantt-timeline') as HTMLElement | null;
 
     const ds: DragState = {
+      dragMode: 'task',
       taskId,
       edge,
       paneType,
@@ -123,12 +169,74 @@ export function createDragHandler(store: GanttStore) {
     document.addEventListener('pointerup', onPointerUp);
   }
 
+  function onKeyDatePointerDown(
+    e: PointerEvent,
+    projectId: string,
+    keyDateIndex: number,
+    currentDate: string,
+  ) {
+    const originPx = dateToPx(currentDate);
+
+    // Find the project's row index
+    const groups = store.projectGroups.value;
+    let rowIndex = 0;
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i].projectId === projectId) {
+        rowIndex = i;
+        break;
+      }
+    }
+
+    const ds: DragState = {
+      dragMode: 'keyDate',
+      taskId: '',
+      edge: 'body',
+      paneType: 'project',
+      originalStartDate: currentDate,
+      originalEndDate: currentDate,
+      currentStartDate: currentDate,
+      currentEndDate: currentDate,
+      ghostLeft: originPx,
+      ghostWidth: 8,
+      pointerStartX: e.clientX,
+      pointerStartY: e.clientY,
+      originalPersonId: null,
+      currentPersonId: null,
+      rowIndex,
+      scrollTopStart: 0,
+      bodyTopStart: 0,
+      keyDateIndex,
+      projectId,
+      originalKeyDate: currentDate,
+      currentKeyDate: currentDate,
+    };
+
+    dragState.value = ds;
+
+    document.body.style.userSelect = 'none';
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+    e.stopPropagation();
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+  }
+
   function onPointerMove(e: PointerEvent) {
     const ds = dragState.value;
     if (!ds) return;
 
     const dx = e.clientX - ds.pointerStartX;
     const dayDelta = Math.round(dx / DAY_WIDTH);
+
+    if (ds.dragMode === 'keyDate') {
+      // Key date drag: only horizontal movement
+      const newDate = addDays(ds.originalKeyDate!, dayDelta);
+      ds.currentKeyDate = newDate;
+      ds.ghostLeft = dateToPx(newDate);
+      dragState.value = { ...ds };
+      return;
+    }
 
     if (ds.edge === 'body') {
       // Move entire bar
@@ -145,11 +253,11 @@ export function createDragHandler(store: GanttStore) {
       if (ds.paneType === 'person') {
         const pg = store.personGroups.value;
         const scrollEl = document.querySelector('.gantt-timeline') as HTMLElement | null;
-        const currentScrollTop = scrollEl?.scrollTop ?? 0;
-        const bodyTop = ds.bodyTopStart;
-        const absoluteY = (e.clientY - bodyTop) + currentScrollTop;
-        const newRowIndex = Math.max(0, Math.min(pg.length - 1,
-          Math.floor(absoluteY / ROW_HEIGHT)));
+        // Use current bodyRect.top which already accounts for scroll
+        const timelineBody = scrollEl?.querySelector('[style*="position: relative"]') as HTMLElement | null;
+        const currentBodyTop = timelineBody?.getBoundingClientRect().top ?? ds.bodyTopStart;
+        const contentY = e.clientY - currentBodyTop;
+        const newRowIndex = findRowIndex(pg, contentY);
         ds.rowIndex = newRowIndex;
         const targetPersonId = pg[newRowIndex]?.personId;
         ds.currentPersonId = (targetPersonId === '__unassigned__' || targetPersonId == null) ? null : targetPersonId;
@@ -183,6 +291,35 @@ export function createDragHandler(store: GanttStore) {
     document.removeEventListener('pointermove', onPointerMove);
     document.removeEventListener('pointerup', onPointerUp);
 
+    // ── Key date drag persistence ──
+    if (ds.dragMode === 'keyDate') {
+      const projectId = ds.projectId!;
+      const keyDateIndex = ds.keyDateIndex!;
+      const newDate = ds.currentKeyDate!;
+      const origDate = ds.originalKeyDate!;
+
+      dragState.value = null;
+
+      if (newDate === origDate) return;
+
+      const project = store.mergedProjects.value.find(p => p.id === projectId);
+      if (!project) return;
+
+      const keyDates = [...(project.keyDates ?? [])];
+      keyDates[keyDateIndex] = { ...keyDates[keyDateIndex], date: newDate };
+
+      const undo = async () => {
+        await store.persistProjectEdit(projectId, 'keyDates', keyDates.map((kd, i) =>
+          i === keyDateIndex ? { ...kd, date: origDate } : kd
+        ));
+      };
+
+      await store.persistProjectEdit(projectId, 'keyDates', keyDates);
+      undoStack.push(undo);
+      return;
+    }
+
+    // ── Task bar drag persistence ──
     const taskId = ds.taskId;
     const newStart = ds.currentStartDate;
     const newEnd = ds.currentEndDate;
@@ -245,11 +382,13 @@ export function createDragHandler(store: GanttStore) {
     const relY = e.clientY - rect.top;
 
     const totalScrollLeft = timelineEl.scrollLeft || 0;
+    const totalScrollTop = timelineEl.scrollTop || 0;
     const absX = relX + totalScrollLeft;
+    const contentY = relY + totalScrollTop;
     const dropDate = pxToDate(absX);
 
     const personGroups = store.personGroups.value;
-    const rowIndex = Math.floor(relY / ROW_HEIGHT);
+    const rowIndex = findRowIndex(personGroups, contentY);
     const targetPerson =
       rowIndex >= 0 && rowIndex < personGroups.length
         ? personGroups[rowIndex].personId
@@ -278,6 +417,7 @@ export function createDragHandler(store: GanttStore) {
 
   return {
     onTaskPointerDown,
+    onKeyDatePointerDown,
     undo,
     handleTimelineDrop,
     handleTimelineDragOver,

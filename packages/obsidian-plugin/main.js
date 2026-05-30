@@ -1073,11 +1073,56 @@ function useSignal(i5) {
 }
 
 // ../gantt-core/dist/index.js
+function applyStatusCascade(tasks, caches, edits) {
+  const projectStatuses = /* @__PURE__ */ new Map();
+  for (const cache of caches) {
+    for (const project of cache.projects) {
+      const projectOverride = edits.projectOverrides?.[project.id];
+      const effectiveStatus = projectOverride?.status ?? project.status ?? "pending";
+      projectStatuses.set(project.id, effectiveStatus);
+    }
+  }
+  for (const task of tasks) {
+    const projectId = task.projectId.value;
+    if (!projectId)
+      continue;
+    const projectStatus = projectStatuses.get(projectId);
+    if (projectStatus === "completed" && task.status.value !== "cancelled") {
+      task.status = { value: "completed", source: "upstream" };
+    }
+  }
+  const projectTaskCounts = /* @__PURE__ */ new Map();
+  for (const task of tasks) {
+    const projectId = task.projectId.value;
+    if (!projectId)
+      continue;
+    if (!projectTaskCounts.has(projectId)) {
+      projectTaskCounts.set(projectId, { total: 0, completed: 0, cancelled: 0 });
+    }
+    const counts = projectTaskCounts.get(projectId);
+    counts.total++;
+    if (task.status.value === "completed")
+      counts.completed++;
+    if (task.status.value === "cancelled")
+      counts.cancelled++;
+  }
+  for (const [projectId, counts] of projectTaskCounts) {
+    const nonCancelled = counts.total - counts.cancelled;
+    if (nonCancelled > 0 && counts.completed >= nonCancelled) {
+      const hasManualOverride = edits.projectOverrides?.[projectId]?.status !== void 0;
+      if (!hasManualOverride) {
+        projectStatuses.set(projectId, "completed");
+      }
+    }
+  }
+  return tasks;
+}
 var EDITABLE_FIELDS = [
   "title",
   "startDate",
   "endDate",
   "progress",
+  "status",
   "personId",
   "projectId",
   "parentId",
@@ -1101,6 +1146,7 @@ function mergeFields(task, overrides, connectorId) {
     startDate: get("startDate", task.startDate ?? null),
     endDate: get("endDate", task.endDate ?? null),
     progress: get("progress", task.progress ?? 0),
+    status: get("status", task.status ?? "pending"),
     personId: get("personId", task.personId ?? null),
     projectId: get("projectId", task.projectId ?? null),
     parentId: get("parentId", task.parentId ?? null),
@@ -1121,6 +1167,7 @@ function localToLocalTask(task) {
     startDate: fieldWithSource(task.startDate ?? null, "manual"),
     endDate: fieldWithSource(task.endDate ?? null, "manual"),
     progress: fieldWithSource(task.progress ?? 0, "manual"),
+    status: fieldWithSource(task.status ?? "pending", "manual"),
     personId: fieldWithSource(task.personId ?? null, "manual"),
     projectId: fieldWithSource(task.projectId ?? null, "manual"),
     parentId: fieldWithSource(task.parentId ?? null, "manual"),
@@ -1136,9 +1183,12 @@ function localToLocalTask(task) {
 function mergeTasks(cachedTasks, edits, connectorId) {
   const overrideMap = edits.overrides ?? {};
   const hidden = new Set(edits.hidden ?? []);
+  const deleted = new Set(edits.deletedTasks ?? []);
   const result = [];
   for (const task of cachedTasks) {
     if (hidden.has(task.id))
+      continue;
+    if (deleted.has(task.id))
       continue;
     const overrides = overrideMap[task.id];
     result.push(mergeFields(task, overrides, connectorId));
@@ -1211,7 +1261,7 @@ function mergeAll(caches, edits) {
     const merged = mergeTasks(cache.tasks, edits, cache.connectorId);
     allTasks.push(...merged);
   }
-  return allTasks;
+  return applyStatusCascade(allTasks, caches, edits);
 }
 function parseDate(dateStr) {
   const [y4, m4, d4] = dateStr.split("-").map(Number);
@@ -1360,6 +1410,8 @@ function createGanttStore(platform) {
   const currentViewId = y3(null);
   const selectedEntity = y3(null);
   const sharedScrollLeft = y3(0);
+  const personScrollTop = y3(0);
+  const projectScrollTop = y3(0);
   const personSortMode = y3("name");
   const isLoading = y3(false);
   const error = y3(null);
@@ -1373,6 +1425,32 @@ function createGanttStore(platform) {
         clearTimeout(scrollGuardTimer);
       scrollGuardTimer = setTimeout(() => {
         scrollGuardActive = false;
+      }, SCROLL_GUARD_DURATION);
+    }
+  }
+  let personScrollGuardActive = false;
+  let personScrollGuardTimer = null;
+  let projectScrollGuardActive = false;
+  let projectScrollGuardTimer = null;
+  function syncPersonScrollTop(value) {
+    if (!personScrollGuardActive) {
+      personScrollGuardActive = true;
+      personScrollTop.value = value;
+      if (personScrollGuardTimer)
+        clearTimeout(personScrollGuardTimer);
+      personScrollGuardTimer = setTimeout(() => {
+        personScrollGuardActive = false;
+      }, SCROLL_GUARD_DURATION);
+    }
+  }
+  function syncProjectScrollTop(value) {
+    if (!projectScrollGuardActive) {
+      projectScrollGuardActive = true;
+      projectScrollTop.value = value;
+      if (projectScrollGuardTimer)
+        clearTimeout(projectScrollGuardTimer);
+      projectScrollGuardTimer = setTimeout(() => {
+        projectScrollGuardActive = false;
       }, SCROLL_GUARD_DURATION);
     }
   }
@@ -1403,7 +1481,8 @@ function createGanttStore(platform) {
   });
   const mergedProjects = g2(() => {
     const overrides = edits.value?.projectOverrides ?? {};
-    return projects.value.map((p5) => {
+    const deletedProjects = new Set(edits.value?.deletedProjects ?? []);
+    return projects.value.filter((p5) => !deletedProjects.has(p5.id)).map((p5) => {
       const override = overrides[p5.id];
       if (!override)
         return p5;
@@ -1658,6 +1737,361 @@ function createGanttStore(platform) {
   function selectEntity(entity) {
     selectedEntity.value = entity;
   }
+  async function deleteTask(taskId) {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId)
+      return;
+    const isLocal = currentEdits.localTasks.some((t4) => t4.id === taskId);
+    let updated;
+    if (isLocal) {
+      const newOverrides = { ...currentEdits.overrides };
+      delete newOverrides[taskId];
+      updated = {
+        ...currentEdits,
+        localTasks: currentEdits.localTasks.filter((t4) => t4.id !== taskId),
+        overrides: newOverrides
+      };
+    } else {
+      const deletedTasks = [...currentEdits.deletedTasks ?? []];
+      if (!deletedTasks.includes(taskId)) {
+        deletedTasks.push(taskId);
+      }
+      updated = {
+        ...currentEdits,
+        deletedTasks
+      };
+    }
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
+    edits.value = updated;
+    selectEntity(null);
+  }
+  async function deleteProject(projectId) {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId)
+      return;
+    const deletedProjects = [...currentEdits.deletedProjects ?? []];
+    if (!deletedProjects.includes(projectId)) {
+      deletedProjects.push(projectId);
+    }
+    const deletedTasks = [...currentEdits.deletedTasks ?? []];
+    const allTasks = mergeAll(caches.value, currentEdits);
+    const cascadeTaskIds = [];
+    for (const task of allTasks) {
+      if (task.projectId.value === projectId && !deletedTasks.includes(task.id)) {
+        deletedTasks.push(task.id);
+        cascadeTaskIds.push(task.id);
+      }
+    }
+    const newProjectOverrides = { ...currentEdits.projectOverrides ?? {} };
+    delete newProjectOverrides[projectId];
+    const newOverrides = { ...currentEdits.overrides };
+    for (const taskId of cascadeTaskIds) {
+      delete newOverrides[taskId];
+    }
+    const cascadeTaskIdSet = new Set(cascadeTaskIds);
+    const updated = {
+      ...currentEdits,
+      deletedProjects,
+      deletedTasks,
+      projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : void 0,
+      overrides: newOverrides,
+      localTasks: currentEdits.localTasks.filter((t4) => !cascadeTaskIdSet.has(t4.id))
+    };
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
+    edits.value = updated;
+    selectEntity(null);
+  }
+  async function setTaskStatus(taskId, status) {
+    await persistEdit(taskId, "status", status);
+  }
+  async function setProjectStatus(projectId, status) {
+    await persistProjectEdit(projectId, "status", status);
+  }
+  async function pushChanges() {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId)
+      return [];
+    const results = [];
+    const payload = {
+      tasks: [],
+      projects: [],
+      deletedTaskIds: currentEdits.deletedTasks ?? [],
+      deletedProjectIds: currentEdits.deletedProjects ?? []
+    };
+    const allMerged = mergeAll(caches.value, currentEdits);
+    const overrideIds = new Set(Object.keys(currentEdits.overrides));
+    for (const task of allMerged) {
+      if (overrideIds.has(task.id) || task.connectorId === null) {
+        payload.tasks.push({
+          id: task.id,
+          title: task.title.value,
+          startDate: task.startDate.value ?? void 0,
+          endDate: task.endDate.value ?? void 0,
+          progress: task.progress.value,
+          status: task.status.value,
+          personId: task.personId.value ?? void 0,
+          projectId: task.projectId.value ?? void 0,
+          dependencies: task.dependencies.value,
+          tags: task.tags.value,
+          url: task.url.value ?? void 0
+        });
+      }
+    }
+    for (const lt of currentEdits.localTasks) {
+      payload.tasks.push(lt);
+    }
+    if (currentEdits.projectOverrides) {
+      for (const [projectId, overrides] of Object.entries(currentEdits.projectOverrides)) {
+        const project = caches.value.flatMap((c4) => c4.projects).find((p5) => p5.id === projectId);
+        if (project) {
+          payload.projects.push({ ...project, ...overrides });
+        }
+      }
+    }
+    for (const cache of caches.value) {
+      try {
+        const configPath = `connectors/${safeName(cache.connectorId)}.json`;
+        const configRaw = await platform.storage.read(configPath);
+        if (!configRaw)
+          continue;
+        const connConfig = JSON.parse(configRaw);
+        const scriptPath = connConfig.script || `connectors/${safeName(cache.connectorId)}.js`;
+        const mod = await platform.connectorLoader.load(scriptPath);
+        if (!mod.push) {
+          results.push({ connectorId: cache.connectorId, success: false, error: "Connector does not support push" });
+          continue;
+        }
+        const ctx = platform.createConnectorContext(connConfig);
+        const result = await mod.push(payload, ctx);
+        results.push({ connectorId: cache.connectorId, success: result.success, error: result.error });
+      } catch (e4) {
+        results.push({ connectorId: cache.connectorId, success: false, error: e4 instanceof Error ? e4.message : String(e4) });
+      }
+    }
+    const anySuccess = results.some((r4) => r4.success);
+    if (anySuccess) {
+      const cleared = {
+        ...currentEdits,
+        overrides: {},
+        localTasks: currentEdits.localTasks.filter(
+          (lt) => payload.tasks.some((pt) => pt.id === lt.id)
+        ),
+        projectOverrides: {},
+        deletedTasks: [],
+        deletedProjects: []
+      };
+      await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(cleared, null, 2));
+      edits.value = cleared;
+      for (const result of results) {
+        if (result.success) {
+          try {
+            await refreshConnector(result.connectorId);
+          } catch {
+          }
+        }
+      }
+    }
+    return results;
+  }
+  const pendingChanges = g2(() => {
+    const currentEdits = edits.value;
+    if (!currentEdits)
+      return [];
+    const result = [];
+    const allMerged = mergedTasks.value;
+    const allPersons = persons.value;
+    const allProjects = projects.value;
+    const FIELD_LABELS = {
+      title: "Title",
+      startDate: "Start Date",
+      endDate: "End Date",
+      progress: "Progress",
+      status: "Status",
+      personId: "Person",
+      projectId: "Project",
+      dependencies: "Dependencies",
+      tags: "Tags",
+      description: "Description",
+      requester: "Requester",
+      keyDates: "Key Dates",
+      keyLinks: "Key Links",
+      name: "Name"
+    };
+    const taskFieldMap = /* @__PURE__ */ new Map();
+    for (const [taskId, overrides] of Object.entries(currentEdits.overrides)) {
+      const fields = [];
+      for (const [field, value] of Object.entries(overrides)) {
+        fields.push({
+          field,
+          label: FIELD_LABELS[field] ?? field,
+          newValue: value
+        });
+      }
+      if (fields.length > 0) {
+        taskFieldMap.set(taskId, fields);
+      }
+    }
+    for (const [taskId, fields] of taskFieldMap) {
+      const task = allMerged.find((t4) => t4.id === taskId);
+      const person = allPersons.find((p5) => p5.id === task?.personId.value);
+      const project = allProjects.find((p5) => p5.id === task?.projectId.value);
+      const entityName = task?.title.value ?? taskId;
+      result.push({
+        entityId: taskId,
+        entityType: "task",
+        entityName,
+        changeType: "modified",
+        fields: fields.map((f5) => {
+          let displayValue = f5.newValue;
+          if (f5.field === "personId" && person)
+            displayValue = person.name;
+          if (f5.field === "projectId" && project)
+            displayValue = project.name;
+          if (f5.field === "status") {
+            const opt = ["pending", "in-progress", "cancelled", "pending-online", "online", "completed"];
+            const idx = opt.indexOf(String(f5.newValue));
+            displayValue = ["Pending", "In Progress", "Cancelled", "Pending Online", "Online", "Completed"][idx] ?? f5.newValue;
+          }
+          if (f5.field === "progress")
+            displayValue = `${Math.round(Number(f5.newValue) * 100)}%`;
+          return { ...f5, newValue: displayValue };
+        })
+      });
+    }
+    for (const lt of currentEdits.localTasks) {
+      const person = allPersons.find((p5) => p5.id === lt.personId);
+      const project = allProjects.find((p5) => p5.id === lt.projectId);
+      const summary = {};
+      if (lt.startDate)
+        summary["Start"] = lt.startDate;
+      if (lt.endDate)
+        summary["End"] = lt.endDate;
+      if (lt.status) {
+        const idx = ["pending", "in-progress", "cancelled", "pending-online", "online", "completed"].indexOf(lt.status);
+        summary["Status"] = ["Pending", "In Progress", "Cancelled", "Pending Online", "Online", "Completed"][idx] ?? lt.status;
+      } else {
+        summary["Status"] = "Pending";
+      }
+      if (person)
+        summary["Person"] = person.name;
+      if (project)
+        summary["Project"] = project.name;
+      if (lt.tags?.length)
+        summary["Tags"] = lt.tags.join(", ");
+      if (lt.url)
+        summary["Link"] = lt.url;
+      result.push({
+        entityId: lt.id,
+        entityType: "task",
+        entityName: lt.title,
+        changeType: "added",
+        addedSummary: summary
+      });
+    }
+    const projFieldMap = /* @__PURE__ */ new Map();
+    if (currentEdits.projectOverrides) {
+      for (const [projectId, overrides] of Object.entries(currentEdits.projectOverrides)) {
+        const fields = [];
+        for (const [field, value] of Object.entries(overrides)) {
+          fields.push({
+            field,
+            label: FIELD_LABELS[field] ?? field,
+            newValue: value
+          });
+        }
+        if (fields.length > 0) {
+          projFieldMap.set(projectId, fields);
+        }
+      }
+    }
+    for (const [projectId, fields] of projFieldMap) {
+      const project = allProjects.find((p5) => p5.id === projectId);
+      const entityName = project?.name ?? projectId;
+      result.push({
+        entityId: projectId,
+        entityType: "project",
+        entityName,
+        changeType: "modified",
+        fields
+      });
+    }
+    for (const taskId of currentEdits.deletedTasks ?? []) {
+      const task = allMerged.find((t4) => t4.id === taskId);
+      const project = allProjects.find((p5) => p5.id === task?.projectId.value);
+      result.push({
+        entityId: taskId,
+        entityType: "task",
+        entityName: task?.title.value ?? taskId,
+        changeType: "deleted",
+        relatedInfo: project ? `Project: ${project.name}` : void 0
+      });
+    }
+    for (const projectId of currentEdits.deletedProjects ?? []) {
+      const project = allProjects.find((p5) => p5.id === projectId);
+      result.push({
+        entityId: projectId,
+        entityType: "project",
+        entityName: project?.name ?? projectId,
+        changeType: "deleted"
+      });
+    }
+    const deletedTaskIds = new Set(currentEdits.deletedTasks ?? []);
+    const deletedProjectIds = new Set(currentEdits.deletedProjects ?? []);
+    const localTaskIds = new Set(currentEdits.localTasks.map((t4) => t4.id));
+    const allMergedTaskIds = new Set(allMerged.map((t4) => t4.id));
+    const allProjectIds = new Set(allProjects.map((p5) => p5.id));
+    const consumedModified = /* @__PURE__ */ new Set();
+    const filtered = [];
+    for (const entry of result) {
+      if (entry.entityType === "task") {
+        if (entry.changeType === "modified" && !allMergedTaskIds.has(entry.entityId) && !localTaskIds.has(entry.entityId)) {
+          continue;
+        }
+        if (entry.changeType === "modified" && deletedTaskIds.has(entry.entityId)) {
+          continue;
+        }
+        if (entry.changeType === "added" && deletedTaskIds.has(entry.entityId)) {
+          continue;
+        }
+        if (entry.changeType === "added" && localTaskIds.has(entry.entityId)) {
+          const modEntry = result.find(
+            (e4) => e4.entityId === entry.entityId && e4.entityType === "task" && e4.changeType === "modified"
+          );
+          if (modEntry && modEntry.fields && entry.addedSummary) {
+            for (const f5 of modEntry.fields) {
+              entry.addedSummary[f5.label] = f5.newValue;
+            }
+            consumedModified.add(entry.entityId);
+          }
+          filtered.push(entry);
+          continue;
+        }
+        if (entry.changeType === "modified" && consumedModified.has(entry.entityId)) {
+          continue;
+        }
+      }
+      if (entry.entityType === "project") {
+        if (entry.changeType === "modified" && !allProjectIds.has(entry.entityId)) {
+          continue;
+        }
+        if (entry.changeType === "modified" && deletedProjectIds.has(entry.entityId)) {
+          continue;
+        }
+      }
+      filtered.push(entry);
+    }
+    const order = { added: 0, modified: 1, deleted: 2 };
+    filtered.sort((a4, b3) => {
+      const d4 = (order[a4.changeType] ?? 1) - (order[b3.changeType] ?? 1);
+      if (d4 !== 0)
+        return d4;
+      return a4.entityName.localeCompare(b3.entityName);
+    });
+    return filtered;
+  });
   return {
     caches,
     edits,
@@ -1673,9 +2107,12 @@ function createGanttStore(platform) {
     selectedEntity,
     highlightedTaskIds,
     sharedScrollLeft,
+    personScrollTop,
+    projectScrollTop,
     personSortMode,
     timelineRange,
     conflicts,
+    pendingChanges,
     isLoading,
     error,
     loadView,
@@ -1684,7 +2121,12 @@ function createGanttStore(platform) {
     resetField,
     createLocalTask,
     persistProjectEdit,
-    selectEntity
+    selectEntity,
+    deleteTask,
+    deleteProject,
+    setTaskStatus,
+    setProjectStatus,
+    pushChanges
   };
 }
 function TimelineGrid(props) {
@@ -1843,6 +2285,8 @@ function TaskBar(props) {
   const { data, groupStartY, laneIndex, rowHeight, laneOffset, paneType } = props;
   const barHeight = rowHeight * 0.6;
   const barTop = groupStartY + (rowHeight - barHeight) / 2 + laneIndex * laneOffset;
+  const barWidth = Math.max(data.width, 4);
+  const showHandles = barWidth >= 12;
   return /* @__PURE__ */ u4(
     "div",
     {
@@ -1851,7 +2295,7 @@ function TaskBar(props) {
         position: "absolute",
         left: `${data.left}px`,
         top: `${barTop}px`,
-        width: `${Math.max(data.width, 4)}px`,
+        width: `${barWidth}px`,
         height: `${barHeight}px`,
         background: data.color,
         borderRadius: "4px",
@@ -1872,7 +2316,7 @@ function TaskBar(props) {
       onPointerDown: (e4) => {
         const rect = e4.currentTarget.getBoundingClientRect();
         const relX = e4.clientX - rect.left;
-        const edge = relX < 6 ? "left" : relX > rect.width - 6 ? "right" : "body";
+        const edge = relX < 8 ? "left" : relX > rect.width - 8 ? "right" : "body";
         props.onPointerDown(e4, data.id, edge, paneType);
       },
       onClick: (e4) => {
@@ -1880,7 +2324,11 @@ function TaskBar(props) {
         props.onClick(data.id);
       },
       title: `${data.title}`,
-      children: data.width > 40 ? data.title : ""
+      children: [
+        showHandles && /* @__PURE__ */ u4("span", { class: "gantt-bar-handle gantt-bar-handle-left" }),
+        data.width > 40 ? data.title : "",
+        showHandles && /* @__PURE__ */ u4("span", { class: "gantt-bar-handle gantt-bar-handle-right" })
+      ]
     }
   );
 }
@@ -1945,6 +2393,7 @@ function KeyDateMarker(props) {
     {
       class: "gantt-key-date-marker",
       title: `${props.name}: ${props.date}`,
+      onPointerDown: props.onPointerDown,
       style: {
         position: "absolute",
         left: `${props.leftPx - size / 2}px`,
@@ -1955,7 +2404,7 @@ function KeyDateMarker(props) {
         transform: "rotate(45deg)",
         zIndex: 3,
         pointerEvents: "auto",
-        cursor: "help",
+        cursor: props.onPointerDown ? "ew-resize" : "help",
         display: "flex",
         alignItems: "center",
         justifyContent: "center"
@@ -1973,6 +2422,41 @@ function KeyDateMarker(props) {
 }
 var DAY_WIDTH = 30;
 var ROW_HEIGHT = 40;
+var LANE_OFFSET = 12;
+function computeGroupHeight(tasks) {
+  const ranges = [];
+  for (const t4 of tasks) {
+    const s5 = t4.startDate.value;
+    if (!s5)
+      continue;
+    ranges.push({ start: s5, end: t4.endDate.value ?? s5 });
+  }
+  ranges.sort((a4, b3) => a4.start.localeCompare(b3.start));
+  const lanes = [];
+  for (const dr of ranges) {
+    let assigned = false;
+    for (let li = 0; li < lanes.length; li++) {
+      if (dr.start >= lanes[li]) {
+        lanes[li] = dr.end;
+        assigned = true;
+        break;
+      }
+    }
+    if (!assigned)
+      lanes.push(dr.end);
+  }
+  return ROW_HEIGHT + (Math.max(1, lanes.length) - 1) * LANE_OFFSET;
+}
+function findRowIndex(groups, contentY) {
+  let accumulatedY = 0;
+  for (let i5 = 0; i5 < groups.length; i5++) {
+    const h4 = computeGroupHeight(groups[i5].tasks);
+    if (contentY < accumulatedY + h4)
+      return i5;
+    accumulatedY += h4;
+  }
+  return groups.length - 1;
+}
 function dateToPx(date) {
   return dateToAbsolutePixel(date, DAY_WIDTH);
 }
@@ -2009,6 +2493,7 @@ function createDragHandler(store) {
     const bodyRect = timelineBody?.getBoundingClientRect();
     const scrollEl = target.closest(".gantt-timeline");
     const ds = {
+      dragMode: "task",
       taskId,
       edge,
       paneType,
@@ -2034,12 +2519,60 @@ function createDragHandler(store) {
     document.addEventListener("pointermove", onPointerMove);
     document.addEventListener("pointerup", onPointerUp);
   }
+  function onKeyDatePointerDown(e4, projectId, keyDateIndex, currentDate) {
+    const originPx = dateToPx(currentDate);
+    const groups = store.projectGroups.value;
+    let rowIndex = 0;
+    for (let i5 = 0; i5 < groups.length; i5++) {
+      if (groups[i5].projectId === projectId) {
+        rowIndex = i5;
+        break;
+      }
+    }
+    const ds = {
+      dragMode: "keyDate",
+      taskId: "",
+      edge: "body",
+      paneType: "project",
+      originalStartDate: currentDate,
+      originalEndDate: currentDate,
+      currentStartDate: currentDate,
+      currentEndDate: currentDate,
+      ghostLeft: originPx,
+      ghostWidth: 8,
+      pointerStartX: e4.clientX,
+      pointerStartY: e4.clientY,
+      originalPersonId: null,
+      currentPersonId: null,
+      rowIndex,
+      scrollTopStart: 0,
+      bodyTopStart: 0,
+      keyDateIndex,
+      projectId,
+      originalKeyDate: currentDate,
+      currentKeyDate: currentDate
+    };
+    dragState.value = ds;
+    document.body.style.userSelect = "none";
+    e4.target.setPointerCapture?.(e4.pointerId);
+    e4.preventDefault();
+    e4.stopPropagation();
+    document.addEventListener("pointermove", onPointerMove);
+    document.addEventListener("pointerup", onPointerUp);
+  }
   function onPointerMove(e4) {
     const ds = dragState.value;
     if (!ds)
       return;
     const dx = e4.clientX - ds.pointerStartX;
     const dayDelta = Math.round(dx / DAY_WIDTH);
+    if (ds.dragMode === "keyDate") {
+      const newDate = addDays(ds.originalKeyDate, dayDelta);
+      ds.currentKeyDate = newDate;
+      ds.ghostLeft = dateToPx(newDate);
+      dragState.value = { ...ds };
+      return;
+    }
     if (ds.edge === "body") {
       const newStart = addDays(ds.originalStartDate, dayDelta);
       const duration = daysBetween(ds.originalStartDate, ds.originalEndDate);
@@ -2051,13 +2584,10 @@ function createDragHandler(store) {
       if (ds.paneType === "person") {
         const pg = store.personGroups.value;
         const scrollEl = document.querySelector(".gantt-timeline");
-        const currentScrollTop = scrollEl?.scrollTop ?? 0;
-        const bodyTop = ds.bodyTopStart;
-        const absoluteY = e4.clientY - bodyTop + currentScrollTop;
-        const newRowIndex = Math.max(0, Math.min(
-          pg.length - 1,
-          Math.floor(absoluteY / ROW_HEIGHT)
-        ));
+        const timelineBody = scrollEl?.querySelector('[style*="position: relative"]');
+        const currentBodyTop = timelineBody?.getBoundingClientRect().top ?? ds.bodyTopStart;
+        const contentY = e4.clientY - currentBodyTop;
+        const newRowIndex = findRowIndex(pg, contentY);
         ds.rowIndex = newRowIndex;
         const targetPersonId = pg[newRowIndex]?.personId;
         ds.currentPersonId = targetPersonId === "__unassigned__" || targetPersonId == null ? null : targetPersonId;
@@ -2085,6 +2615,28 @@ function createDragHandler(store) {
     document.body.style.userSelect = "";
     document.removeEventListener("pointermove", onPointerMove);
     document.removeEventListener("pointerup", onPointerUp);
+    if (ds.dragMode === "keyDate") {
+      const projectId = ds.projectId;
+      const keyDateIndex = ds.keyDateIndex;
+      const newDate = ds.currentKeyDate;
+      const origDate = ds.originalKeyDate;
+      dragState.value = null;
+      if (newDate === origDate)
+        return;
+      const project = store.mergedProjects.value.find((p5) => p5.id === projectId);
+      if (!project)
+        return;
+      const keyDates = [...project.keyDates ?? []];
+      keyDates[keyDateIndex] = { ...keyDates[keyDateIndex], date: newDate };
+      const undo3 = async () => {
+        await store.persistProjectEdit(projectId, "keyDates", keyDates.map(
+          (kd, i5) => i5 === keyDateIndex ? { ...kd, date: origDate } : kd
+        ));
+      };
+      await store.persistProjectEdit(projectId, "keyDates", keyDates);
+      undoStack.push(undo3);
+      return;
+    }
     const taskId = ds.taskId;
     const newStart = ds.currentStartDate;
     const newEnd = ds.currentEndDate;
@@ -2138,10 +2690,12 @@ function createDragHandler(store) {
     const relX = e4.clientX - rect.left;
     const relY = e4.clientY - rect.top;
     const totalScrollLeft = timelineEl.scrollLeft || 0;
+    const totalScrollTop = timelineEl.scrollTop || 0;
     const absX = relX + totalScrollLeft;
+    const contentY = relY + totalScrollTop;
     const dropDate = pxToDate(absX);
     const personGroups = store.personGroups.value;
-    const rowIndex = Math.floor(relY / ROW_HEIGHT);
+    const rowIndex = findRowIndex(personGroups, contentY);
     const targetPerson = rowIndex >= 0 && rowIndex < personGroups.length ? personGroups[rowIndex].personId : null;
     const personId = targetPerson === "__unassigned__" ? null : targetPerson;
     const newTask = {
@@ -2162,6 +2716,7 @@ function createDragHandler(store) {
   }
   return {
     onTaskPointerDown,
+    onKeyDatePointerDown,
     undo,
     handleTimelineDrop,
     handleTimelineDragOver
@@ -2169,14 +2724,24 @@ function createDragHandler(store) {
 }
 var DAY_WIDTH2 = 30;
 var ROW_HEIGHT2 = 40;
-var LANE_OFFSET = 12;
+var LANE_OFFSET2 = 12;
 var LEFT_PANEL_WIDTH = 180;
 var RIGHT_PANEL_WIDTH = 220;
 var GRID_BUFFER_PX = 600;
 function dateToPx2(date) {
   return dateToAbsolutePixel(date, DAY_WIDTH2);
 }
+function hashColor(str) {
+  let hash = 0;
+  for (let i5 = 0; i5 < str.length; i5++) {
+    hash = str.charCodeAt(i5) + ((hash << 5) - hash);
+    hash |= 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 55%, 35%)`;
+}
 function TaskList(props) {
+  const totalRowsHeight = props.rowHeights.reduce((a4, b3) => a4 + b3, 0);
   return /* @__PURE__ */ u4(
     "div",
     {
@@ -2193,7 +2758,8 @@ function TaskList(props) {
           "div",
           {
             style: {
-              height: `${props.rowHeights.reduce((a4, b3) => a4 + b3, 0)}px`
+              height: `${totalRowsHeight}px`,
+              transform: props.scrollTop ? `translateY(-${props.scrollTop}px)` : void 0
             },
             children: props.labels.map((label, i5) => {
               const isHighlighted = props.highlightedRowKeys?.has(label.key) ?? false;
@@ -2232,6 +2798,14 @@ function TaskList(props) {
                           background: label.color,
                           flexShrink: 0
                         }
+                      }
+                    ),
+                    label.position && /* @__PURE__ */ u4(
+                      "span",
+                      {
+                        class: "gantt-position-badge",
+                        style: { background: label.positionColor || "var(--background-modifier-border)" },
+                        children: label.position
                       }
                     ),
                     /* @__PURE__ */ u4("span", { style: { overflow: "hidden", textOverflow: "ellipsis" }, title: label.tooltip, children: label.name })
@@ -2393,7 +2967,7 @@ function Timeline(props) {
       }
     }
     const laneCount = Math.max(1, lanes.length);
-    const height = ROW_HEIGHT2 + (laneCount - 1) * LANE_OFFSET;
+    const height = ROW_HEIGHT2 + (laneCount - 1) * LANE_OFFSET2;
     const startY = groupLayout.length === 0 ? 0 : groupLayout[groupLayout.length - 1].startY + groupLayout[groupLayout.length - 1].height;
     groupLayout.push({ startY, height, laneCount });
     for (let i5 = taskBars.length - 1; i5 >= 0; i5--) {
@@ -2497,7 +3071,7 @@ function Timeline(props) {
                     progress: task.progress.value
                   },
                   rowHeight: ROW_HEIGHT2,
-                  laneOffset: LANE_OFFSET,
+                  laneOffset: LANE_OFFSET2,
                   onPointerDown: props.onTaskPointerDown,
                   onClick: props.onTaskClick
                 },
@@ -2521,20 +3095,44 @@ function Timeline(props) {
                     name: kd.name,
                     date: kd.date,
                     color: kd.color,
-                    icon: kd.icon
+                    icon: kd.icon,
+                    onPointerDown: props.onKeyDatePointerDown ? (e4) => props.onKeyDatePointerDown(e4, projectId, ki, kd.date) : void 0
                   },
                   `${projectId}-kd-${ki}`
                 ));
               }),
               dragState.value && (() => {
                 const ds = dragState.value;
+                if (ds.paneType !== paneType)
+                  return null;
+                if (ds.dragMode === "keyDate") {
+                  const ghostLayout2 = groupLayout[ds.rowIndex];
+                  const ghostTop = ghostLayout2 ? ghostLayout2.startY + 3 : ds.rowIndex * ROW_HEIGHT2 + 3;
+                  return /* @__PURE__ */ u4(
+                    "div",
+                    {
+                      class: "gantt-key-date-ghost",
+                      style: {
+                        position: "absolute",
+                        left: `${ds.ghostLeft - bodyOriginPx - 8}px`,
+                        top: `${ghostTop}px`,
+                        width: "16px",
+                        height: "16px",
+                        borderRadius: "50%",
+                        background: "#4A90D9",
+                        opacity: 0.5,
+                        zIndex: 10,
+                        pointerEvents: "none",
+                        border: "2px solid #4A90D9"
+                      }
+                    }
+                  );
+                }
                 const barHeight = ROW_HEIGHT2 * 0.6;
                 const ghostLayout = groupLayout[ds.rowIndex];
                 const barTop = ghostLayout ? ghostLayout.startY + (ROW_HEIGHT2 - barHeight) / 2 : ds.rowIndex * ROW_HEIGHT2 + (ROW_HEIGHT2 - barHeight) / 2;
                 const ghostTask = store.mergedTasks.value.find((t4) => t4.id === ds.taskId);
                 const ghostTitle = ghostTask?.title.value ?? "";
-                if (ds.paneType !== paneType)
-                  return null;
                 return /* @__PURE__ */ u4(
                   "div",
                   {
@@ -2579,11 +3177,12 @@ function GanttPane(props) {
       const key = type === "person" ? g3.personId : g3.projectId;
       if (type === "person") {
         const pg = g3;
-        const displayName = pg.position ? `${pg.position} \xB7 ${pg.personName}` : pg.personName;
         return {
           key,
-          name: displayName,
+          name: pg.personName,
           color: void 0,
+          position: pg.position || void 0,
+          positionColor: pg.position ? hashColor(pg.position) : void 0,
           tooltip: pg.personId === "__unassigned__" ? void 0 : `ID: ${pg.personId}`
         };
       }
@@ -2619,7 +3218,7 @@ function GanttPane(props) {
         if (!assigned)
           lanes.push(dr.end);
       }
-      return ROW_HEIGHT2 + (Math.max(1, lanes.length) - 1) * LANE_OFFSET;
+      return ROW_HEIGHT2 + (Math.max(1, lanes.length) - 1) * LANE_OFFSET2;
     });
   }, [groups]);
   const highlightedIds = store.highlightedTaskIds.value;
@@ -2663,6 +3262,7 @@ function GanttPane(props) {
       {
         labels,
         rowHeights: groupHeights,
+        scrollTop: props.scrollTop,
         highlightedRowKeys,
         dimmedRowKeys,
         onRowClick: handleRowClick,
@@ -2705,6 +3305,7 @@ function GanttPane(props) {
         onRowClick: handleRowClick,
         onTaskClick: handleTaskClick,
         onTaskPointerDown: props.onTaskPointerDown,
+        onKeyDatePointerDown: props.onKeyDatePointerDown,
         onDrop: props.onDrop,
         onDragOver: props.onDragOver
       }
@@ -2826,6 +3427,32 @@ function ProjectDetail(props) {
   const requester = projectOverrides?.requester ?? project.requester ?? "";
   const keyDates = projectOverrides?.keyDates ?? project.keyDates ?? [];
   const keyLinks = projectOverrides?.keyLinks ?? project.keyLinks ?? [];
+  const editName = useSignal(false);
+  const editNameValue = useSignal(project.name);
+  let nameInputRef = null;
+  function startEditName() {
+    editNameValue.value = project.name;
+    editName.value = true;
+    requestAnimationFrame(() => nameInputRef?.focus());
+  }
+  function saveName() {
+    const newName = editNameValue.value.trim();
+    if (newName && newName !== project.name) {
+      store.persistProjectEdit(project.id, "name", newName);
+    }
+    editName.value = false;
+  }
+  function cancelName() {
+    editNameValue.value = project.name;
+    editName.value = false;
+  }
+  function handleNameKeyDown(e4) {
+    if (e4.key === "Enter")
+      saveName();
+    if (e4.key === "Escape")
+      cancelName();
+  }
+  const associatedTasks = store.mergedTasks.value.filter((t4) => t4.projectId.value === project.id);
   const editDescription = useSignal(description);
   const editRequester = useSignal(requester);
   const editKeyDates = useSignal(
@@ -2878,7 +3505,40 @@ function ProjectDetail(props) {
               background: project.color,
               flexShrink: 0
             } }),
-            /* @__PURE__ */ u4("span", { style: { fontWeight: "bold", fontSize: "14px", wordBreak: "break-word" }, children: project.name })
+            editName.value ? /* @__PURE__ */ u4(
+              "input",
+              {
+                ref: (el) => {
+                  nameInputRef = el;
+                },
+                type: "text",
+                value: editNameValue.value,
+                onInput: (e4) => {
+                  editNameValue.value = e4.target.value;
+                },
+                onBlur: saveName,
+                onKeyDown: handleNameKeyDown,
+                class: "gantt-inline-edit-input",
+                style: {
+                  flex: 1,
+                  fontSize: "14px",
+                  fontWeight: "bold",
+                  padding: "2px 6px",
+                  border: "1px solid var(--interactive-accent, #4A90D9)",
+                  borderRadius: "4px",
+                  background: "var(--background-primary, #fff)",
+                  color: "var(--text-normal, #333)"
+                }
+              }
+            ) : /* @__PURE__ */ u4(
+              "span",
+              {
+                style: { fontWeight: "bold", fontSize: "14px", wordBreak: "break-word", cursor: "text" },
+                onClick: startEditName,
+                title: "Click to edit name",
+                children: project.name
+              }
+            )
           ] }),
           /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px", flexShrink: 0 }, children: editing.value ? /* @__PURE__ */ u4(S, { children: [
             /* @__PURE__ */ u4(
@@ -2931,6 +3591,23 @@ function ProjectDetail(props) {
             /* @__PURE__ */ u4(
               "button",
               {
+                onClick: () => props.onDelete?.(project.id, project.name),
+                style: {
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "14px",
+                  lineHeight: 1,
+                  padding: "0 2px",
+                  color: "var(--text-error, #e00)"
+                },
+                title: "Delete project",
+                children: "\u{1F5D1}"
+              }
+            ),
+            /* @__PURE__ */ u4(
+              "button",
+              {
                 onClick: () => store.selectEntity(null),
                 style: {
                   background: "none",
@@ -2946,6 +3623,27 @@ function ProjectDetail(props) {
               }
             )
           ] }) })
+        ] }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: "Status" }),
+          /* @__PURE__ */ u4(
+            "select",
+            {
+              value: projectOverrides?.status ?? project.status ?? "pending",
+              onChange: (e4) => store.setProjectStatus(project.id, e4.target.value),
+              style: {
+                width: "100%",
+                fontSize: "12px",
+                padding: "3px 6px",
+                borderRadius: "4px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                background: "var(--background-primary, #fff)",
+                color: "var(--text-normal, #333)",
+                cursor: "pointer"
+              },
+              children: STATUS_OPTIONS.map((opt) => /* @__PURE__ */ u4("option", { value: opt.value, children: opt.label }, opt.value))
+            }
+          )
         ] }),
         /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
           /* @__PURE__ */ u4("div", { style: labelStyle, children: "Description" }),
@@ -3285,10 +3983,62 @@ function ProjectDetail(props) {
               ]
             }
           ) }, i5)) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" }) })
+        ] }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: [
+            "Tasks (",
+            associatedTasks.length,
+            ")"
+          ] }),
+          associatedTasks.length > 0 ? /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "2px" }, children: associatedTasks.map((t4) => /* @__PURE__ */ u4(
+            "div",
+            {
+              onClick: () => store.selectEntity({ type: "task", id: t4.id }),
+              style: {
+                fontSize: "12px",
+                padding: "3px 6px",
+                cursor: "pointer",
+                borderRadius: "4px",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px"
+              },
+              class: "gantt-task-link-item",
+              title: "Click to view task details",
+              children: [
+                /* @__PURE__ */ u4(StatusBadge, { status: t4.status.value }),
+                /* @__PURE__ */ u4("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: t4.title.value })
+              ]
+            },
+            t4.id
+          )) }) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "No tasks" })
         ] })
       ]
     }
   );
+}
+var STATUS_OPTIONS = [
+  { value: "pending", label: "Pending", color: "#888" },
+  { value: "in-progress", label: "In Progress", color: "#2196f3" },
+  { value: "cancelled", label: "Cancelled", color: "#e53935" },
+  { value: "pending-online", label: "Pending Online", color: "#fb8c00" },
+  { value: "online", label: "Online", color: "#00897b" },
+  { value: "completed", label: "Completed", color: "#4caf50" }
+];
+function StatusBadge(props) {
+  const opt = STATUS_OPTIONS.find((o4) => o4.value === props.status);
+  const color = opt?.color ?? "#888";
+  const label = opt?.label ?? props.status;
+  return /* @__PURE__ */ u4("span", { style: {
+    display: "inline-block",
+    padding: "2px 8px",
+    borderRadius: "10px",
+    fontSize: "11px",
+    fontWeight: 500,
+    color: "#fff",
+    background: color,
+    whiteSpace: "nowrap"
+  }, children: label });
 }
 function DetailPanel(props) {
   const { store } = props;
@@ -3300,6 +4050,31 @@ function DetailPanel(props) {
     return null;
   const personName = task.personId.value ? store.persons.value.find((p5) => p5.id === task.personId.value)?.name ?? task.personId.value : null;
   const project = task.projectId.value ? store.projects.value.find((p5) => p5.id === task.projectId.value) : null;
+  const editTitle = useSignal(false);
+  const editTitleValue = useSignal(task.title.value);
+  let titleInputRef = null;
+  function startEditTitle() {
+    editTitleValue.value = task.title.value;
+    editTitle.value = true;
+    requestAnimationFrame(() => titleInputRef?.focus());
+  }
+  function saveTitle() {
+    const newTitle = editTitleValue.value.trim();
+    if (newTitle && newTitle !== task.title.value) {
+      store.persistEdit(task.id, "title", newTitle);
+    }
+    editTitle.value = false;
+  }
+  function cancelTitle() {
+    editTitleValue.value = task.title.value;
+    editTitle.value = false;
+  }
+  function handleTitleKeyDown(e4) {
+    if (e4.key === "Enter")
+      saveTitle();
+    if (e4.key === "Escape")
+      cancelTitle();
+  }
   const sourceLabel = task.connectorId ? `Connector: ${task.connectorId}` : task.upstreamId ? "Local override" : "Manual entry";
   const sourceStyle = task.upstreamDeleted ? "line-through" : "normal";
   return /* @__PURE__ */ u4(
@@ -3318,30 +4093,101 @@ function DetailPanel(props) {
       },
       children: [
         /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }, children: [
-          /* @__PURE__ */ u4("div", { style: { fontWeight: "bold", fontSize: "14px", wordBreak: "break-word", flex: 1 }, children: task.title.value }),
-          /* @__PURE__ */ u4(
-            "button",
+          editTitle.value ? /* @__PURE__ */ u4(
+            "input",
             {
-              onClick: () => store.selectEntity(null),
-              style: {
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                fontSize: "16px",
-                lineHeight: 1,
-                padding: "0 2px",
-                color: "var(--text-muted, #999)",
-                flexShrink: 0,
-                marginLeft: "4px"
+              ref: (el) => {
+                titleInputRef = el;
               },
-              title: "Close detail panel",
-              children: "x"
+              type: "text",
+              value: editTitleValue.value,
+              onInput: (e4) => {
+                editTitleValue.value = e4.target.value;
+              },
+              onBlur: saveTitle,
+              onKeyDown: handleTitleKeyDown,
+              class: "gantt-inline-edit-input",
+              style: {
+                flex: 1,
+                fontSize: "14px",
+                fontWeight: "bold",
+                padding: "2px 6px",
+                border: "1px solid var(--interactive-accent, #4A90D9)",
+                borderRadius: "4px",
+                background: "var(--background-primary, #fff)",
+                color: "var(--text-normal, #333)"
+              }
             }
-          )
+          ) : /* @__PURE__ */ u4(
+            "div",
+            {
+              style: { fontWeight: "bold", fontSize: "14px", wordBreak: "break-word", flex: 1, cursor: "text" },
+              onClick: startEditTitle,
+              title: "Click to edit title",
+              children: task.title.value
+            }
+          ),
+          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "2px", flexShrink: 0, marginLeft: "4px" }, children: [
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => props.onDelete?.(task.id, task.title.value),
+                style: {
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "14px",
+                  lineHeight: 1,
+                  padding: "0 2px",
+                  color: "var(--text-error, #e00)"
+                },
+                title: "Delete task",
+                children: "\u{1F5D1}"
+              }
+            ),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => store.selectEntity(null),
+                style: {
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "16px",
+                  lineHeight: 1,
+                  padding: "0 2px",
+                  color: "var(--text-muted, #999)"
+                },
+                title: "Close detail panel",
+                children: "x"
+              }
+            )
+          ] })
         ] }),
         /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: [
-          /* @__PURE__ */ u4(FieldRow, { label: "Start", value: task.startDate.value ?? "\u2014" }),
-          /* @__PURE__ */ u4(FieldRow, { label: "End", value: task.endDate.value ?? "\u2014" }),
+          /* @__PURE__ */ u4("div", { children: [
+            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Status" }),
+            /* @__PURE__ */ u4(
+              "select",
+              {
+                value: task.status.value,
+                onChange: (e4) => store.setTaskStatus(task.id, e4.target.value),
+                style: {
+                  width: "100%",
+                  fontSize: "12px",
+                  padding: "3px 6px",
+                  borderRadius: "4px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  background: "var(--background-primary, #fff)",
+                  color: "var(--text-normal, #333)",
+                  cursor: "pointer"
+                },
+                children: STATUS_OPTIONS.map((opt) => /* @__PURE__ */ u4("option", { value: opt.value, children: opt.label }, opt.value))
+              }
+            )
+          ] }),
+          /* @__PURE__ */ u4(FieldRow, { label: "Start", value: task.startDate.value ?? "-" }),
+          /* @__PURE__ */ u4(FieldRow, { label: "End", value: task.endDate.value ?? "-" }),
           /* @__PURE__ */ u4("div", { children: [
             /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Progress" }),
             /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
@@ -3363,7 +4209,7 @@ function DetailPanel(props) {
               ] })
             ] })
           ] }),
-          /* @__PURE__ */ u4(FieldRow, { label: "Person", value: personName ?? "\u2014" }),
+          /* @__PURE__ */ u4(FieldRow, { label: "Person", value: personName ?? "-" }),
           /* @__PURE__ */ u4("div", { children: [
             /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Project" }),
             /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
@@ -3374,12 +4220,43 @@ function DetailPanel(props) {
                 background: project.color,
                 flexShrink: 0
               } }),
-              /* @__PURE__ */ u4("span", { children: project?.name ?? task.projectId.value ?? "\u2014" })
+              /* @__PURE__ */ u4(
+                "span",
+                {
+                  style: { cursor: "pointer", color: "var(--interactive-accent, #4A90D9)" },
+                  onClick: () => project && store.selectEntity({ type: "project", id: project.id }),
+                  title: "Click to view project details",
+                  children: project?.name ?? task.projectId.value ?? "-"
+                }
+              )
             ] })
           ] }),
           /* @__PURE__ */ u4("div", { children: [
+            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Link" }),
+            task.url.value ? /* @__PURE__ */ u4(
+              "a",
+              {
+                href: task.url.value,
+                target: "_blank",
+                rel: "noopener noreferrer",
+                style: {
+                  color: "var(--interactive-accent, #4A90D9)",
+                  textDecoration: "none",
+                  fontSize: "12px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "4px"
+                },
+                children: [
+                  /* @__PURE__ */ u4("span", { style: { fontSize: "10px" }, children: "\u2197" }),
+                  task.url.value
+                ]
+              }
+            ) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: "\u2014" })
+          ] }),
+          /* @__PURE__ */ u4("div", { children: [
             /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Dependencies" }),
-            /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: task.dependencies.value.length > 0 ? task.dependencies.value.map((d4) => /* @__PURE__ */ u4("div", { style: { padding: "1px 0" }, children: d4 }, d4)) : "\u2014" })
+            /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: task.dependencies.value.length > 0 ? task.dependencies.value.map((d4) => /* @__PURE__ */ u4("div", { style: { padding: "1px 0" }, children: d4 }, d4)) : "-" })
           ] }),
           task.tags.value.length > 0 && /* @__PURE__ */ u4("div", { children: [
             /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Tags" }),
@@ -3405,10 +4282,320 @@ function FieldRow(props) {
     /* @__PURE__ */ u4("div", { style: { fontSize: "13px" }, children: props.value })
   ] });
 }
+function ConfirmDialog(props) {
+  function handleKeyDown(e4) {
+    if (e4.key === "Escape")
+      props.onCancel();
+  }
+  y2(() => {
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      class: "gantt-confirm-backdrop",
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1e3
+      },
+      onClick: (e4) => {
+        if (e4.target === e4.currentTarget)
+          props.onCancel();
+      },
+      children: /* @__PURE__ */ u4(
+        "div",
+        {
+          class: "gantt-confirm-dialog",
+          style: {
+            background: "var(--background-primary, #fff)",
+            borderRadius: "8px",
+            padding: "24px",
+            maxWidth: "400px",
+            width: "90%",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+            color: "var(--text-normal, #333)"
+          },
+          children: [
+            /* @__PURE__ */ u4("div", { style: { marginBottom: "20px", fontSize: "14px", lineHeight: 1.5 }, children: props.message }),
+            /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "flex-end", gap: "8px" }, children: [
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: props.onCancel,
+                  class: "gantt-btn",
+                  style: {
+                    padding: "6px 16px",
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    borderRadius: "4px",
+                    background: "var(--background-secondary, #f5f5f5)",
+                    cursor: "pointer",
+                    fontSize: "13px",
+                    color: "var(--text-normal, #333)"
+                  },
+                  children: "Cancel"
+                }
+              ),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: props.onConfirm,
+                  class: "gantt-btn gantt-btn-danger",
+                  style: {
+                    padding: "6px 16px",
+                    border: "none",
+                    borderRadius: "4px",
+                    background: "var(--text-error, #e53935)",
+                    color: "#fff",
+                    cursor: "pointer",
+                    fontSize: "13px",
+                    fontWeight: 500
+                  },
+                  children: "Delete"
+                }
+              )
+            ] })
+          ]
+        }
+      )
+    }
+  );
+}
+function PendingChangesPanel(props) {
+  const { store } = props;
+  const changes = store.pendingChanges.value;
+  const pushing = useSignal(false);
+  const pushResults = useSignal(null);
+  async function handlePush() {
+    pushing.value = true;
+    pushResults.value = null;
+    try {
+      const results = await store.pushChanges();
+      pushResults.value = results;
+    } finally {
+      pushing.value = false;
+    }
+  }
+  const stats = {
+    added: changes.filter((c4) => c4.changeType === "added").length,
+    modified: changes.filter((c4) => c4.changeType === "modified").length,
+    deleted: changes.filter((c4) => c4.changeType === "deleted").length
+  };
+  const changeTypeLabel = {
+    added: "New",
+    modified: "Updated",
+    deleted: "Deleted"
+  };
+  const changeTypeColor = {
+    added: "#4caf50",
+    modified: "#2196f3",
+    deleted: "#e53935"
+  };
+  const changeTypeBadge = {
+    added: "NEW",
+    modified: "MOD",
+    deleted: "DEL"
+  };
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      class: "gantt-confirm-backdrop",
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1e3
+      },
+      onClick: (e4) => {
+        if (e4.target === e4.currentTarget)
+          props.onClose();
+      },
+      children: /* @__PURE__ */ u4(
+        "div",
+        {
+          class: "gantt-pending-panel",
+          style: {
+            background: "var(--background-primary, #fff)",
+            borderRadius: "8px",
+            padding: "0",
+            maxWidth: "560px",
+            width: "90%",
+            maxHeight: "75vh",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+            color: "var(--text-normal, #333)"
+          },
+          children: [
+            /* @__PURE__ */ u4("div", { style: {
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "20px 24px 16px",
+              borderBottom: changes.length > 0 ? "1px solid var(--background-modifier-border, #eee)" : "none"
+            }, children: [
+              /* @__PURE__ */ u4("div", { children: [
+                /* @__PURE__ */ u4("h3", { style: { margin: "0 0 4px", fontSize: "16px" }, children: "Changes to Push" }),
+                /* @__PURE__ */ u4("span", { style: { fontSize: "12px", color: "var(--text-muted, #999)" }, children: [
+                  stats.added > 0 && /* @__PURE__ */ u4("span", { style: { color: changeTypeColor.added, marginRight: "10px" }, children: [
+                    "+",
+                    stats.added,
+                    " new"
+                  ] }),
+                  stats.modified > 0 && /* @__PURE__ */ u4("span", { style: { color: changeTypeColor.modified, marginRight: "10px" }, children: [
+                    "~",
+                    stats.modified,
+                    " updated"
+                  ] }),
+                  stats.deleted > 0 && /* @__PURE__ */ u4("span", { style: { color: changeTypeColor.deleted }, children: [
+                    "-",
+                    stats.deleted,
+                    " deleted"
+                  ] }),
+                  changes.length === 0 && "No pending changes"
+                ] })
+              ] }),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: props.onClose,
+                  style: {
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "18px",
+                    lineHeight: 1,
+                    padding: "0 2px",
+                    color: "var(--text-muted, #999)"
+                  },
+                  children: "x"
+                }
+              )
+            ] }),
+            /* @__PURE__ */ u4("div", { style: { overflowY: "auto", padding: "16px 24px", flex: 1 }, children: changes.length === 0 ? /* @__PURE__ */ u4("div", { style: { color: "var(--text-muted, #999)", fontSize: "13px", padding: "20px 0", textAlign: "center" }, children: "No pending changes. All local modifications have been pushed." }) : /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: changes.map((change, i5) => /* @__PURE__ */ u4(
+              "div",
+              {
+                class: "gantt-change-card",
+                style: {
+                  border: "1px solid var(--background-modifier-border, #e0e0e0)",
+                  borderRadius: "6px",
+                  padding: "12px",
+                  fontSize: "12px"
+                },
+                children: [
+                  /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }, children: [
+                    /* @__PURE__ */ u4("span", { style: {
+                      display: "inline-block",
+                      padding: "1px 6px",
+                      borderRadius: "3px",
+                      fontSize: "9px",
+                      fontWeight: 700,
+                      color: "#fff",
+                      background: changeTypeColor[change.changeType],
+                      letterSpacing: "0.5px",
+                      flexShrink: 0
+                    }, children: changeTypeBadge[change.changeType] }),
+                    /* @__PURE__ */ u4("span", { style: {
+                      fontSize: "10px",
+                      color: "var(--text-muted, #999)",
+                      textTransform: "uppercase",
+                      flexShrink: 0
+                    }, children: change.entityType === "task" ? "Task" : "Project" }),
+                    /* @__PURE__ */ u4("span", { style: {
+                      fontWeight: 600,
+                      fontSize: "13px",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      flex: 1
+                    }, children: change.entityName })
+                  ] }),
+                  change.changeType === "modified" && change.fields && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "3px" }, children: change.fields.map((f5, j4) => /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "baseline", gap: "6px" }, children: [
+                    /* @__PURE__ */ u4("span", { style: {
+                      color: "var(--text-muted, #999)",
+                      fontSize: "11px",
+                      minWidth: "70px",
+                      flexShrink: 0
+                    }, children: [
+                      f5.label,
+                      ":"
+                    ] }),
+                    /* @__PURE__ */ u4("span", { style: {
+                      color: "var(--interactive-accent, #4A90D9)",
+                      fontWeight: 500
+                    }, children: f5.field === "keyDates" ? `${f5.newValue.length} dates` : f5.field === "keyLinks" ? `${f5.newValue.length} links` : f5.field === "tags" ? `[${f5.newValue.join(", ")}]` : f5.field === "dependencies" ? `[${f5.newValue.join(", ")}]` : String(f5.newValue) })
+                  ] }, j4)) }),
+                  change.changeType === "added" && change.addedSummary && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "3px" }, children: Object.entries(change.addedSummary).map(([key, val]) => /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "baseline", gap: "6px" }, children: [
+                    /* @__PURE__ */ u4("span", { style: {
+                      color: "var(--text-muted, #999)",
+                      fontSize: "11px",
+                      minWidth: "50px",
+                      flexShrink: 0
+                    }, children: [
+                      key,
+                      ":"
+                    ] }),
+                    /* @__PURE__ */ u4("span", { style: { color: "#4caf50", fontWeight: 500 }, children: String(val) })
+                  ] }, key)) }),
+                  change.changeType === "deleted" && /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-error, #e53935)" }, children: change.relatedInfo ? `Will be deleted \xB7 ${change.relatedInfo}` : "Will be deleted" })
+                ]
+              },
+              `${change.entityType}-${change.entityId}-${change.changeType}-${i5}`
+            )) }) }),
+            changes.length > 0 && /* @__PURE__ */ u4("div", { style: {
+              padding: "12px 24px",
+              borderTop: "1px solid var(--background-modifier-border, #eee)",
+              display: "flex",
+              alignItems: "center",
+              gap: "12px"
+            }, children: [
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: handlePush,
+                  disabled: pushing.value,
+                  class: "gantt-btn",
+                  style: {
+                    padding: "8px 20px",
+                    border: "none",
+                    borderRadius: "4px",
+                    background: pushing.value ? "var(--background-modifier-border, #ccc)" : "var(--interactive-accent, #4A90D9)",
+                    color: "#fff",
+                    cursor: pushing.value ? "not-allowed" : "pointer",
+                    fontSize: "13px",
+                    fontWeight: 500
+                  },
+                  children: pushing.value ? "Pushing..." : `Push ${changes.length} Changes`
+                }
+              ),
+              pushResults.value && /* @__PURE__ */ u4("span", { style: { fontSize: "12px" }, children: [
+                pushResults.value.some((r4) => r4.success) ? `Pushed to ${pushResults.value.filter((r4) => r4.success).map((r4) => r4.connectorId).join(", ")}` : "Push failed",
+                pushResults.value.some((r4) => !r4.success) && /* @__PURE__ */ u4("span", { style: { color: "var(--text-error, #e00)" }, children: [
+                  " \xB7 ",
+                  pushResults.value.filter((r4) => !r4.success).map((r4) => r4.error).join("; ")
+                ] })
+              ] })
+            ] })
+          ]
+        }
+      )
+    }
+  );
+}
 function DualPane(props) {
   const { store } = props;
-  const personScrollTop = useSignal(0);
-  const projectScrollTop = useSignal(0);
+  let personVGuardActive = false;
+  let personVGuardTimer = null;
+  let projectVGuardActive = false;
+  let projectVGuardTimer = null;
   const paneRatio = useSignal(0.5);
   const isResizing = useSignal(false);
   function handleResizePointerDown(e4) {
@@ -3443,9 +4630,18 @@ function DualPane(props) {
             store,
             type: "person",
             scrollLeft: store.sharedScrollLeft.value,
-            scrollTop: personScrollTop.value,
-            onScroll: (sl) => {
+            scrollTop: store.personScrollTop.value,
+            onScroll: (sl, st) => {
               store.sharedScrollLeft.value = sl;
+              if (!personVGuardActive) {
+                personVGuardActive = true;
+                store.personScrollTop.value = st;
+                if (personVGuardTimer)
+                  clearTimeout(personVGuardTimer);
+                personVGuardTimer = setTimeout(() => {
+                  personVGuardActive = false;
+                }, 100);
+              }
             },
             onTaskPointerDown: props.onTaskPointerDown,
             onDrop: props.onDrop,
@@ -3475,27 +4671,65 @@ function DualPane(props) {
           store,
           type: "project",
           scrollLeft: store.sharedScrollLeft.value,
-          scrollTop: projectScrollTop.value,
+          scrollTop: store.projectScrollTop.value,
           onScroll: (sl, st) => {
             store.sharedScrollLeft.value = sl;
-            projectScrollTop.value = st;
+            if (!projectVGuardActive) {
+              projectVGuardActive = true;
+              store.projectScrollTop.value = st;
+              if (projectVGuardTimer)
+                clearTimeout(projectVGuardTimer);
+              projectVGuardTimer = setTimeout(() => {
+                projectVGuardActive = false;
+              }, 100);
+            }
           },
           onTaskPointerDown: props.onTaskPointerDown,
+          onKeyDatePointerDown: props.onKeyDatePointerDown,
           onDrop: props.onDrop,
           onDragOver: props.onDragOver
         }
       ) })
     ] }),
-    showTaskDetail && /* @__PURE__ */ u4(DetailPanel, { store }),
-    showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store })
+    showTaskDetail && /* @__PURE__ */ u4(DetailPanel, { store, onDelete: props.onDeleteTask }),
+    showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store, onDelete: props.onDeleteProject })
   ] }) });
 }
 function GanttChart(props) {
   const { store } = props;
   const dragHandler = createDragHandler(store);
+  const confirmState = useSignal(null);
+  const showPendingPanel = useSignal(false);
+  function handleDeleteTask(taskId, title) {
+    confirmState.value = {
+      message: `Are you sure you want to delete task "${title}"? This action can be undone until changes are pushed upstream.`,
+      onConfirm: () => {
+        store.deleteTask(taskId);
+        confirmState.value = null;
+      }
+    };
+  }
+  function handleDeleteProject(projectId, name) {
+    const taskCount = store.mergedTasks.value.filter((t4) => t4.projectId.value === projectId).length;
+    confirmState.value = {
+      message: `Are you sure you want to delete project "${name}"?${taskCount > 0 ? ` This will also delete ${taskCount} associated task(s).` : ""} This action can be undone until changes are pushed upstream.`,
+      onConfirm: () => {
+        store.deleteProject(projectId);
+        confirmState.value = null;
+      }
+    };
+  }
   y2(() => {
     function onKeyDown(e4) {
       if (e4.key === "Escape") {
+        if (confirmState.value) {
+          confirmState.value = null;
+          return;
+        }
+        if (showPendingPanel.value) {
+          showPendingPanel.value = false;
+          return;
+        }
         store.selectEntity(null);
       }
       if (e4.key === "z" && (e4.ctrlKey || e4.metaKey)) {
@@ -3508,6 +4742,9 @@ function GanttChart(props) {
   }, []);
   function handleTaskPointerDown(e4, taskId, edge, paneType) {
     dragHandler.onTaskPointerDown(e4, taskId, edge, paneType);
+  }
+  function handleKeyDatePointerDown(e4, projectId, keyDateIndex, currentDate) {
+    dragHandler.onKeyDatePointerDown(e4, projectId, keyDateIndex, currentDate);
   }
   function handleDrop(e4) {
     dragHandler.handleTimelineDrop(e4);
@@ -3581,6 +4818,31 @@ function GanttChart(props) {
               children: "Refresh"
             }
           ),
+          /* @__PURE__ */ u4(
+            "button",
+            {
+              class: "gantt-btn",
+              title: "View and push pending local changes",
+              style: {
+                padding: "4px 12px",
+                border: "1px solid var(--interactive-accent, #4A90D9)",
+                borderRadius: "4px",
+                background: store.pendingChanges.value.length > 0 ? "var(--interactive-accent, #4A90D9)" : "var(--background-secondary, #f5f5f5)",
+                color: store.pendingChanges.value.length > 0 ? "#fff" : "var(--text-normal, #333)",
+                cursor: "pointer",
+                fontSize: "12px",
+                fontWeight: store.pendingChanges.value.length > 0 ? 500 : "normal"
+              },
+              onClick: () => {
+                showPendingPanel.value = true;
+              },
+              children: [
+                "Pending (",
+                store.pendingChanges.value.length,
+                ")"
+              ]
+            }
+          ),
           /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", fontSize: "12px" }, children: [
             store.mergedTasks.value.length,
             " tasks \xB7 ",
@@ -3598,8 +4860,30 @@ function GanttChart(props) {
       {
         store,
         onTaskPointerDown: handleTaskPointerDown,
+        onKeyDatePointerDown: handleKeyDatePointerDown,
         onDrop: handleDrop,
-        onDragOver: handleDragOver
+        onDragOver: handleDragOver,
+        onDeleteTask: handleDeleteTask,
+        onDeleteProject: handleDeleteProject
+      }
+    ),
+    confirmState.value && /* @__PURE__ */ u4(
+      ConfirmDialog,
+      {
+        message: confirmState.value.message,
+        onConfirm: confirmState.value.onConfirm,
+        onCancel: () => {
+          confirmState.value = null;
+        }
+      }
+    ),
+    showPendingPanel.value && /* @__PURE__ */ u4(
+      PendingChangesPanel,
+      {
+        store,
+        onClose: () => {
+          showPendingPanel.value = false;
+        }
       }
     )
   ] });
@@ -3744,6 +5028,9 @@ function createObsidianConnectorContext(config, vaultAdapter, requestUrl) {
     },
     readFile: async (path) => {
       return await vaultAdapter.read(path);
+    },
+    writeFile: async (path, content) => {
+      await vaultAdapter.write(path, content);
     },
     parseCSV: (text, options) => {
       return parseCSV(text, options);

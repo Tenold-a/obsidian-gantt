@@ -23,15 +23,17 @@ The platform SHALL provide an `IStorage` implementation with methods: `read(path
 - **THEN** `read` and `write` SHALL use `localStorage` with path-mapped keys (e.g., `gantt:cache/my-jira.json`)
 
 ### Requirement: IConnectorLoader interface
-The platform SHALL provide an `IConnectorLoader` with a `load(scriptPath: string): Promise<ConnectorModule>` method. `ConnectorModule` SHALL contain the `fetch` and `transform` functions exported by the connector script.
+The platform SHALL provide an `IConnectorLoader` with a `load(scriptPath: string): Promise<ConnectorModule>` method. `ConnectorModule` SHALL contain the `fetch`, `transform`, and optionally `push` functions exported by the connector script. When creating the `ConnectorContext` for connector execution, the platform SHALL include `readFile`, `writeFile`, and `parseCSV` implementations.
 
 #### Scenario: Obsidian loads connector from vault file
-- **WHEN** `load("connectors/jira.js")` is called in Obsidian
-- **THEN** the plugin SHALL read the file from `vault/connectors/jira.js`, execute it in a sandboxed context, and return the exported functions
+- **WHEN** `load("connectors/csv-connector.js")` is called in Obsidian
+- **THEN** the plugin SHALL read the file from the vault, execute it in a sandboxed context, and return the exported functions
+- **AND** the `ConnectorContext` passed to the connector SHALL include `readFile` and `writeFile` backed by the Vault adapter and `parseCSV` backed by the core CSV parser
 
 #### Scenario: Web loads connector from uploaded file
 - **WHEN** `load("my-connector")` is called in the web app
 - **THEN** the app SHALL retrieve the connector script content from localStorage and execute it
+- **AND** the `ConnectorContext` SHALL include `readFile` backed by the fetch API, `writeFile` backed by localStorage, and `parseCSV` backed by the core CSV parser
 
 ### Requirement: Theme interface
 The platform SHALL provide a `theme` object with: `isDark(): boolean`, `onChange(callback): void`, and `variables: Record<string, string>` (CSS variable names to values).

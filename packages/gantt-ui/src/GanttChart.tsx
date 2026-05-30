@@ -32,6 +32,17 @@ function dateToPx(date: string): number {
   return dateToAbsolutePixel(date, DAY_WIDTH);
 }
 
+/** Generate a stable HSL color from a string for position tags. */
+function hashColor(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    hash |= 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 55%, 35%)`;
+}
+
 /** Convert absolute pixel to date. */
 function pxToDate(px: number): string {
   return absolutePixelToDate(px, DAY_WIDTH);
@@ -42,13 +53,15 @@ function pxToDate(px: number): string {
 // ============================================================
 
 function TaskList(props: {
-  labels: { key: string; name: string; color?: string; tooltip?: string }[];
+  labels: { key: string; name: string; color?: string; position?: string; positionColor?: string; tooltip?: string }[];
   rowHeights: number[];
+  scrollTop?: number;
   highlightedRowKeys?: Set<string>;
   dimmedRowKeys?: Set<string>;
   onRowClick?: (key: string) => void;
   headerContent?: any;
 }) {
+  const totalRowsHeight = props.rowHeights.reduce((a, b) => a + b, 0);
   return (
     <div
       class="gantt-task-list"
@@ -63,10 +76,11 @@ function TaskList(props: {
       <div style={{ height: '44px', borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)', display: 'flex', alignItems: 'center', paddingLeft: '8px', paddingRight: '8px' }}>
         {props.headerContent}
       </div>
-      {/* Rows — static, no scroll transform */}
+      {/* Rows — synced vertically with timeline via translateY */}
       <div
         style={{
-          height: `${props.rowHeights.reduce((a, b) => a + b, 0)}px`,
+          height: `${totalRowsHeight}px`,
+          transform: props.scrollTop ? `translateY(-${props.scrollTop}px)` : undefined,
         }}
       >
         {props.labels.map((label, i) => {
@@ -107,6 +121,14 @@ function TaskList(props: {
                   }}
                 />
               )}
+              {label.position && (
+                <span
+                  class="gantt-position-badge"
+                  style={{ background: label.positionColor || 'var(--background-modifier-border)' }}
+                >
+                  {label.position}
+                </span>
+              )}
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={label.tooltip}>{label.name}</span>
             </div>
           );
@@ -132,6 +154,7 @@ function Timeline(props: {
   onRowClick: (key: string) => void;
   onTaskClick: (taskId: string) => void;
   onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
+  onKeyDatePointerDown?: (e: PointerEvent, projectId: string, keyDateIndex: number, currentDate: string) => void;
   onDrop: (e: DragEvent) => void;
   onDragOver: (e: DragEvent) => void;
 }) {
@@ -468,13 +491,43 @@ function Timeline(props: {
               date={kd.date}
               color={kd.color}
               icon={kd.icon}
+              onPointerDown={props.onKeyDatePointerDown
+                ? (e) => props.onKeyDatePointerDown!(e, projectId, ki, kd.date)
+                : undefined}
             />
           ));
         })}
 
-        {/* Drag ghost bar */}
+        {/* Drag ghost bar / key date ghost */}
         {dragState.value && (() => {
           const ds = dragState.value;
+          // Only show ghost in the pane where the drag originated
+          if (ds.paneType !== paneType) return null;
+
+          if (ds.dragMode === 'keyDate') {
+            const ghostLayout = groupLayout[ds.rowIndex];
+            const ghostTop = ghostLayout ? ghostLayout.startY + 3 : ds.rowIndex * ROW_HEIGHT + 3;
+            return (
+              <div
+                class="gantt-key-date-ghost"
+                style={{
+                  position: 'absolute',
+                  left: `${ds.ghostLeft - bodyOriginPx - 8}px`,
+                  top: `${ghostTop}px`,
+                  width: '16px',
+                  height: '16px',
+                  borderRadius: '50%',
+                  background: '#4A90D9',
+                  opacity: 0.5,
+                  zIndex: 10,
+                  pointerEvents: 'none',
+                  border: '2px solid #4A90D9',
+                }}
+              />
+            );
+          }
+
+          // Task bar ghost
           const barHeight = ROW_HEIGHT * 0.6;
           const ghostLayout = groupLayout[ds.rowIndex];
           const barTop = ghostLayout
@@ -482,8 +535,6 @@ function Timeline(props: {
             : ds.rowIndex * ROW_HEIGHT + (ROW_HEIGHT - barHeight) / 2;
           const ghostTask = store.mergedTasks.value.find(t => t.id === ds.taskId);
           const ghostTitle = ghostTask?.title.value ?? '';
-          // Only show ghost in the pane where the drag originated
-          if (ds.paneType !== paneType) return null;
           return (
             <div
               class="gantt-task-bar gantt-ghost-bar"
@@ -529,6 +580,7 @@ function GanttPane(props: {
   scrollTop: number;
   onScroll: (scrollLeft: number, scrollTop: number) => void;
   onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
+  onKeyDatePointerDown?: (e: PointerEvent, projectId: string, keyDateIndex: number, currentDate: string) => void;
   onDrop: (e: DragEvent) => void;
   onDragOver: (e: DragEvent) => void;
 }) {
@@ -542,11 +594,12 @@ function GanttPane(props: {
       const key = type === 'person' ? (g as PersonGroup).personId : (g as ProjectGroup).projectId;
       if (type === 'person') {
         const pg = g as PersonGroup;
-        const displayName = pg.position ? `${pg.position} · ${pg.personName}` : pg.personName;
         return {
           key,
-          name: displayName,
+          name: pg.personName,
           color: undefined as string | undefined,
+          position: pg.position || undefined,
+          positionColor: pg.position ? hashColor(pg.position) : undefined,
           tooltip: pg.personId === '__unassigned__' ? undefined : `ID: ${pg.personId}`,
         };
       }
@@ -635,6 +688,7 @@ function GanttPane(props: {
       <TaskList
         labels={labels}
         rowHeights={groupHeights}
+        scrollTop={props.scrollTop}
         highlightedRowKeys={highlightedRowKeys}
         dimmedRowKeys={dimmedRowKeys}
         onRowClick={handleRowClick}
@@ -671,6 +725,7 @@ function GanttPane(props: {
         onRowClick={handleRowClick}
         onTaskClick={handleTaskClick}
         onTaskPointerDown={props.onTaskPointerDown}
+        onKeyDatePointerDown={props.onKeyDatePointerDown}
         onDrop={props.onDrop}
         onDragOver={props.onDragOver}
       />
@@ -789,7 +844,7 @@ function UnassignedPanel(props: {
 // DualPane — top-level layout
 // ============================================================
 
-function ProjectDetail(props: { store: GanttStore }) {
+function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string, name: string) => void }) {
   const { store } = props;
   const sel = store.selectedEntity.value;
   const editing = useSignal(false);
@@ -804,6 +859,38 @@ function ProjectDetail(props: { store: GanttStore }) {
   const requester = projectOverrides?.requester ?? project.requester ?? '';
   const keyDates = projectOverrides?.keyDates ?? project.keyDates ?? [];
   const keyLinks = projectOverrides?.keyLinks ?? project.keyLinks ?? [];
+
+  // Inline name editing
+  const editName = useSignal(false);
+  const editNameValue = useSignal(project.name);
+  let nameInputRef: HTMLInputElement | null = null;
+
+  function startEditName() {
+    editNameValue.value = project!.name;
+    editName.value = true;
+    requestAnimationFrame(() => nameInputRef?.focus());
+  }
+
+  function saveName() {
+    const newName = editNameValue.value.trim();
+    if (newName && newName !== project!.name) {
+      store.persistProjectEdit(project!.id, 'name', newName);
+    }
+    editName.value = false;
+  }
+
+  function cancelName() {
+    editNameValue.value = project!.name;
+    editName.value = false;
+  }
+
+  function handleNameKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') saveName();
+    if (e.key === 'Escape') cancelName();
+  }
+
+  // Associated tasks
+  const associatedTasks = store.mergedTasks.value.filter(t => t.projectId.value === project.id);
 
   // Local edit state
   const editDescription = useSignal(description);
@@ -863,7 +950,33 @@ function ProjectDetail(props: { store: GanttStore }) {
               width: '12px', height: '12px', borderRadius: '3px', background: project.color, flexShrink: 0,
             }} />
           )}
-          <span style={{ fontWeight: 'bold', fontSize: '14px', wordBreak: 'break-word' }}>{project.name}</span>
+          {editName.value ? (
+            <input
+              ref={(el: HTMLInputElement | null) => { nameInputRef = el; }}
+              type="text"
+              value={editNameValue.value}
+              onInput={(e) => { editNameValue.value = (e.target as HTMLInputElement).value; }}
+              onBlur={saveName}
+              onKeyDown={handleNameKeyDown}
+              class="gantt-inline-edit-input"
+              style={{
+                flex: 1,
+                fontSize: '14px',
+                fontWeight: 'bold',
+                padding: '2px 6px',
+                border: '1px solid var(--interactive-accent, #4A90D9)',
+                borderRadius: '4px',
+                background: 'var(--background-primary, #fff)',
+                color: 'var(--text-normal, #333)',
+              }}
+            />
+          ) : (
+            <span
+              style={{ fontWeight: 'bold', fontSize: '14px', wordBreak: 'break-word', cursor: 'text' }}
+              onClick={startEditName}
+              title="Click to edit name"
+            >{project.name}</span>
+          )}
         </div>
         <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
           {editing.value ? (
@@ -896,6 +1009,14 @@ function ProjectDetail(props: { store: GanttStore }) {
                 }}
               >Edit</button>
               <button
+                onClick={() => props.onDelete?.(project.id, project.name)}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px',
+                  lineHeight: 1, padding: '0 2px', color: 'var(--text-error, #e00)',
+                }}
+                title="Delete project"
+              >🗑</button>
+              <button
                 onClick={() => store.selectEntity(null)}
                 style={{
                   background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px',
@@ -906,6 +1027,25 @@ function ProjectDetail(props: { store: GanttStore }) {
             </>
           )}
         </div>
+      </div>
+
+      {/* Status */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>Status</div>
+        <select
+          value={projectOverrides?.status ?? project.status ?? 'pending'}
+          onChange={(e) => store.setProjectStatus(project.id, (e.target as HTMLSelectElement).value)}
+          style={{
+            width: '100%', fontSize: '12px', padding: '3px 6px', borderRadius: '4px',
+            border: '1px solid var(--background-modifier-border, #ccc)',
+            background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+            cursor: 'pointer',
+          }}
+        >
+          {STATUS_OPTIONS.map(opt => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
       </div>
 
       {/* Description */}
@@ -1183,11 +1323,71 @@ function ProjectDetail(props: { store: GanttStore }) {
           </div>
         )}
       </div>
+
+      {/* Associated Tasks */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>Tasks ({associatedTasks.length})</div>
+        {associatedTasks.length > 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            {associatedTasks.map(t => (
+              <div
+                key={t.id}
+                onClick={() => store.selectEntity({ type: 'task', id: t.id })}
+                style={{
+                  fontSize: '12px',
+                  padding: '3px 6px',
+                  cursor: 'pointer',
+                  borderRadius: '4px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}
+                class="gantt-task-link-item"
+                title="Click to view task details"
+              >
+                <StatusBadge status={t.status.value} />
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {t.title.value}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={valueStyle}>No tasks</div>
+        )}
+      </div>
     </div>
   );
 }
 
-function DetailPanel(props: { store: GanttStore }) {
+const STATUS_OPTIONS: { value: string; label: string; color: string }[] = [
+  { value: 'pending', label: 'Pending', color: '#888' },
+  { value: 'in-progress', label: 'In Progress', color: '#2196f3' },
+  { value: 'cancelled', label: 'Cancelled', color: '#e53935' },
+  { value: 'pending-online', label: 'Pending Online', color: '#fb8c00' },
+  { value: 'online', label: 'Online', color: '#00897b' },
+  { value: 'completed', label: 'Completed', color: '#4caf50' },
+];
+
+function StatusBadge(props: { status: string }) {
+  const opt = STATUS_OPTIONS.find(o => o.value === props.status);
+  const color = opt?.color ?? '#888';
+  const label = opt?.label ?? props.status;
+  return (
+    <span style={{
+      display: 'inline-block',
+      padding: '2px 8px',
+      borderRadius: '10px',
+      fontSize: '11px',
+      fontWeight: 500,
+      color: '#fff',
+      background: color,
+      whiteSpace: 'nowrap',
+    }}>{label}</span>
+  );
+}
+
+function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, title: string) => void }) {
   const { store } = props;
   const sel = store.selectedEntity.value;
 
@@ -1203,6 +1403,35 @@ function DetailPanel(props: { store: GanttStore }) {
   const project = task.projectId.value
     ? store.projects.value.find(p => p.id === task.projectId.value)
     : null;
+
+  // Inline title editing
+  const editTitle = useSignal(false);
+  const editTitleValue = useSignal(task.title.value);
+  let titleInputRef: HTMLInputElement | null = null;
+
+  function startEditTitle() {
+    editTitleValue.value = task!.title.value;
+    editTitle.value = true;
+    requestAnimationFrame(() => titleInputRef?.focus());
+  }
+
+  function saveTitle() {
+    const newTitle = editTitleValue.value.trim();
+    if (newTitle && newTitle !== task!.title.value) {
+      store.persistEdit(task!.id, 'title', newTitle);
+    }
+    editTitle.value = false;
+  }
+
+  function cancelTitle() {
+    editTitleValue.value = task!.title.value;
+    editTitle.value = false;
+  }
+
+  function handleTitleKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') saveTitle();
+    if (e.key === 'Escape') cancelTitle();
+  }
 
   const sourceLabel = task.connectorId
     ? `Connector: ${task.connectorId}`
@@ -1226,34 +1455,81 @@ function DetailPanel(props: { store: GanttStore }) {
         background: 'var(--background-secondary, #f5f5f5)',
       }}
     >
-      {/* Header with close button */}
+      {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
-        <div style={{ fontWeight: 'bold', fontSize: '14px', wordBreak: 'break-word', flex: 1 }}>
-          {task.title.value}
+        {editTitle.value ? (
+          <input
+            ref={(el: HTMLInputElement | null) => { titleInputRef = el; }}
+            type="text"
+            value={editTitleValue.value}
+            onInput={(e) => { editTitleValue.value = (e.target as HTMLInputElement).value; }}
+            onBlur={saveTitle}
+            onKeyDown={handleTitleKeyDown}
+            class="gantt-inline-edit-input"
+            style={{
+              flex: 1,
+              fontSize: '14px',
+              fontWeight: 'bold',
+              padding: '2px 6px',
+              border: '1px solid var(--interactive-accent, #4A90D9)',
+              borderRadius: '4px',
+              background: 'var(--background-primary, #fff)',
+              color: 'var(--text-normal, #333)',
+            }}
+          />
+        ) : (
+          <div
+            style={{ fontWeight: 'bold', fontSize: '14px', wordBreak: 'break-word', flex: 1, cursor: 'text' }}
+            onClick={startEditTitle}
+            title="Click to edit title"
+          >
+            {task.title.value}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: '2px', flexShrink: 0, marginLeft: '4px' }}>
+          <button
+            onClick={() => props.onDelete?.(task.id, task.title.value)}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px',
+              lineHeight: 1, padding: '0 2px', color: 'var(--text-error, #e00)',
+            }}
+            title="Delete task"
+          >🗑</button>
+          <button
+            onClick={() => store.selectEntity(null)}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px',
+              lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
+            }}
+            title="Close detail panel"
+          >x</button>
         </div>
-        <button
-          onClick={() => store.selectEntity(null)}
-          style={{
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            fontSize: '16px',
-            lineHeight: 1,
-            padding: '0 2px',
-            color: 'var(--text-muted, #999)',
-            flexShrink: 0,
-            marginLeft: '4px',
-          }}
-          title="Close detail panel"
-        >
-          x
-        </button>
       </div>
 
       {/* Fields */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        <FieldRow label="Start" value={task.startDate.value ?? '—'} />
-        <FieldRow label="End" value={task.endDate.value ?? '—'} />
+
+        {/* Status */}
+        <div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Status</div>
+          <select
+            value={task.status.value}
+            onChange={(e) => store.setTaskStatus(task.id, (e.target as HTMLSelectElement).value)}
+            style={{
+              width: '100%', fontSize: '12px', padding: '3px 6px', borderRadius: '4px',
+              border: '1px solid var(--background-modifier-border, #ccc)',
+              background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+              cursor: 'pointer',
+            }}
+          >
+            {STATUS_OPTIONS.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <FieldRow label="Start" value={task.startDate.value ?? '-'} />
+        <FieldRow label="End" value={task.endDate.value ?? '-'} />
 
         <div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Progress</div>
@@ -1276,7 +1552,7 @@ function DetailPanel(props: { store: GanttStore }) {
           </div>
         </div>
 
-        <FieldRow label="Person" value={personName ?? '—'} />
+        <FieldRow label="Person" value={personName ?? '-'} />
 
         <div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Project</div>
@@ -1286,8 +1562,39 @@ function DetailPanel(props: { store: GanttStore }) {
                 width: '10px', height: '10px', borderRadius: '2px', background: project.color, flexShrink: 0,
               }} />
             )}
-            <span>{project?.name ?? task.projectId.value ?? '—'}</span>
+            <span
+              style={{ cursor: 'pointer', color: 'var(--interactive-accent, #4A90D9)' }}
+              onClick={() => project && store.selectEntity({ type: 'project', id: project.id })}
+              title="Click to view project details"
+            >
+              {project?.name ?? task.projectId.value ?? '-'}
+            </span>
           </div>
+        </div>
+
+        {/* URL */}
+        <div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Link</div>
+          {task.url.value ? (
+            <a
+              href={task.url.value}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                color: 'var(--interactive-accent, #4A90D9)',
+                textDecoration: 'none',
+                fontSize: '12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+              }}
+            >
+              <span style={{ fontSize: '10px' }}>↗</span>
+              {task.url.value}
+            </a>
+          ) : (
+            <div style={{ fontSize: '12px' }}>—</div>
+          )}
         </div>
 
         <div>
@@ -1297,7 +1604,7 @@ function DetailPanel(props: { store: GanttStore }) {
               ? task.dependencies.value.map(d => (
                   <div key={d} style={{ padding: '1px 0' }}>{d}</div>
                 ))
-              : '—'}
+              : '-'}
           </div>
         </div>
 
@@ -1337,16 +1644,374 @@ function FieldRow(props: { label: string; value: string }) {
   );
 }
 
+// ============================================================
+// ConfirmDialog — modal confirmation dialog
+// ============================================================
+
+function ConfirmDialog(props: {
+  message: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  function handleKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Escape') props.onCancel();
+  }
+
+  // Focus trap and Escape listener
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  return (
+    <div
+      class="gantt-confirm-backdrop"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.4)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onCancel();
+      }}
+    >
+      <div
+        class="gantt-confirm-dialog"
+        style={{
+          background: 'var(--background-primary, #fff)',
+          borderRadius: '8px',
+          padding: '24px',
+          maxWidth: '400px',
+          width: '90%',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
+          color: 'var(--text-normal, #333)',
+        }}
+      >
+        <div style={{ marginBottom: '20px', fontSize: '14px', lineHeight: 1.5 }}>{props.message}</div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+          <button
+            onClick={props.onCancel}
+            class="gantt-btn"
+            style={{
+              padding: '6px 16px',
+              border: '1px solid var(--background-modifier-border, #ccc)',
+              borderRadius: '4px',
+              background: 'var(--background-secondary, #f5f5f5)',
+              cursor: 'pointer',
+              fontSize: '13px',
+              color: 'var(--text-normal, #333)',
+            }}
+          >Cancel</button>
+          <button
+            onClick={props.onConfirm}
+            class="gantt-btn gantt-btn-danger"
+            style={{
+              padding: '6px 16px',
+              border: 'none',
+              borderRadius: '4px',
+              background: 'var(--text-error, #e53935)',
+              color: '#fff',
+              cursor: 'pointer',
+              fontSize: '13px',
+              fontWeight: 500,
+            }}
+          >Delete</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// PendingChangesPanel — shows local edits pending push
+// ============================================================
+
+function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) {
+  const { store } = props;
+  const changes = store.pendingChanges.value;
+  const pushing = useSignal(false);
+  const pushResults = useSignal<{ connectorId: string; success: boolean; error?: string }[] | null>(null);
+
+  async function handlePush() {
+    pushing.value = true;
+    pushResults.value = null;
+    try {
+      const results = await store.pushChanges();
+      pushResults.value = results;
+    } finally {
+      pushing.value = false;
+    }
+  }
+
+  const stats = {
+    added: changes.filter(c => c.changeType === 'added').length,
+    modified: changes.filter(c => c.changeType === 'modified').length,
+    deleted: changes.filter(c => c.changeType === 'deleted').length,
+  };
+
+  const changeTypeLabel = {
+    added: 'New',
+    modified: 'Updated',
+    deleted: 'Deleted',
+  };
+
+  const changeTypeColor = {
+    added: '#4caf50',
+    modified: '#2196f3',
+    deleted: '#e53935',
+  };
+
+  const changeTypeBadge = {
+    added: 'NEW',
+    modified: 'MOD',
+    deleted: 'DEL',
+  };
+
+  return (
+    <div
+      class="gantt-confirm-backdrop"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.4)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div
+        class="gantt-pending-panel"
+        style={{
+          background: 'var(--background-primary, #fff)',
+          borderRadius: '8px',
+          padding: '0',
+          maxWidth: '560px',
+          width: '90%',
+          maxHeight: '75vh',
+          display: 'flex',
+          flexDirection: 'column',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
+          color: 'var(--text-normal, #333)',
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          padding: '20px 24px 16px',
+          borderBottom: changes.length > 0 ? '1px solid var(--background-modifier-border, #eee)' : 'none',
+        }}>
+          <div>
+            <h3 style={{ margin: '0 0 4px', fontSize: '16px' }}>Changes to Push</h3>
+            <span style={{ fontSize: '12px', color: 'var(--text-muted, #999)' }}>
+              {stats.added > 0 && <span style={{ color: changeTypeColor.added, marginRight: '10px' }}>+{stats.added} new</span>}
+              {stats.modified > 0 && <span style={{ color: changeTypeColor.modified, marginRight: '10px' }}>~{stats.modified} updated</span>}
+              {stats.deleted > 0 && <span style={{ color: changeTypeColor.deleted }}>-{stats.deleted} deleted</span>}
+              {changes.length === 0 && 'No pending changes'}
+            </span>
+          </div>
+          <button
+            onClick={props.onClose}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px',
+              lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
+            }}
+          >x</button>
+        </div>
+
+        {/* Body - scrollable */}
+        <div style={{ overflowY: 'auto', padding: '16px 24px', flex: 1 }}>
+          {changes.length === 0 ? (
+            <div style={{ color: 'var(--text-muted, #999)', fontSize: '13px', padding: '20px 0', textAlign: 'center' }}>
+              No pending changes. All local modifications have been pushed.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {changes.map((change, i) => (
+                <div
+                  key={`${change.entityType}-${change.entityId}-${change.changeType}-${i}`}
+                  class="gantt-change-card"
+                  style={{
+                    border: '1px solid var(--background-modifier-border, #e0e0e0)',
+                    borderRadius: '6px',
+                    padding: '12px',
+                    fontSize: '12px',
+                  }}
+                >
+                  {/* Card header: type badge + entity name */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '1px 6px',
+                      borderRadius: '3px',
+                      fontSize: '9px',
+                      fontWeight: 700,
+                      color: '#fff',
+                      background: changeTypeColor[change.changeType],
+                      letterSpacing: '0.5px',
+                      flexShrink: 0,
+                    }}>
+                      {changeTypeBadge[change.changeType]}
+                    </span>
+                    <span style={{
+                      fontSize: '10px',
+                      color: 'var(--text-muted, #999)',
+                      textTransform: 'uppercase',
+                      flexShrink: 0,
+                    }}>
+                      {change.entityType === 'task' ? 'Task' : 'Project'}
+                    </span>
+                    <span style={{
+                      fontWeight: 600,
+                      fontSize: '13px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      flex: 1,
+                    }}>
+                      {change.entityName}
+                    </span>
+                  </div>
+
+                  {/* Modified: field changes */}
+                  {change.changeType === 'modified' && change.fields && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                      {change.fields.map((f, j) => (
+                        <div key={j} style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
+                          <span style={{
+                            color: 'var(--text-muted, #999)',
+                            fontSize: '11px',
+                            minWidth: '70px',
+                            flexShrink: 0,
+                          }}>
+                            {f.label}:
+                          </span>
+                          <span style={{
+                            color: 'var(--interactive-accent, #4A90D9)',
+                            fontWeight: 500,
+                          }}>
+                            {f.field === 'keyDates'
+                              ? `${(f.newValue as unknown[]).length} dates`
+                              : f.field === 'keyLinks'
+                                ? `${(f.newValue as unknown[]).length} links`
+                                : f.field === 'tags'
+                                  ? `[${(f.newValue as string[]).join(', ')}]`
+                                  : f.field === 'dependencies'
+                                    ? `[${(f.newValue as string[]).join(', ')}]`
+                                    : String(f.newValue)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Added: summary info */}
+                  {change.changeType === 'added' && change.addedSummary && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                      {Object.entries(change.addedSummary).map(([key, val]) => (
+                        <div key={key} style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
+                          <span style={{
+                            color: 'var(--text-muted, #999)',
+                            fontSize: '11px',
+                            minWidth: '50px',
+                            flexShrink: 0,
+                          }}>
+                            {key}:
+                          </span>
+                          <span style={{ color: '#4caf50', fontWeight: 500 }}>
+                            {String(val)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Deleted: related info */}
+                  {change.changeType === 'deleted' && (
+                    <div style={{ fontSize: '11px', color: 'var(--text-error, #e53935)' }}>
+                      {change.relatedInfo
+                        ? `Will be deleted · ${change.relatedInfo}`
+                        : 'Will be deleted'}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer with push button */}
+        {changes.length > 0 && (
+          <div style={{
+            padding: '12px 24px',
+            borderTop: '1px solid var(--background-modifier-border, #eee)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+          }}>
+            <button
+              onClick={handlePush}
+              disabled={pushing.value}
+              class="gantt-btn"
+              style={{
+                padding: '8px 20px',
+                border: 'none',
+                borderRadius: '4px',
+                background: pushing.value ? 'var(--background-modifier-border, #ccc)' : 'var(--interactive-accent, #4A90D9)',
+                color: '#fff',
+                cursor: pushing.value ? 'not-allowed' : 'pointer',
+                fontSize: '13px',
+                fontWeight: 500,
+              }}
+            >
+              {pushing.value ? 'Pushing...' : `Push ${changes.length} Changes`}
+            </button>
+            {pushResults.value && (
+              <span style={{ fontSize: '12px' }}>
+                {pushResults.value.some(r => r.success)
+                  ? `Pushed to ${pushResults.value.filter(r => r.success).map(r => r.connectorId).join(', ')}`
+                  : 'Push failed'}
+                {pushResults.value.some(r => !r.success) && (
+                  <span style={{ color: 'var(--text-error, #e00)' }}>
+                    {' · '}
+                    {pushResults.value.filter(r => !r.success).map(r => r.error).join('; ')}
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function DualPane(props: {
   store: GanttStore;
   onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
+  onKeyDatePointerDown?: (e: PointerEvent, projectId: string, keyDateIndex: number, currentDate: string) => void;
   onDrop: (e: DragEvent) => void;
   onDragOver: (e: DragEvent) => void;
+  onDeleteTask?: (taskId: string, title: string) => void;
+  onDeleteProject?: (projectId: string, name: string) => void;
 }) {
   const { store } = props;
 
-  const personScrollTop = useSignal(0);
-  const projectScrollTop = useSignal(0);
+  // Vertical scroll guard flags to prevent feedback loops
+  let personVGuardActive = false;
+  let personVGuardTimer: ReturnType<typeof setTimeout> | null = null;
+  let projectVGuardActive = false;
+  let projectVGuardTimer: ReturnType<typeof setTimeout> | null = null;
+
   const paneRatio = useSignal(0.5); // 50/50 split
 
   // Drag resize state
@@ -1392,9 +2057,17 @@ export function DualPane(props: {
               store={store}
               type="person"
               scrollLeft={store.sharedScrollLeft.value}
-              scrollTop={personScrollTop.value}
-              onScroll={(sl) => {
+              scrollTop={store.personScrollTop.value}
+              onScroll={(sl, st) => {
                 store.sharedScrollLeft.value = sl;
+                if (!personVGuardActive) {
+                  personVGuardActive = true;
+                  store.personScrollTop.value = st;
+                  if (personVGuardTimer) clearTimeout(personVGuardTimer);
+                  personVGuardTimer = setTimeout(() => {
+                    personVGuardActive = false;
+                  }, 100);
+                }
               }}
               onTaskPointerDown={props.onTaskPointerDown}
               onDrop={props.onDrop}
@@ -1425,12 +2098,20 @@ export function DualPane(props: {
               store={store}
               type="project"
               scrollLeft={store.sharedScrollLeft.value}
-              scrollTop={projectScrollTop.value}
+              scrollTop={store.projectScrollTop.value}
               onScroll={(sl, st) => {
                 store.sharedScrollLeft.value = sl;
-                projectScrollTop.value = st;
+                if (!projectVGuardActive) {
+                  projectVGuardActive = true;
+                  store.projectScrollTop.value = st;
+                  if (projectVGuardTimer) clearTimeout(projectVGuardTimer);
+                  projectVGuardTimer = setTimeout(() => {
+                    projectVGuardActive = false;
+                  }, 100);
+                }
               }}
               onTaskPointerDown={props.onTaskPointerDown}
+              onKeyDatePointerDown={props.onKeyDatePointerDown}
               onDrop={props.onDrop}
               onDragOver={props.onDragOver}
             />
@@ -1438,8 +2119,8 @@ export function DualPane(props: {
         </div>
 
         {/* Detail sidebar — appears when task or project is selected */}
-        {showTaskDetail && <DetailPanel store={store} />}
-        {showProjectDetail && <ProjectDetail store={store} />}
+        {showTaskDetail && <DetailPanel store={store} onDelete={props.onDeleteTask} />}
+        {showProjectDetail && <ProjectDetail store={store} onDelete={props.onDeleteProject} />}
       </div>
     </div>
   );
@@ -1455,10 +2136,43 @@ export function GanttChart(props: {
   const { store } = props;
   const dragHandler = createDragHandler(store);
 
+  // Confirmation dialog state
+  const confirmState = useSignal<{ message: string; onConfirm: () => void } | null>(null);
+  const showPendingPanel = useSignal(false);
+
+  function handleDeleteTask(taskId: string, title: string) {
+    confirmState.value = {
+      message: `Are you sure you want to delete task "${title}"? This action can be undone until changes are pushed upstream.`,
+      onConfirm: () => {
+        store.deleteTask(taskId);
+        confirmState.value = null;
+      },
+    };
+  }
+
+  function handleDeleteProject(projectId: string, name: string) {
+    const taskCount = store.mergedTasks.value.filter(t => t.projectId.value === projectId).length;
+    confirmState.value = {
+      message: `Are you sure you want to delete project "${name}"?${taskCount > 0 ? ` This will also delete ${taskCount} associated task(s).` : ''} This action can be undone until changes are pushed upstream.`,
+      onConfirm: () => {
+        store.deleteProject(projectId);
+        confirmState.value = null;
+      },
+    };
+  }
+
   // Keyboard handler for Escape and Undo
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
+        if (confirmState.value) {
+          confirmState.value = null;
+          return;
+        }
+        if (showPendingPanel.value) {
+          showPendingPanel.value = false;
+          return;
+        }
         store.selectEntity(null);
       }
       if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
@@ -1472,6 +2186,10 @@ export function GanttChart(props: {
 
   function handleTaskPointerDown(e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') {
     dragHandler.onTaskPointerDown(e, taskId, edge, paneType);
+  }
+
+  function handleKeyDatePointerDown(e: PointerEvent, projectId: string, keyDateIndex: number, currentDate: string) {
+    dragHandler.onKeyDatePointerDown(e, projectId, keyDateIndex, currentDate);
   }
 
   function handleDrop(e: DragEvent) {
@@ -1555,6 +2273,23 @@ export function GanttChart(props: {
         >
           Refresh
         </button>
+        <button
+          class="gantt-btn"
+          title="View and push pending local changes"
+          style={{
+            padding: '4px 12px',
+            border: '1px solid var(--interactive-accent, #4A90D9)',
+            borderRadius: '4px',
+            background: store.pendingChanges.value.length > 0 ? 'var(--interactive-accent, #4A90D9)' : 'var(--background-secondary, #f5f5f5)',
+            color: store.pendingChanges.value.length > 0 ? '#fff' : 'var(--text-normal, #333)',
+            cursor: 'pointer',
+            fontSize: '12px',
+            fontWeight: store.pendingChanges.value.length > 0 ? 500 : 'normal',
+          }}
+          onClick={() => { showPendingPanel.value = true; }}
+        >
+          Pending ({store.pendingChanges.value.length})
+        </button>
         <span style={{ color: 'var(--text-muted, #999)', fontSize: '12px' }}>
           {store.mergedTasks.value.length} tasks · {store.personGroups.value.length} people · {store.projectGroups.value.length} projects
         </span>
@@ -1567,9 +2302,29 @@ export function GanttChart(props: {
       <DualPane
         store={store}
         onTaskPointerDown={handleTaskPointerDown}
+        onKeyDatePointerDown={handleKeyDatePointerDown}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
+        onDeleteTask={handleDeleteTask}
+        onDeleteProject={handleDeleteProject}
       />
+
+      {/* Confirm dialog */}
+      {confirmState.value && (
+        <ConfirmDialog
+          message={confirmState.value.message}
+          onConfirm={confirmState.value.onConfirm}
+          onCancel={() => { confirmState.value = null; }}
+        />
+      )}
+
+      {/* Pending changes panel */}
+      {showPendingPanel.value && (
+        <PendingChangesPanel
+          store={store}
+          onClose={() => { showPendingPanel.value = false; }}
+        />
+      )}
     </div>
   );
 }

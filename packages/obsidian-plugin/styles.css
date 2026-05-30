@@ -30,6 +30,40 @@
   filter: brightness(1.05);
 }
 
+/* Bar resize handles */
+.gantt-bar-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  cursor: ew-resize;
+  opacity: 0.3;
+  transition: opacity 0.15s;
+  z-index: 1;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(255, 255, 255, 0.5) 2px,
+    rgba(255, 255, 255, 0.5) 4px
+  );
+}
+
+.gantt-bar-handle-left {
+  left: 0;
+  border-radius: 4px 0 0 4px;
+}
+
+.gantt-bar-handle-right {
+  right: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+.gantt-task-bar:hover .gantt-bar-handle {
+  opacity: 0.8;
+}
+
 /* Row styles */
 .gantt-row {
   transition: opacity 0.15s ease, background 0.15s ease;
@@ -98,11 +132,13 @@
 /* Person position badge in task list rows */
 .gantt-task-list-row .gantt-position-badge {
   font-size: 10px;
-  color: var(--text-muted);
-  background: var(--background-modifier-border);
-  padding: 0 4px;
+  color: #fff;
+  padding: 1px 5px;
   border-radius: 3px;
   flex-shrink: 0;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 /* Sort toggle button */
@@ -156,4 +192,100 @@
 
 .gantt-task-bar:hover {
   z-index: 8 !important;
+}
+
+/* ============================================================
+   Inline name editing inputs (DetailPanel & ProjectDetail)
+   ============================================================ */
+
+.gantt-inline-edit-input {
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.gantt-inline-edit-input:focus {
+  border-color: var(--interactive-accent, #4A90D9) !important;
+  box-shadow: 0 0 0 1px var(--interactive-accent, #4A90D9);
+}
+
+/* ============================================================
+   Status badges
+   ============================================================ */
+
+.gantt-status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #fff;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   Confirmation dialog
+   ============================================================ */
+
+.gantt-confirm-backdrop {
+  animation: gantt-fade-in 0.15s ease;
+}
+
+.gantt-confirm-dialog {
+  animation: gantt-slide-up 0.15s ease;
+}
+
+@keyframes gantt-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes gantt-slide-up {
+  from { transform: translateY(10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.gantt-btn-danger:hover {
+  filter: brightness(1.1);
+}
+
+/* ============================================================
+   Pending changes panel
+   ============================================================ */
+
+.gantt-pending-panel {
+  animation: gantt-slide-up 0.15s ease;
+}
+
+.gantt-change-card {
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.gantt-change-card:hover {
+  border-color: var(--interactive-accent, #4A90D9) !important;
+  background: var(--background-modifier-hover, rgba(0,0,0,0.02));
+}
+
+.gantt-change-item:hover {
+  background: var(--background-modifier-hover, rgba(0,0,0,0.03));
+}
+
+/* ============================================================
+   Task link item (clickable task names in project detail)
+   ============================================================ */
+
+.gantt-task-link-item:hover {
+  background: var(--background-modifier-hover, rgba(0,0,0,0.03));
+}
+
+/* ============================================================
+   Delete button styling
+   ============================================================ */
+
+.gantt-btn-delete {
+  color: var(--text-error, #e53935);
+  transition: background 0.15s ease;
+}
+
+.gantt-btn-delete:hover {
+  background: rgba(229, 57, 53, 0.1);
 }

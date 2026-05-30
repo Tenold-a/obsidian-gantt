@@ -76,6 +76,9 @@ export function createObsidianConnectorContext(
     readFile: async (path: string): Promise<string> => {
       return await vaultAdapter.read(path);
     },
+    writeFile: async (path: string, content: string): Promise<void> => {
+      await vaultAdapter.write(path, content);
+    },
     parseCSV: (text: string, options?: CsvParseOptions): Record<string, string>[] => {
       return parseCSV(text, options);
     },

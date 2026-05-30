@@ -5,6 +5,7 @@ export {
   detectConflicts,
   applyFieldReset,
   mergeAll,
+  applyStatusCascade,
 } from './merge-engine';
 
 // Re-export date utilities
@@ -25,6 +26,9 @@ export type { MonthRange } from './date-utils';
 export { parseCSV } from './csv-parser';
 export type { CsvParseOptions } from './csv-parser';
 
+/** Lifecycle status for tasks and projects. */
+export type TaskStatus = 'pending' | 'in-progress' | 'cancelled' | 'pending-online' | 'online' | 'completed';
+
 // ============================================================
 // Canonical Data Types (output by connector transform())
 // ============================================================
@@ -41,6 +45,8 @@ export interface Task {
   endDate?: string;
   /** Progress 0-1 */
   progress?: number;
+  /** Lifecycle status */
+  status?: TaskStatus;
   /** References Person.id */
   personId?: string;
   /** References Project.id */
@@ -95,6 +101,8 @@ export interface Project {
   id: string;
   /** Display name (required) */
   name: string;
+  /** Lifecycle status */
+  status?: TaskStatus;
   /** CSS-compatible color for bars and headers */
   color?: string;
   /** Project introduction / summary */
@@ -130,6 +138,8 @@ export interface ConnectorContext {
   log: (message: string) => void;
   /** Read a local file and return its content as a string */
   readFile?: (path: string) => Promise<string>;
+  /** Write content to a local file */
+  writeFile?: (path: string, content: string) => Promise<void>;
   /** Parse CSV text into an array of record objects */
   parseCSV?: (text: string, options?: CsvParseOptions) => Record<string, string>[];
 }
@@ -138,6 +148,22 @@ export interface ConnectorContext {
 export interface ConnectorModule {
   fetch: (ctx: ConnectorContext) => Promise<unknown>;
   transform: (rawData: unknown, ctx: ConnectorContext) => CanonicalData;
+  /** Optional: push local changes back to the upstream system */
+  push?: (changes: PushChangesPayload, ctx: ConnectorContext) => Promise<PushResult>;
+}
+
+/** Payload passed to a connector's push() method. */
+export interface PushChangesPayload {
+  tasks: Task[];
+  projects: Project[];
+  deletedTaskIds: string[];
+  deletedProjectIds: string[];
+}
+
+/** Result returned by a connector's push() method. */
+export interface PushResult {
+  success: boolean;
+  error?: string;
 }
 
 /** Configuration for a connector instance. */
@@ -174,6 +200,7 @@ export interface LocalTask {
   startDate: FieldWithSource<string | null>;
   endDate: FieldWithSource<string | null>;
   progress: FieldWithSource<number>;
+  status: FieldWithSource<string>;
   personId: FieldWithSource<string | null>;
   projectId: FieldWithSource<string | null>;
   parentId: FieldWithSource<string | null>;
@@ -191,7 +218,7 @@ export interface LocalTask {
 
 /** A partial Task stored as a user override. */
 export type TaskOverride = Partial<
-  Pick<Task, 'startDate' | 'endDate' | 'progress' | 'personId' | 'projectId' | 'parentId' | 'dependencies' | 'tags' | 'title'>
+  Pick<Task, 'startDate' | 'endDate' | 'progress' | 'personId' | 'projectId' | 'parentId' | 'dependencies' | 'tags' | 'title' | 'status'>
 >;
 
 // ============================================================
@@ -210,7 +237,11 @@ export interface EditsOverlay {
   /** Tasks created locally (no upstream source) */
   localTasks: Task[];
   /** Project-level field overrides keyed by project ID */
-  projectOverrides?: Record<string, Partial<Pick<Project, 'description' | 'requester' | 'keyDates' | 'keyLinks'>>>;
+  projectOverrides?: Record<string, Partial<Pick<Project, 'name' | 'status' | 'description' | 'requester' | 'keyDates' | 'keyLinks'>>>;
+  /** Task IDs marked for deletion */
+  deletedTasks?: string[];
+  /** Project IDs marked for deletion */
+  deletedProjects?: string[];
 }
 
 /** cache/<connector-id>.json — upstream data snapshot. */
