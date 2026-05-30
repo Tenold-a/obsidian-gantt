@@ -85,6 +85,11 @@ export interface GanttStore {
 const DAY_WIDTH = 30;
 const SCROLL_GUARD_DURATION = 100; // ms
 
+/** Sanitize a file-name segment: replace characters invalid on Windows/Unix with "_". */
+function safeName(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, '_');
+}
+
 export function createGanttStore(platform: GanttPlatform): GanttStore {
   // ── State signals ──
   const caches = signal<CacheFile[]>([]);
@@ -290,12 +295,12 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
     try {
       // Read view config
-      const viewRaw = await platform.storage.read(`views/${viewId}.json`);
+      const viewRaw = await platform.storage.read(`views/${safeName(viewId)}.json`);
       if (!viewRaw) throw new Error(`View not found: ${viewId}`);
       const view: ViewDefinition = JSON.parse(viewRaw);
 
       // Read edits
-      const editsRaw = await platform.storage.read(`edits/${viewId}.json`);
+      const editsRaw = await platform.storage.read(`edits/${safeName(viewId)}.json`);
       const viewEdits: EditsOverlay = editsRaw
         ? JSON.parse(editsRaw)
         : { viewId, overrides: {}, order: [], hidden: [], localTasks: [] };
@@ -303,7 +308,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       // Read caches for each connector
       const loadedCaches: CacheFile[] = [];
       for (const connectorId of view.connectors) {
-        const cacheRaw = await platform.storage.read(`cache/${connectorId}.json`);
+        const cacheRaw = await platform.storage.read(`cache/${safeName(connectorId)}.json`);
         if (cacheRaw) {
           loadedCaches.push(JSON.parse(cacheRaw));
         }
@@ -327,31 +332,38 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     error.value = null;
 
     try {
-      // Read connector config from view
-      const currentView = views.value.find(v => v.id === currentViewId.value);
-      if (!currentView) throw new Error('No active view');
-
-      const connConfig = currentView.connectors.includes(connectorId);
-      if (!connConfig) throw new Error(`Connector ${connectorId} not in current view`);
+      // Read connector config
+      const configRaw = await platform.storage.read(`connectors/${safeName(connectorId)}.json`);
+      const connConfig: Record<string, unknown> = configRaw ? JSON.parse(configRaw) : {};
+      const scriptPath = (connConfig.script as string) || `connectors/${safeName(connectorId)}.js`;
 
       // Load the connector module
-      // For now, use a hardcoded script path lookup; the connector config comes from
-      // obsidian-plugin or web-app platform config, stored separately.
-      // We'll need a connector config registry in the full implementation.
-      // For MVP, connectors are referenced by their cache file only.
-      // Refresh means re-running the connector — this will be wired up
-      // in the platform-specific layer.
+      const mod = await platform.connectorLoader.load(scriptPath);
 
-      // Placeholder: re-read the existing cache as a "refresh" (actual connector
-      // loading happens through platform.connectorLoader, wired in Sections 11/12)
-      const cacheRaw = await platform.storage.read(`cache/${connectorId}.json`);
-      if (cacheRaw) {
-        const cache: CacheFile = JSON.parse(cacheRaw);
-        caches.value = [
-          ...caches.value.filter(c => c.connectorId !== connectorId),
-          cache,
-        ];
-      }
+      // Create context with the connector's config
+      const ctx = platform.createConnectorContext(connConfig);
+
+      // Execute fetch → transform
+      const rawData = await mod.fetch(ctx);
+      const canonical = mod.transform(rawData, ctx);
+
+      // Write cache
+      const cache: CacheFile = {
+        connectorId,
+        lastFetch: new Date().toISOString(),
+        lastError: null,
+        tasks: canonical.tasks ?? [],
+        persons: canonical.persons ?? [],
+        projects: canonical.projects ?? [],
+      };
+
+      await platform.storage.write(`cache/${safeName(connectorId)}.json`, JSON.stringify(cache, null, 2));
+
+      // Update store
+      caches.value = [
+        ...caches.value.filter(c => c.connectorId !== connectorId),
+        cache,
+      ];
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -374,7 +386,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       overrides,
     };
 
-    await platform.storage.write(`edits/${viewId}.json`, JSON.stringify(updated, null, 2));
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
     edits.value = updated;
   }
 
@@ -386,7 +398,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     const updated = applyFieldReset(currentEdits, taskId, fieldName as any);
     if (!updated) return;
 
-    await platform.storage.write(`edits/${viewId}.json`, JSON.stringify(updated, null, 2));
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
     edits.value = updated;
   }
 
@@ -400,7 +412,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       localTasks: [...currentEdits.localTasks, task],
     };
 
-    await platform.storage.write(`edits/${viewId}.json`, JSON.stringify(updated, null, 2));
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
     edits.value = updated;
   }
 
@@ -419,7 +431,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       projectOverrides,
     };
 
-    await platform.storage.write(`edits/${viewId}.json`, JSON.stringify(updated, null, 2));
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
     edits.value = updated;
   }
 
