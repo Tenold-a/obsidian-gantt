@@ -1,8 +1,20 @@
 import { signal } from '@preact/signals';
 import type { GanttStore } from './store';
-import { pixelToDate, addDays, daysBetween } from '@obsidian-gantt/core';
+import { addDays, daysBetween } from '@obsidian-gantt/core';
+import { TIMELINE_ORIGIN, dateToAbsolutePixel, absolutePixelToDate } from './components';
 
 const DAY_WIDTH = 30;
+const ROW_HEIGHT = 40;
+
+/** Convert date to absolute pixel from TIMELINE_ORIGIN. */
+function dateToPx(date: string): number {
+  return dateToAbsolutePixel(date, DAY_WIDTH);
+}
+
+/** Convert absolute pixel to date. */
+function pxToDate(px: number): string {
+  return absolutePixelToDate(px, DAY_WIDTH);
+}
 
 // ============================================================
 // Drag state
@@ -11,6 +23,7 @@ const DAY_WIDTH = 30;
 export interface DragState {
   taskId: string;
   edge: 'left' | 'right' | 'body';
+  paneType: 'person' | 'project';
   originalStartDate: string;
   originalEndDate: string;
   currentStartDate: string;
@@ -19,12 +32,22 @@ export interface DragState {
   ghostWidth: number;
   pointerStartX: number;
   pointerStartY: number;
+  /** Person row the task started on (null for project pane) */
+  originalPersonId: string | null;
+  /** Person row the cursor is currently over */
+  currentPersonId: string | null;
+  /** Row index for ghost bar positioning */
+  rowIndex: number;
+  /** Scroll offset of the timeline container at drag start */
+  scrollTopStart: number;
+  /** Y position of the timeline body top at drag start */
+  bodyTopStart: number;
 }
 
 export const dragState = signal<DragState | null>(null);
 
 // ============================================================
-// usePointerDrag hook — attaches global listeners on drag start
+// Drag handler factory
 // ============================================================
 
 export function createDragHandler(store: GanttStore) {
@@ -34,6 +57,7 @@ export function createDragHandler(store: GanttStore) {
     e: PointerEvent,
     taskId: string,
     edge: 'left' | 'right' | 'body',
+    paneType: 'person' | 'project',
   ) {
     const task = store.mergedTasks.value.find(t => t.id === taskId);
     if (!task) return;
@@ -43,13 +67,35 @@ export function createDragHandler(store: GanttStore) {
     if (!startDate) return;
 
     const effectiveEnd = endDate ?? startDate;
-    const range = store.timelineRange.value;
-    const baseLeft = (daysBetween(range.startDate, startDate) ?? 0) * DAY_WIDTH;
-    const baseRight = (daysBetween(range.startDate, effectiveEnd) ?? 0) * DAY_WIDTH;
+    // Store absolute pixel positions from origin (used by ghost preview)
+    // The actual task bar left is originPx - bodyOriginPx, handled in Timeline
+    const originStartPx = dateToPx(startDate);
+    const originEndPx = dateToPx(effectiveEnd);
+    const baseLeft = originStartPx;
+    const baseRight = originEndPx;
+
+    // Find the task's row index
+    const groups = paneType === 'person' ? store.personGroups.value : store.projectGroups.value;
+    let rowIndex = 0;
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i].tasks.some(t => t.id === taskId)) {
+        rowIndex = i;
+        break;
+      }
+    }
+
+    const personId = paneType === 'person' ? (task.personId.value ?? null) : null;
+
+    // Find the timeline body element for accurate Y calculations
+    const target = e.currentTarget as HTMLElement;
+    const timelineBody = target.closest('.gantt-timeline')?.querySelector('[style*="position: relative"]') as HTMLElement | null;
+    const bodyRect = timelineBody?.getBoundingClientRect();
+    const scrollEl = target.closest('.gantt-timeline') as HTMLElement | null;
 
     const ds: DragState = {
       taskId,
       edge,
+      paneType,
       originalStartDate: startDate,
       originalEndDate: effectiveEnd,
       currentStartDate: startDate,
@@ -58,13 +104,20 @@ export function createDragHandler(store: GanttStore) {
       ghostWidth: Math.max(baseRight - baseLeft, 4),
       pointerStartX: e.clientX,
       pointerStartY: e.clientY,
+      originalPersonId: personId,
+      currentPersonId: personId,
+      rowIndex,
+      scrollTopStart: scrollEl?.scrollTop ?? 0,
+      bodyTopStart: bodyRect?.top ?? 0,
     };
 
     dragState.value = ds;
 
-    // Prevent text selection during drag
+    // Prevent text selection and capture pointer
     document.body.style.userSelect = 'none';
-    (e.target as HTMLElement)?.setPointerCapture?.(e.pointerId);
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+    e.stopPropagation();
 
     document.addEventListener('pointermove', onPointerMove);
     document.addEventListener('pointerup', onPointerUp);
@@ -74,7 +127,6 @@ export function createDragHandler(store: GanttStore) {
     const ds = dragState.value;
     if (!ds) return;
 
-    const range = store.timelineRange.value;
     const dx = e.clientX - ds.pointerStartX;
     const dayDelta = Math.round(dx / DAY_WIDTH);
 
@@ -86,38 +138,40 @@ export function createDragHandler(store: GanttStore) {
 
       ds.currentStartDate = newStart;
       ds.currentEndDate = newEnd;
-      ds.ghostLeft = (daysBetween(range.startDate, newStart) ?? 0) * DAY_WIDTH;
+      ds.ghostLeft = dateToPx(newStart);
       ds.ghostWidth = Math.max(duration * DAY_WIDTH, 4);
+
+      // ── Cross-row drag (person pane only) ──
+      if (ds.paneType === 'person') {
+        const pg = store.personGroups.value;
+        const scrollEl = document.querySelector('.gantt-timeline') as HTMLElement | null;
+        const currentScrollTop = scrollEl?.scrollTop ?? 0;
+        const bodyTop = ds.bodyTopStart;
+        const absoluteY = (e.clientY - bodyTop) + currentScrollTop;
+        const newRowIndex = Math.max(0, Math.min(pg.length - 1,
+          Math.floor(absoluteY / ROW_HEIGHT)));
+        ds.rowIndex = newRowIndex;
+        const targetPersonId = pg[newRowIndex]?.personId;
+        ds.currentPersonId = (targetPersonId === '__unassigned__' || targetPersonId == null) ? null : targetPersonId;
+      }
     } else if (ds.edge === 'left') {
       // Resize left edge
       const newStart = addDays(ds.originalStartDate, dayDelta);
-      // Clamp: start must be before end by at least 1 day
       if (daysBetween(newStart, ds.originalEndDate) >= 1) {
         ds.currentStartDate = newStart;
-        ds.ghostLeft = (daysBetween(range.startDate, newStart) ?? 0) * DAY_WIDTH;
+        ds.ghostLeft = dateToPx(newStart);
         ds.ghostWidth = Math.max(daysBetween(newStart, ds.originalEndDate) * DAY_WIDTH, 4);
       }
     } else if (ds.edge === 'right') {
       // Resize right edge
       const newEnd = addDays(ds.originalEndDate, dayDelta);
-      // Clamp: end must be after start by at least 1 day
       if (daysBetween(ds.originalStartDate, newEnd) >= 1) {
         ds.currentEndDate = newEnd;
         ds.ghostWidth = Math.max(daysBetween(ds.originalStartDate, newEnd) * DAY_WIDTH, 4);
       }
     }
 
-    // Clamp to timeline boundaries
-    const minDay = store.timelineRange.value.startDate;
-    const maxDay = store.timelineRange.value.endDate;
-    if (ds.currentStartDate < minDay) {
-      ds.currentStartDate = minDay;
-      ds.ghostLeft = 0;
-    }
-    if (ds.currentEndDate > maxDay) {
-      ds.currentEndDate = maxDay;
-    }
-
+    // No clamping — allow dragging anywhere on the infinite timeline
     dragState.value = { ...ds };
   }
 
@@ -129,19 +183,18 @@ export function createDragHandler(store: GanttStore) {
     document.removeEventListener('pointermove', onPointerMove);
     document.removeEventListener('pointerup', onPointerUp);
 
-    // Snapshot states before clearing
     const taskId = ds.taskId;
     const newStart = ds.currentStartDate;
     const newEnd = ds.currentEndDate;
     const origStart = ds.originalStartDate;
     const origEnd = ds.originalEndDate;
+    const newPersonId = ds.currentPersonId;
+    const origPersonId = ds.originalPersonId;
 
     dragState.value = null;
 
-    // If nothing changed, skip persistence
-    if (newStart === origStart && newEnd === origEnd) return;
+    if (newStart === origStart && newEnd === origEnd && newPersonId === origPersonId) return;
 
-    // Build undo function using captured values
     const undo = async () => {
       if (origStart !== newStart) {
         await store.persistEdit(taskId, 'startDate', origStart);
@@ -149,21 +202,22 @@ export function createDragHandler(store: GanttStore) {
       if (origEnd !== newEnd) {
         await store.persistEdit(taskId, 'endDate', origEnd);
       }
+      if (origPersonId !== newPersonId) {
+        await store.persistEdit(taskId, 'personId', origPersonId ?? null);
+      }
     };
 
-    // Persist changes
     if (newStart !== origStart) {
       await store.persistEdit(taskId, 'startDate', newStart);
     }
     if (newEnd !== origEnd) {
       await store.persistEdit(taskId, 'endDate', newEnd);
     }
+    if (newPersonId !== origPersonId) {
+      await store.persistEdit(taskId, 'personId', newPersonId ?? null);
+    }
 
-    // Push undo
     undoStack.push(undo);
-
-    // Re-merge to update UI
-    // (edits signal update triggers recomputation)
   }
 
   async function undo() {
@@ -190,15 +244,10 @@ export function createDragHandler(store: GanttStore) {
     const relX = e.clientX - rect.left;
     const relY = e.clientY - rect.top;
 
-    const range = store.timelineRange.value;
-    const ROW_HEIGHT = 40;
-
-    // Calculate drop date from x position
-    const totalScrollLeft = (timelineEl as HTMLElement).scrollLeft || 0;
+    const totalScrollLeft = timelineEl.scrollLeft || 0;
     const absX = relX + totalScrollLeft;
-    const dropDate = pixelToDate(absX, range.startDate, DAY_WIDTH);
+    const dropDate = pxToDate(absX);
 
-    // Calculate which person row from y position
     const personGroups = store.personGroups.value;
     const rowIndex = Math.floor(relY / ROW_HEIGHT);
     const targetPerson =
@@ -206,16 +255,14 @@ export function createDragHandler(store: GanttStore) {
         ? personGroups[rowIndex].personId
         : null;
 
-    // If dropped on "unassigned", just create without person
     const personId = targetPerson === '__unassigned__' ? null : targetPerson;
 
-    // Create local task
     const newTask = {
       id: `local-${Date.now()}`,
       title: projectInfo.projectName,
       projectId: projectInfo.projectId,
       startDate: dropDate,
-      endDate: addDays(dropDate, 5), // default 5-day duration
+      endDate: addDays(dropDate, 5),
       personId: personId ?? undefined,
     };
 

@@ -11,13 +11,29 @@ import {
   isTodayDate,
 } from './components';
 import type { LocalTask } from '@obsidian-gantt/core';
-import { dateToPixel, daysBetween, todayString } from '@obsidian-gantt/core';
+import { daysBetween, todayString } from '@obsidian-gantt/core';
 import { createDragHandler, dragState } from './drag';
+import {
+  TIMELINE_ORIGIN,
+  dateToAbsolutePixel,
+  absolutePixelToDate,
+} from './components';
 
 const DAY_WIDTH = 30;
 const ROW_HEIGHT = 40;
 const LEFT_PANEL_WIDTH = 180;
 const RIGHT_PANEL_WIDTH = 220;
+const GRID_BUFFER_PX = 600;    // buffer for both grid and header on each side
+
+/** Convert a date to absolute pixel from TIMELINE_ORIGIN. */
+function dateToPx(date: string): number {
+  return dateToAbsolutePixel(date, DAY_WIDTH);
+}
+
+/** Convert absolute pixel to date. */
+function pxToDate(px: number): string {
+  return absolutePixelToDate(px, DAY_WIDTH);
+}
 
 // ============================================================
 // TaskList — left sidebar showing row labels
@@ -26,7 +42,6 @@ const RIGHT_PANEL_WIDTH = 220;
 function TaskList(props: {
   labels: { key: string; name: string; color?: string }[];
   rowHeight: number;
-  scrollTop: number;
   highlightedRowKeys?: Set<string>;
   dimmedRowKeys?: Set<string>;
   onRowClick?: (key: string) => void;
@@ -43,11 +58,10 @@ function TaskList(props: {
     >
       {/* Spacer to match header height */}
       <div style={{ height: '44px', borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)' }} />
-      {/* Header */}
+      {/* Rows — static, no scroll transform */}
       <div
         style={{
           height: `${props.labels.length * props.rowHeight}px`,
-          transform: `translateY(-${props.scrollTop}px)`,
         }}
       >
         {props.labels.map((label) => {
@@ -112,22 +126,110 @@ function Timeline(props: {
   dimmedRowKeys: Set<string>;
   onRowClick: (key: string) => void;
   onTaskClick: (taskId: string) => void;
-  onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body') => void;
+  onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
   onDrop: (e: DragEvent) => void;
   onDragOver: (e: DragEvent) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const { store, groups, scrollLeft, scrollTop } = props;
 
-  const range = store.timelineRange.value;
-  const totalDays = daysBetween(range.startDate, range.endDate) + 1;
-  const totalWidth = totalDays * DAY_WIDTH;
+  const paneType = props.groupKeyField === 'personId' ? 'person' : 'project';
 
-  // Handle scroll events
+  // Track visible viewport width for dynamic header/grid rendering
+  const viewportWidth = useSignal(800);
+  // Ref for initial scroll-to-today (run once per pane)
+  const didInitialScroll = useRef(false);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    viewportWidth.value = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      viewportWidth.value = el.clientWidth;
+    });
+    ro.observe(el);
+
+    // Initial scroll: center today in the viewport
+    if (!didInitialScroll.current) {
+      didInitialScroll.current = true;
+      const todayBodyPx = originToBody(dateToPx(todayString()));
+      const targetScroll = todayBodyPx - el.clientWidth / 2;
+      requestAnimationFrame(() => {
+        el.scrollLeft = targetScroll;
+        props.onScroll(targetScroll, 0);
+      });
+    }
+
+    return () => ro.disconnect();
+  }, []);
+
+  // Compute body width and origin offset from min/max task dates + generous padding
+  const TWO_YEARS_PX = 730 * DAY_WIDTH;
+  const bodyOriginPx = useMemo(() => {
+    let minAbsPx = dateToPx(todayString());
+    for (const group of groups) {
+      for (const task of group.tasks) {
+        const startVal = task.startDate.value;
+        const endVal = task.endDate.value;
+        if (startVal) {
+          const px = dateToPx(startVal);
+          if (px < minAbsPx) minAbsPx = px;
+        }
+        if (endVal) {
+          const px = dateToPx(endVal);
+          if (px < minAbsPx) minAbsPx = px;
+        }
+      }
+    }
+    return Math.floor(minAbsPx - TWO_YEARS_PX);
+  }, [groups]);
+
+  const bodyTotalWidth = useMemo(() => {
+    let maxAbsPx = dateToPx(todayString());
+    for (const group of groups) {
+      for (const task of group.tasks) {
+        const startVal = task.startDate.value;
+        const endVal = task.endDate.value;
+        if (startVal) {
+          const px = dateToPx(startVal);
+          if (px > maxAbsPx) maxAbsPx = px;
+        }
+        if (endVal) {
+          const px = dateToPx(endVal);
+          if (px > maxAbsPx) maxAbsPx = px;
+        }
+      }
+    }
+    return Math.ceil(maxAbsPx - bodyOriginPx + TWO_YEARS_PX);
+  }, [groups, bodyOriginPx]);
+
+  /** Convert absolute origin pixel to body-relative pixel. */
+  const originToBody = (absPx: number) => absPx - bodyOriginPx;
+
+  // Handle scroll events — only sync horizontal scroll between panes
   function handleScroll(e: Event) {
     const el = e.currentTarget as HTMLDivElement;
     props.onScroll(el.scrollLeft, el.scrollTop);
   }
+
+  // Intercept wheel: shift+wheel → horizontal scroll only
+  function handleWheel(e: WheelEvent) {
+    if (!containerRef.current) return;
+    // When shift is held, convert vertical scroll to horizontal
+    // and prevent the timeline from also scrolling vertically
+    if (e.shiftKey) {
+      e.preventDefault();
+      containerRef.current.scrollLeft += e.deltaY;
+    }
+  }
+
+  // Register wheel listener
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, []);
 
   // Sync scrollLeft from signal
   useEffect(() => {
@@ -165,8 +267,8 @@ function Timeline(props: {
       if (!startVal) continue;
 
       const end = endVal ?? startVal;
-      const left = dateToPixel(startVal, range.startDate, DAY_WIDTH);
-      const right = dateToPixel(end, range.startDate, DAY_WIDTH);
+      const left = originToBody(dateToPx(startVal));
+      const right = originToBody(dateToPx(end));
       const width = Math.max(right - left, 4);
 
       const projectColor = task.projectId.value
@@ -188,36 +290,51 @@ function Timeline(props: {
   const hasSelection = store.selectedEntity.value !== null;
   const totalRows = groups.length;
 
+  // Precompute grid-aligned left for header sync
+  const gridAbsAligned = Math.floor((bodyOriginPx + scrollLeft - GRID_BUFFER_PX) / DAY_WIDTH) * DAY_WIDTH;
+  const gridLeft = gridAbsAligned - bodyOriginPx;
+  // Header is outside scroll container at viewport x=0; translateX to match grid's viewport position
+  const headerTranslateX = gridLeft - scrollLeft;
+
   return (
-    <div
-      ref={containerRef}
-      class="gantt-timeline"
-      style={{
-        flex: 1,
-        overflow: 'scroll',
-        position: 'relative',
-      }}
-      onScroll={handleScroll}
-      onDrop={props.onDrop}
-      onDragOver={props.onDragOver}
-    >
-      {/* Time header (sticky) */}
-      <TimeHeader startDate={range.startDate} endDate={range.endDate} dayWidth={DAY_WIDTH} />
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+      {/* Header — outside scroll container, synced via translateX */}
+      <div style={{ overflow: 'hidden', flexShrink: 0 }}>
+        <TimeHeader
+          dayWidth={DAY_WIDTH}
+          scrollLeft={scrollLeft}
+          viewportWidth={viewportWidth.value}
+          bufferPx={GRID_BUFFER_PX}
+          bodyOriginPx={bodyOriginPx}
+        />
+      </div>
 
       {/* Scrollable body */}
       <div
+        ref={containerRef}
+        class="gantt-timeline"
+        style={{
+          flex: 1,
+          overflow: 'scroll',
+          position: 'relative',
+        }}
+        onScroll={handleScroll}
+        onDrop={props.onDrop}
+        onDragOver={props.onDragOver}
+      >
+      <div
         style={{
           position: 'relative',
-          width: `${totalWidth}px`,
+          width: `${bodyTotalWidth}px`,
           height: `${totalRows * ROW_HEIGHT}px`,
         }}
       >
         {/* Grid */}
-        <TimelineGrid dayWidth={DAY_WIDTH} totalDays={totalDays} />
+        <TimelineGrid dayWidth={DAY_WIDTH} scrollLeft={scrollLeft} viewportWidth={viewportWidth.value} bufferPx={GRID_BUFFER_PX} bodyOriginPx={bodyOriginPx} />
 
         {/* Today line */}
         <TodayLine
-          leftPx={dateToPixel(todayString(), range.startDate, DAY_WIDTH)}
+          leftPx={originToBody(dateToPx(todayString()))}
           visible={true}
         />
 
@@ -225,6 +342,10 @@ function Timeline(props: {
         {groups.map((group, gi) => {
           const isHighlighted = props.highlightedRowKeys.has(group.key);
           const isDimmed = props.dimmedRowKeys.has(group.key);
+          // Check if drag is hovering over this row
+          const dragHovering = dragState.value?.currentPersonId != null &&
+            (dragState.value.currentPersonId === group.key ||
+             (dragState.value.currentPersonId === null && group.key === '__unassigned__'));
           return (
             <div
               key={group.key}
@@ -236,8 +357,12 @@ function Timeline(props: {
                 height: `${ROW_HEIGHT}px`,
                 borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)',
                 opacity: isDimmed ? 0.4 : 1,
-                background: isHighlighted ? 'var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))' : 'transparent',
-                transition: 'opacity 0.15s',
+                background: dragHovering
+                  ? 'var(--gantt-drag-hover-bg, rgba(74, 144, 217, 0.2))'
+                  : isHighlighted ? 'var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))' : 'transparent',
+                outline: dragHovering ? '2px dashed var(--gantt-drag-hover-border, #4A90D9)' : 'none',
+                outlineOffset: '-2px',
+                transition: 'opacity 0.15s, background 0.15s',
                 pointerEvents: 'none',
               }}
             />
@@ -248,6 +373,8 @@ function Timeline(props: {
         {taskBars.map(({ task, left, width, rowIndex: ri, color }) => (
           <TaskBar
             key={task.id}
+            rowIndex={ri}
+            paneType={paneType}
             data={{
               id: task.id,
               title: task.title.value,
@@ -263,7 +390,46 @@ function Timeline(props: {
             onClick={props.onTaskClick}
           />
         ))}
+
+        {/* Drag ghost bar */}
+        {dragState.value && (() => {
+          const ds = dragState.value;
+          const barHeight = ROW_HEIGHT * 0.6;
+          const barTop = ds.rowIndex * ROW_HEIGHT + (ROW_HEIGHT - barHeight) / 2;
+          const ghostTask = store.mergedTasks.value.find(t => t.id === ds.taskId);
+          const ghostTitle = ghostTask?.title.value ?? '';
+          // Only show ghost in the pane where the drag originated
+          if (ds.paneType !== paneType) return null;
+          return (
+            <div
+              class="gantt-task-bar gantt-ghost-bar"
+              style={{
+                position: 'absolute',
+                left: `${ds.ghostLeft - bodyOriginPx}px`,
+                top: `${barTop}px`,
+                width: `${Math.max(ds.ghostWidth, 4)}px`,
+                height: `${barHeight}px`,
+                background: '#4A90D9',
+                borderRadius: '4px',
+                opacity: 0.5,
+                zIndex: 10,
+                display: 'flex',
+                alignItems: 'center',
+                paddingLeft: '4px',
+                fontSize: '11px',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                color: '#fff',
+                pointerEvents: 'none',
+              }}
+            >
+              {ds.ghostWidth > 40 ? ghostTitle : ''}
+            </div>
+          );
+        })()}
       </div>
+    </div>
     </div>
   );
 }
@@ -278,12 +444,14 @@ function GanttPane(props: {
   scrollLeft: number;
   scrollTop: number;
   onScroll: (scrollLeft: number, scrollTop: number) => void;
-  onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body') => void;
+  onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
   onDrop: (e: DragEvent) => void;
   onDragOver: (e: DragEvent) => void;
 }) {
   const { store, type } = props;
   const groups = type === 'person' ? store.personGroups.value : store.projectGroups.value;
+
+  const paneType: 'person' | 'project' = type;
 
   const labels = useMemo(() =>
     groups.map(g => ({
@@ -342,7 +510,6 @@ function GanttPane(props: {
       <TaskList
         labels={labels}
         rowHeight={ROW_HEIGHT}
-        scrollTop={props.scrollTop}
         highlightedRowKeys={highlightedRowKeys}
         dimmedRowKeys={dimmedRowKeys}
         onRowClick={handleRowClick}
@@ -466,9 +633,180 @@ function UnassignedPanel(props: {
 // DualPane — top-level layout
 // ============================================================
 
+function DetailPanel(props: { store: GanttStore }) {
+  const { store } = props;
+  const sel = store.selectedEntity.value;
+
+  if (!sel || sel.type !== 'task') return null;
+
+  const task = store.mergedTasks.value.find(t => t.id === sel.id);
+  if (!task) return null;
+
+  const personName = task.personId.value
+    ? store.persons.value.find(p => p.id === task.personId.value)?.name ?? task.personId.value
+    : null;
+
+  const project = task.projectId.value
+    ? store.projects.value.find(p => p.id === task.projectId.value)
+    : null;
+
+  const sourceLabel = task.connectorId
+    ? `Connector: ${task.connectorId}`
+    : task.upstreamId
+      ? 'Local override'
+      : 'Manual entry';
+
+  const sourceStyle = task.upstreamDeleted ? 'line-through' : 'normal';
+
+  return (
+    <div
+      class="gantt-detail-panel"
+      style={{
+        width: `${RIGHT_PANEL_WIDTH}px`,
+        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
+        padding: '12px',
+        fontSize: '13px',
+        color: 'var(--text-normal, #333)',
+        overflowY: 'auto',
+        background: 'var(--background-secondary, #f5f5f5)',
+      }}
+    >
+      {/* Header with close button */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+        <div style={{ fontWeight: 'bold', fontSize: '14px', wordBreak: 'break-word', flex: 1 }}>
+          {task.title.value}
+        </div>
+        <button
+          onClick={() => store.selectEntity(null)}
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            fontSize: '16px',
+            lineHeight: 1,
+            padding: '0 2px',
+            color: 'var(--text-muted, #999)',
+            flexShrink: 0,
+            marginLeft: '4px',
+          }}
+          title="Close detail panel"
+        >
+          ×
+        </button>
+      </div>
+
+      {/* Fields */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        {/* Dates */}
+        <FieldRow label="Start" value={task.startDate.value ?? '—'} />
+        <FieldRow label="End" value={task.endDate.value ?? '—'} />
+
+        {/* Progress */}
+        <div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Progress</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <div style={{
+              flex: 1,
+              height: '6px',
+              borderRadius: '3px',
+              background: 'var(--background-modifier-border, #ccc)',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                height: '100%',
+                width: `${(task.progress.value ?? 0) * 100}%`,
+                background: task.progress.value === 1 ? 'var(--gantt-completed, #4caf50)' : 'var(--gantt-in-progress, #2196f3)',
+                borderRadius: '3px',
+              }} />
+            </div>
+            <span style={{ fontSize: '12px', fontWeight: 'bold' }}>{Math.round((task.progress.value ?? 0) * 100)}%</span>
+          </div>
+        </div>
+
+        {/* Person */}
+        <FieldRow label="Person" value={personName ?? '—'} />
+
+        {/* Project */}
+        <div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Project</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {project?.color && (
+              <span style={{
+                width: '10px',
+                height: '10px',
+                borderRadius: '2px',
+                background: project.color,
+                flexShrink: 0,
+              }} />
+            )}
+            <span>{project?.name ?? task.projectId.value ?? '—'}</span>
+          </div>
+        </div>
+
+        {/* Dependencies */}
+        <div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Dependencies</div>
+          <div style={{ fontSize: '12px' }}>
+            {task.dependencies.value.length > 0
+              ? task.dependencies.value.map(d => (
+                  <div key={d} style={{ padding: '1px 0' }}>{d}</div>
+                ))
+              : '—'}
+          </div>
+        </div>
+
+        {/* Tags */}
+        {task.tags.value.length > 0 && (
+          <div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Tags</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+              {task.tags.value.map(tag => (
+                <span key={tag} style={{
+                  padding: '1px 6px',
+                  borderRadius: '10px',
+                  background: 'var(--background-modifier-border, #e0e0e0)',
+                  fontSize: '11px',
+                }}>
+                  {tag}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Source info */}
+        <div style={{
+          fontSize: '11px',
+          color: 'var(--text-muted, #999)',
+          marginTop: '4px',
+        }}>
+          <div style={{ textDecoration: sourceStyle }}>
+            {sourceLabel}
+          </div>
+          {task.upstreamDeleted && (
+            <div style={{ color: 'var(--text-error, #e00)', marginTop: '2px' }}>
+              Deleted upstream
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FieldRow(props: { label: string; value: string }) {
+  return (
+    <div>
+      <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '1px' }}>{props.label}</div>
+      <div style={{ fontSize: '13px' }}>{props.value}</div>
+    </div>
+  );
+}
+
 export function DualPane(props: {
   store: GanttStore;
-  onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body') => void;
+  onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
   onDrop: (e: DragEvent) => void;
   onDragOver: (e: DragEvent) => void;
 }) {
@@ -506,58 +844,67 @@ export function DualPane(props: {
     document.addEventListener('pointerup', onUp);
   }
 
+  const sel = store.selectedEntity.value;
+  const showDetail = sel?.type === 'task';
+
   return (
     <div class="gantt-dual-pane" style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%' }}>
-      {/* Person Gantt (upper) */}
-      <div style={{ flex: `0 0 ${paneRatio.value * 100}%`, display: 'flex', overflow: 'hidden' }}>
-        <GanttPane
-          store={store}
-          type="person"
-          scrollLeft={store.sharedScrollLeft.value}
-          scrollTop={personScrollTop.value}
-          onScroll={(sl) => {
-            store.sharedScrollLeft.value = sl;
-            personScrollTop.value = sl;
-          }}
-          onTaskPointerDown={props.onTaskPointerDown}
-          onDrop={props.onDrop}
-          onDragOver={props.onDragOver}
-        />
-        {/* Unassigned panel on the right */}
-        <UnassignedPanel store={store} onDragStart={() => {}} />
-      </div>
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        {/* Main content column */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          {/* Person Gantt (upper) */}
+          <div style={{ flex: `0 0 ${paneRatio.value * 100}%`, display: 'flex', overflow: 'hidden' }}>
+            <GanttPane
+              store={store}
+              type="person"
+              scrollLeft={store.sharedScrollLeft.value}
+              scrollTop={personScrollTop.value}
+              onScroll={(sl) => {
+                store.sharedScrollLeft.value = sl;
+              }}
+              onTaskPointerDown={props.onTaskPointerDown}
+              onDrop={props.onDrop}
+              onDragOver={props.onDragOver}
+            />
+            {/* Unassigned only when detail not shown */}
+            {!showDetail && <UnassignedPanel store={store} onDragStart={() => {}} />}
+          </div>
 
-      {/* Resize handle */}
-      <div
-        class="gantt-resize-handle"
-        style={{
-          height: '6px',
-          cursor: 'row-resize',
-          background: isResizing.value
-            ? 'var(--interactive-accent, #4A90D9)'
-            : 'var(--background-modifier-border, #ccc)',
-          flexShrink: 0,
-          transition: isResizing.value ? 'none' : 'background 0.15s',
-        }}
-        onPointerDown={handleResizePointerDown}
-      />
+          {/* Resize handle */}
+          <div
+            class="gantt-resize-handle"
+            style={{
+              height: '6px',
+              cursor: 'row-resize',
+              background: isResizing.value
+                ? 'var(--interactive-accent, #4A90D9)'
+                : 'var(--background-modifier-border, #ccc)',
+              flexShrink: 0,
+              transition: isResizing.value ? 'none' : 'background 0.15s',
+            }}
+            onPointerDown={handleResizePointerDown}
+          />
 
-      {/* Project Gantt (lower) */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        <GanttPane
-          store={store}
-          type="project"
-          scrollLeft={store.sharedScrollLeft.value}
-          scrollTop={projectScrollTop.value}
-          onScroll={(sl, st) => {
-            store.sharedScrollLeft.value = sl;
-            projectScrollTop.value = st;
-          }}
-          onTaskPointerDown={props.onTaskPointerDown}
-          onDrop={props.onDrop}
-          onDragOver={props.onDragOver}
-        />
-        {/* The unassigned panel spans the full height, so it's only in the upper pane */}
+          {/* Project Gantt (lower) */}
+          <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+            <GanttPane
+              store={store}
+              type="project"
+              scrollLeft={store.sharedScrollLeft.value}
+              scrollTop={projectScrollTop.value}
+              onScroll={(sl, st) => {
+                store.sharedScrollLeft.value = sl;
+                projectScrollTop.value = st;
+              }}
+              onTaskPointerDown={props.onTaskPointerDown}
+              onDrop={props.onDrop}
+              onDragOver={props.onDragOver}
+            />
+          </div>
+        </div>
+
+        {/* Detail sidebar — appears when task is selected */}
+        {showDetail && <DetailPanel store={store} />}
       </div>
     </div>
   );
@@ -588,8 +935,8 @@ export function GanttChart(props: {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  function handleTaskPointerDown(e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body') {
-    dragHandler.onTaskPointerDown(e, taskId, edge);
+  function handleTaskPointerDown(e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') {
+    dragHandler.onTaskPointerDown(e, taskId, edge, paneType);
   }
 
   function handleDrop(e: DragEvent) {

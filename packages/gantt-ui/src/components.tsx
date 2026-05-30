@@ -3,16 +3,29 @@ import { useRef, useEffect } from 'preact/hooks';
 import type { GanttStore } from './store';
 
 // ============================================================
-// TimelineGrid — CSS gradient background
+// TimelineGrid — dynamically positioned to cover visible viewport
 // ============================================================
 
 export function TimelineGrid(props: {
   dayWidth: number;
-  totalDays: number;
+  /** Pixel offset from timeline body left edge (same as scrollLeft). */
+  scrollLeft: number;
+  /** Visible width of the timeline container in pixels. */
+  viewportWidth: number;
+  /** Buffer pixels on each side to avoid gaps during fast scroll. */
+  bufferPx: number;
+  /** Body origin offset in absolute pixels. */
+  bodyOriginPx: number;
 }) {
-  const { dayWidth, totalDays } = props;
+  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx } = props;
   const dayPx = dayWidth;
   const weekPx = dayWidth * 7;
+
+  // Align grid to day boundary from body origin
+  const absLeft = bodyOriginPx + scrollLeft;
+  const absAlignedLeft = Math.floor((absLeft - bufferPx) / dayPx) * dayPx;
+  const left = absAlignedLeft - bodyOriginPx;
+  const width = viewportWidth + 2 * bufferPx;
 
   return (
     <div
@@ -20,8 +33,8 @@ export function TimelineGrid(props: {
       style={{
         position: 'absolute',
         top: 0,
-        left: 0,
-        width: `${totalDays * dayWidth}px`,
+        left: `${left}px`,
+        width: `${width}px`,
         height: '100%',
         background: `repeating-linear-gradient(
           to right,
@@ -43,99 +56,136 @@ export function TimelineGrid(props: {
 }
 
 // ============================================================
-// TimeHeader — month + day labels
+// Fixed timeline origin — the absolute zero-date reference
 // ============================================================
 
-interface HeaderMonth {
+/** Fixed timeline origin: all absolute pixel positions are computed from this date. */
+export const TIMELINE_ORIGIN = '2000-01-01';
+
+/**
+ * Convert a date string to its absolute pixel position relative to TIMELINE_ORIGIN.
+ */
+export function dateToAbsolutePixel(date: string, dayWidth: number): number {
+  const days = daysBetweenDates(TIMELINE_ORIGIN, date);
+  return days * dayWidth;
+}
+
+/**
+ * Convert an absolute pixel position back to a date string.
+ */
+export function absolutePixelToDate(absPx: number, dayWidth: number): string {
+  const days = Math.floor(absPx / dayWidth);
+  return addDaysToDate(TIMELINE_ORIGIN, days);
+}
+
+// ============================================================
+// TimeHeader — dynamically rendered for the visible viewport
+// ============================================================
+
+interface MonthColumn {
   displayText: string;
-  startIdx: number;
-  dayCount: number;
+  leftPx: number;
+  widthPx: number;
 }
 
 export function TimeHeader(props: {
-  startDate: string;
-  endDate: string;
   dayWidth: number;
+  scrollLeft: number;
+  viewportWidth: number;
+  /** Buffer in pixels — must match TimelineGrid's bufferPx for alignment. */
+  bufferPx: number;
+  bodyOriginPx: number;
 }) {
-  const { startDate, endDate, dayWidth } = props;
+  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx } = props;
 
-  // Generate month ranges and day indices
-  const months = generateMonthRanges(startDate, endDate);
-  const totalDays = daysBetweenDates(startDate, endDate) + 1;
+  // Align rangeStart to the SAME absolute pixel boundary as TimelineGrid
+  const visibleStartAbsPx = bodyOriginPx + scrollLeft;
+  const absAlignedLeft = Math.floor((visibleStartAbsPx - bufferPx) / dayWidth) * dayWidth;
+  const rangeStart = absolutePixelToDate(absAlignedLeft, dayWidth);
 
-  // Generate day labels for the visible range
-  const dayLabels: string[] = [];
-  for (let i = 0; i < totalDays; i++) {
-    dayLabels.push(getDayLabel(addDaysToDate(startDate, i)));
-  }
+  // End of range: ensure we cover viewport + 2*bufferPx, plus one extra day for safety
+  const rangeEndAbsPx = absAlignedLeft + viewportWidth + 2 * bufferPx;
+  const rangeEnd = absolutePixelToDate(rangeEndAbsPx + dayWidth, dayWidth);
 
-  function generateMonthRanges(start: string, end: string): HeaderMonth[] {
-    const results: HeaderMonth[] = [];
-    const startD = parseDate(start);
-    const endD = parseDate(end);
+  const rangeTotalDays = daysBetweenDates(rangeStart, rangeEnd) + 1;
+  const rangeWidth = rangeTotalDays * dayWidth;
 
-    let cursor = new Date(Date.UTC(startD.getUTCFullYear(), startD.getUTCMonth(), 1));
-    while (cursor <= endD) {
-      const y = cursor.getUTCFullYear();
-      const m = cursor.getUTCMonth();
-      const monthStart = formatDateStr(new Date(Date.UTC(y, m, 1)));
-      const monthEnd = formatDateStr(new Date(Date.UTC(y, m + 1, 0)));
-      const startIdx = daysBetweenDates(start, monthStart);
-      const dayCount = daysBetweenDates(monthStart, monthEnd) + 1;
-
-      results.push({
-        displayText: `${MONTH_NAMES[m]} ${y}`,
-        startIdx: Math.max(0, startIdx),
-        dayCount,
-      });
-
-      cursor = new Date(Date.UTC(y, m + 1, 1));
-    }
-    return results;
-  }
+  // Month columns positioned relative to rangeStart in body coordinates
+  const monthColumns = buildMonthColumns(rangeStart, rangeEnd, dayWidth);
+  // Body-relative pixel of rangeStart — should equal grid's `left` value
+  const rangeStartBodyPx = absAlignedLeft - bodyOriginPx;
 
   return (
     <div
       class="gantt-time-header"
-      style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--background-primary, #fff)' }}
+      style={{
+        height: '44px',
+        background: 'var(--background-primary, #fff)',
+        borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)',
+      }}
     >
-      {/* Month row */}
-      <div class="gantt-header-months" style={{ display: 'flex', height: '24px', borderBottom: '1px solid var(--gantt-grid-line-week, #c0c0c0)' }}>
-        {months.map(m => (
-          <div
-            key={m.displayText}
-            style={{
-              width: `${m.dayCount * dayWidth}px`,
-              marginLeft: m.startIdx === 0 ? `${m.startIdx * dayWidth}px` : '0',
-              textAlign: 'center',
-              fontSize: '12px',
-              fontWeight: 'bold',
-              lineHeight: '24px',
-              overflow: 'hidden',
-              whiteSpace: 'nowrap',
-              borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
-            }}
-          >
-            {m.displayText}
-          </div>
-        ))}
-      </div>
-      {/* Day row */}
-      <div class="gantt-header-days" style={{ display: 'flex', height: '20px', borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)' }}>
-        {dayLabels.map((label, i) => (
-          <div
-            key={i}
-            style={{
-              width: `${dayWidth}px`,
-              textAlign: 'center',
-              fontSize: '10px',
-              lineHeight: '20px',
-              color: 'var(--text-muted, #999)',
-            }}
-          >
-            {label}
-          </div>
-        ))}
+      <div style={{ transform: `translateX(${rangeStartBodyPx - scrollLeft}px)` }}>
+        {/* Month row */}
+        <div
+          class="gantt-header-months"
+          style={{
+            position: 'relative',
+            height: '24px',
+            borderBottom: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
+            width: `${rangeWidth}px`,
+          }}
+        >
+          {monthColumns.map((mc) => (
+            <div
+              key={mc.displayText}
+              style={{
+                position: 'absolute',
+                left: `${mc.leftPx}px`,
+                width: `${mc.widthPx}px`,
+                textAlign: 'center',
+                fontSize: '12px',
+                fontWeight: 'bold',
+                lineHeight: '24px',
+                overflow: 'hidden',
+                whiteSpace: 'nowrap',
+                borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
+              }}
+            >
+              {mc.displayText}
+            </div>
+          ))}
+        </div>
+
+        {/* Day row — every day has a label */}
+        <div
+          class="gantt-header-days"
+          style={{
+            position: 'relative',
+            height: '20px',
+            borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)',
+            width: `${rangeWidth}px`,
+          }}
+        >
+          {Array.from({ length: rangeTotalDays }, (_, i) => {
+            const date = addDaysToDate(rangeStart, i);
+            return (
+              <div
+                key={i}
+                style={{
+                  position: 'absolute',
+                  left: `${i * dayWidth}px`,
+                  width: `${dayWidth}px`,
+                  textAlign: 'center',
+                  fontSize: '10px',
+                  lineHeight: '20px',
+                  color: 'var(--text-muted, #999)',
+                }}
+              >
+                {getDayLabel(date)}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -184,13 +234,15 @@ export interface TaskBarData {
 
 export function TaskBar(props: {
   data: TaskBarData;
+  rowIndex: number;
   rowHeight: number;
-  onPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body') => void;
+  paneType: 'person' | 'project';
+  onPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
   onClick: (taskId: string) => void;
 }) {
-  const { data, rowHeight } = props;
+  const { data, rowIndex, rowHeight, paneType } = props;
   const barHeight = rowHeight * 0.6;
-  const barTop = (rowHeight - barHeight) / 2;
+  const barTop = rowIndex * rowHeight + (rowHeight - barHeight) / 2;
 
   return (
     <div
@@ -220,13 +272,10 @@ export function TaskBar(props: {
         transition: 'opacity 0.15s, box-shadow 0.15s',
       }}
       onPointerDown={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        // Detect edge hit (6px dead zone)
         const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
         const relX = e.clientX - rect.left;
         const edge = relX < 6 ? 'left' : relX > rect.width - 6 ? 'right' : 'body';
-        props.onPointerDown(e as unknown as PointerEvent, data.id, edge);
+        props.onPointerDown(e, data.id, edge, paneType);
       }}
       onClick={(e) => {
         e.stopPropagation();
@@ -280,6 +329,51 @@ export function TaskRow(props: {
 // ============================================================
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+interface MonthColumn {
+  displayText: string;
+  leftPx: number;
+  widthPx: number;
+}
+
+function buildMonthColumns(startDate: string, endDate: string, dayWidth: number): MonthColumn[] {
+  const results: MonthColumn[] = [];
+  const startD = parseDate(startDate);
+  const endD = parseDate(endDate);
+
+  // Walk month by month from startDate to endDate
+  let cursor = new Date(Date.UTC(startD.getUTCFullYear(), startD.getUTCMonth(), 1));
+  while (cursor <= endD) {
+    const y = cursor.getUTCFullYear();
+    const m = cursor.getUTCMonth();
+    const monthStart = formatDateStr(new Date(Date.UTC(y, m, 1)));
+    const monthEnd = formatDateStr(new Date(Date.UTC(y, m + 1, 0)));
+
+    // Days from timeline start to this month start
+    const offsetDays = daysBetweenDates(startDate, monthStart);
+    // How many days of this month are within the visible range
+    const visibleStart = offsetDays < 0 ? startDate : monthStart;
+    const visibleStartDays = daysBetweenDates(startDate, visibleStart);
+    const dayCount = daysBetweenDates(monthStart, monthEnd) + 1;
+
+    // Clamp: the first visible day of this month, and how many days shown
+    const firstDay = Math.max(0, visibleStartDays);
+    const lastDay = Math.min(daysBetweenDates(startDate, endDate), offsetDays + dayCount - 1);
+    const actualDayCount = lastDay - firstDay + 1;
+
+    if (actualDayCount > 0) {
+      results.push({
+        displayText: `${MONTH_NAMES[m]} ${y}`,
+        leftPx: firstDay * dayWidth,
+        widthPx: actualDayCount * dayWidth,
+      });
+    }
+
+    cursor = new Date(Date.UTC(y, m + 1, 1));
+  }
+
+  return results;
+}
 
 function parseDate(s: string): Date {
   const [y, m, d] = s.split('-').map(Number);

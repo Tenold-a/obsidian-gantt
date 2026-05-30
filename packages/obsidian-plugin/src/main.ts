@@ -1,39 +1,14 @@
 // Obsidian plugin main entry point.
 // Uses Obsidian's Plugin API (resolved at runtime, external at build time).
 
-import type { Plugin, PluginManifest, App, TFile } from 'obsidian';
-import { GanttView } from './view';
-
-declare module 'obsidian' {
-  interface App {
-    vault: {
-      adapter: {
-        read(path: string): Promise<string>;
-        write(path: string, data: string): Promise<void>;
-        exists(path: string): Promise<boolean>;
-        list(path: string): Promise<{ files: string[]; folders: string[] }>;
-        remove(path: string): Promise<void>;
-      };
-    };
-    workspace: {
-      getLeavesOfType(type: string): any[];
-      getRightLeaf(create: boolean): any;
-      revealLeaf(leaf: any, split?: string): void;
-      onLayoutReady(callback: () => void): void;
-    };
-  }
-}
-
-const VIEW_TYPE = 'obsidian-gantt-view';
+import { Plugin, WorkspaceLeaf } from 'obsidian';
+import { GanttView, VIEW_TYPE } from './view';
 
 export default class GanttPlugin extends Plugin {
   async onload(): Promise<void> {
     this.registerView(
       VIEW_TYPE,
-      (leaf: any) => {
-        const view = new GanttView(leaf.containerEl ?? leaf, this.app);
-        return view;
-      },
+      (leaf: WorkspaceLeaf) => new GanttView(leaf),
     );
 
     this.addRibbonIcon('bar-chart-2', 'Open Gantt Chart', () => {
@@ -58,14 +33,13 @@ export default class GanttPlugin extends Plugin {
 
     const leaves = workspace.getLeavesOfType(VIEW_TYPE);
     if (leaves.length > 0) {
-      workspace.revealLeaf(leaves[0], 'right');
+      workspace.revealLeaf(leaves[0]);
       return;
     }
 
-    const rightLeaf = workspace.getRightLeaf(false);
-    if (rightLeaf) {
-      workspace.revealLeaf(rightLeaf, 'right');
-      (rightLeaf as any).setViewState?.({ type: VIEW_TYPE, active: true });
-    }
+    await workspace.getRightLeaf(false)?.setViewState({
+      type: VIEW_TYPE,
+      active: true,
+    });
   }
 }

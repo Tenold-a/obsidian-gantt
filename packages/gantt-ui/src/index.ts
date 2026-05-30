@@ -8,5 +8,8 @@ export {
   TodayLine,
   TaskBar,
   TaskRow,
+  TIMELINE_ORIGIN,
+  dateToAbsolutePixel,
+  absolutePixelToDate,
 } from './components';
 export type { TaskBarData } from './components';
