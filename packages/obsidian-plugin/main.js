@@ -1256,6 +1256,73 @@ function computeTimelineRange(dates, paddingDays = 7) {
     endDate: addDays(maxDate, paddingDays)
   };
 }
+function parseCSV(text, options = {}) {
+  const delimiter = options.delimiter ?? ",";
+  if (!text)
+    return [];
+  if (text.charCodeAt(0) === 65279) {
+    text = text.slice(1);
+  }
+  text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const rows = splitRows(text);
+  if (rows.length === 0)
+    return [];
+  const headers = parseRow(rows[0], delimiter);
+  const results = [];
+  for (let i5 = 1; i5 < rows.length; i5++) {
+    const fields = parseRow(rows[i5], delimiter);
+    const record = {};
+    for (let j4 = 0; j4 < headers.length; j4++) {
+      record[headers[j4]] = fields[j4] ?? "";
+    }
+    results.push(record);
+  }
+  return results;
+}
+function splitRows(text) {
+  const rows = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i5 = 0; i5 < text.length; i5++) {
+    const ch = text[i5];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      current += ch;
+    } else if (ch === "\n" && !inQuotes) {
+      rows.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (current.length > 0) {
+    rows.push(current);
+  }
+  return rows;
+}
+function parseRow(row, delimiter) {
+  const fields = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i5 = 0; i5 < row.length; i5++) {
+    const ch = row[i5];
+    if (ch === '"') {
+      if (inQuotes && i5 + 1 < row.length && row[i5 + 1] === '"') {
+        current += '"';
+        i5++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === delimiter && !inQuotes) {
+      fields.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+  return fields;
+}
 var PlatformError = class extends Error {
   constructor(message, code, cause) {
     super(message);
@@ -1283,6 +1350,9 @@ function u4(e4, t4, n3, o4, i5, u5) {
 
 // ../gantt-ui/dist/index.js
 var SCROLL_GUARD_DURATION = 100;
+function safeName(name) {
+  return name.replace(/[\\/:*?"<>|]/g, "_");
+}
 function createGanttStore(platform) {
   const caches = y3([]);
   const edits = y3(null);
@@ -1290,6 +1360,7 @@ function createGanttStore(platform) {
   const currentViewId = y3(null);
   const selectedEntity = y3(null);
   const sharedScrollLeft = y3(0);
+  const personSortMode = y3("name");
   const isLoading = y3(false);
   const error = y3(null);
   let scrollGuardActive = false;
@@ -1330,9 +1401,18 @@ function createGanttStore(platform) {
     }
     return [...projectMap.values()];
   });
+  const mergedProjects = g2(() => {
+    const overrides = edits.value?.projectOverrides ?? {};
+    return projects.value.map((p5) => {
+      const override = overrides[p5.id];
+      if (!override)
+        return p5;
+      return { ...p5, ...override };
+    });
+  });
   const personGroups = g2(() => {
     const map = /* @__PURE__ */ new Map();
-    const personNameMap = new Map(persons.value.map((p5) => [p5.id, p5.name]));
+    const personMap = new Map(persons.value.map((p5) => [p5.id, p5]));
     for (const t4 of mergedTasks.value) {
       const key = t4.personId.value || "__unassigned__";
       if (!map.has(key))
@@ -1341,14 +1421,30 @@ function createGanttStore(platform) {
     }
     const groups = [];
     for (const [personId, tasks] of map) {
-      const personName = personNameMap.get(personId) ?? "Unassigned";
-      groups.push({ personId, personName, tasks });
+      const person = personMap.get(personId);
+      groups.push({
+        personId,
+        personName: person?.name ?? "Unassigned",
+        position: person?.position,
+        tasks
+      });
     }
+    const mode = personSortMode.value;
     groups.sort((a4, b3) => {
       if (a4.personId === "__unassigned__")
         return 1;
       if (b3.personId === "__unassigned__")
         return -1;
+      if (mode === "position") {
+        const pa = a4.position;
+        const pb = b3.position;
+        if (pa && pb)
+          return pa.localeCompare(pb);
+        if (pa && !pb)
+          return -1;
+        if (!pa && pb)
+          return 1;
+      }
       return a4.personName.localeCompare(b3.personName);
     });
     return groups;
@@ -1439,15 +1535,15 @@ function createGanttStore(platform) {
     isLoading.value = true;
     error.value = null;
     try {
-      const viewRaw = await platform.storage.read(`views/${viewId}.json`);
+      const viewRaw = await platform.storage.read(`views/${safeName(viewId)}.json`);
       if (!viewRaw)
         throw new Error(`View not found: ${viewId}`);
       const view = JSON.parse(viewRaw);
-      const editsRaw = await platform.storage.read(`edits/${viewId}.json`);
+      const editsRaw = await platform.storage.read(`edits/${safeName(viewId)}.json`);
       const viewEdits = editsRaw ? JSON.parse(editsRaw) : { viewId, overrides: {}, order: [], hidden: [], localTasks: [] };
       const loadedCaches = [];
       for (const connectorId of view.connectors) {
-        const cacheRaw = await platform.storage.read(`cache/${connectorId}.json`);
+        const cacheRaw = await platform.storage.read(`cache/${safeName(connectorId)}.json`);
         if (cacheRaw) {
           loadedCaches.push(JSON.parse(cacheRaw));
         }
@@ -1468,22 +1564,38 @@ function createGanttStore(platform) {
     isLoading.value = true;
     error.value = null;
     try {
-      const currentView = views.value.find((v5) => v5.id === currentViewId.value);
-      if (!currentView)
-        throw new Error("No active view");
-      const connConfig = currentView.connectors.includes(connectorId);
-      if (!connConfig)
-        throw new Error(`Connector ${connectorId} not in current view`);
-      const cacheRaw = await platform.storage.read(`cache/${connectorId}.json`);
-      if (cacheRaw) {
-        const cache = JSON.parse(cacheRaw);
-        caches.value = [
-          ...caches.value.filter((c4) => c4.connectorId !== connectorId),
-          cache
-        ];
+      const configPath = `connectors/${safeName(connectorId)}.json`;
+      let configRaw = await platform.storage.read(configPath);
+      let connConfig;
+      if (configRaw) {
+        connConfig = JSON.parse(configRaw);
+      } else {
+        connConfig = { script: `connectors/${connectorId}.js` };
+        await platform.storage.write(configPath, JSON.stringify(connConfig, null, 2));
+        console.log(`[Gantt] Auto-created connector config: ${configPath}`);
       }
+      const scriptPath = connConfig.script || `connectors/${safeName(connectorId)}.js`;
+      const mod = await platform.connectorLoader.load(scriptPath);
+      const ctx = platform.createConnectorContext(connConfig);
+      const rawData = await mod.fetch(ctx);
+      const canonical = mod.transform(rawData, ctx);
+      const cache = {
+        connectorId,
+        lastFetch: (/* @__PURE__ */ new Date()).toISOString(),
+        lastError: null,
+        tasks: canonical.tasks ?? [],
+        persons: canonical.persons ?? [],
+        projects: canonical.projects ?? []
+      };
+      await platform.storage.write(`cache/${safeName(connectorId)}.json`, JSON.stringify(cache, null, 2));
+      caches.value = [
+        ...caches.value.filter((c4) => c4.connectorId !== connectorId),
+        cache
+      ];
     } catch (e4) {
-      error.value = e4 instanceof Error ? e4.message : String(e4);
+      const msg = e4 instanceof Error ? e4.message : String(e4);
+      console.error(`[Gantt] Failed to refresh connector "${connectorId}":`, msg);
+      error.value = msg;
     } finally {
       isLoading.value = false;
     }
@@ -1501,7 +1613,7 @@ function createGanttStore(platform) {
       ...currentEdits,
       overrides
     };
-    await platform.storage.write(`edits/${viewId}.json`, JSON.stringify(updated, null, 2));
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
     edits.value = updated;
   }
   async function resetField(taskId, fieldName) {
@@ -1512,7 +1624,7 @@ function createGanttStore(platform) {
     const updated = applyFieldReset(currentEdits, taskId, fieldName);
     if (!updated)
       return;
-    await platform.storage.write(`edits/${viewId}.json`, JSON.stringify(updated, null, 2));
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
     edits.value = updated;
   }
   async function createLocalTask(task) {
@@ -1524,7 +1636,23 @@ function createGanttStore(platform) {
       ...currentEdits,
       localTasks: [...currentEdits.localTasks, task]
     };
-    await platform.storage.write(`edits/${viewId}.json`, JSON.stringify(updated, null, 2));
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
+    edits.value = updated;
+  }
+  async function persistProjectEdit(projectId, fieldName, value) {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId)
+      return;
+    const projectOverrides = { ...currentEdits.projectOverrides ?? {} };
+    const projectFields = { ...projectOverrides[projectId] ?? {} };
+    projectFields[fieldName] = value;
+    projectOverrides[projectId] = projectFields;
+    const updated = {
+      ...currentEdits,
+      projectOverrides
+    };
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
     edits.value = updated;
   }
   function selectEntity(entity) {
@@ -1538,12 +1666,14 @@ function createGanttStore(platform) {
     mergedTasks,
     persons,
     projects,
+    mergedProjects,
     personGroups,
     projectGroups,
     unassignedProjects,
     selectedEntity,
     highlightedTaskIds,
     sharedScrollLeft,
+    personSortMode,
     timelineRange,
     conflicts,
     isLoading,
@@ -1553,6 +1683,7 @@ function createGanttStore(platform) {
     persistEdit,
     resetField,
     createLocalTask,
+    persistProjectEdit,
     selectEntity
   };
 }
@@ -1709,9 +1840,9 @@ function TodayLine(props) {
   );
 }
 function TaskBar(props) {
-  const { data, rowIndex, rowHeight, paneType } = props;
+  const { data, groupStartY, laneIndex, rowHeight, laneOffset, paneType } = props;
   const barHeight = rowHeight * 0.6;
-  const barTop = rowIndex * rowHeight + (rowHeight - barHeight) / 2;
+  const barTop = groupStartY + (rowHeight - barHeight) / 2 + laneIndex * laneOffset;
   return /* @__PURE__ */ u4(
     "div",
     {
@@ -1734,7 +1865,7 @@ function TaskBar(props) {
         overflow: "hidden",
         textOverflow: "ellipsis",
         color: "var(--text-on-accent, #fff)",
-        zIndex: 2,
+        zIndex: 2 + props.laneIndex,
         boxShadow: data.isHighlighted ? "0 0 0 2px var(--gantt-highlight-border, #4A90D9)" : "none",
         transition: "opacity 0.15s, box-shadow 0.15s"
       },
@@ -1805,6 +1936,40 @@ function addDaysToDate(date, days) {
 function getDayLabel(date) {
   const d4 = parseDate2(date);
   return String(d4.getUTCDate());
+}
+function KeyDateMarker(props) {
+  const size = 10;
+  const bg = props.color ?? "var(--gantt-key-date-color, #E5C07B)";
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      class: "gantt-key-date-marker",
+      title: `${props.name}: ${props.date}`,
+      style: {
+        position: "absolute",
+        left: `${props.leftPx - size / 2}px`,
+        top: `${props.groupTopY + 3}px`,
+        width: `${size}px`,
+        height: `${size}px`,
+        background: bg,
+        transform: "rotate(45deg)",
+        zIndex: 3,
+        pointerEvents: "auto",
+        cursor: "help",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center"
+      },
+      children: props.icon && /* @__PURE__ */ u4("span", { style: {
+        transform: "rotate(-45deg)",
+        fontSize: "7px",
+        color: "#fff",
+        lineHeight: 1,
+        fontWeight: "bold",
+        pointerEvents: "none"
+      }, children: props.icon })
+    }
+  );
 }
 var DAY_WIDTH = 30;
 var ROW_HEIGHT = 40;
@@ -2004,6 +2169,7 @@ function createDragHandler(store) {
 }
 var DAY_WIDTH2 = 30;
 var ROW_HEIGHT2 = 40;
+var LANE_OFFSET = 12;
 var LEFT_PANEL_WIDTH = 180;
 var RIGHT_PANEL_WIDTH = 220;
 var GRID_BUFFER_PX = 600;
@@ -2022,23 +2188,23 @@ function TaskList(props) {
         borderRight: "1px solid var(--gantt-grid-line-week, #c0c0c0)"
       },
       children: [
-        /* @__PURE__ */ u4("div", { style: { height: "44px", borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)" } }),
+        /* @__PURE__ */ u4("div", { style: { height: "44px", borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)", display: "flex", alignItems: "center", paddingLeft: "8px", paddingRight: "8px" }, children: props.headerContent }),
         /* @__PURE__ */ u4(
           "div",
           {
             style: {
-              height: `${props.labels.length * props.rowHeight}px`
+              height: `${props.rowHeights.reduce((a4, b3) => a4 + b3, 0)}px`
             },
-            children: props.labels.map((label) => {
+            children: props.labels.map((label, i5) => {
               const isHighlighted = props.highlightedRowKeys?.has(label.key) ?? false;
               const isDimmed = props.dimmedRowKeys?.has(label.key) ?? false;
+              const h4 = props.rowHeights[i5] ?? ROW_HEIGHT2;
               return /* @__PURE__ */ u4(
                 "div",
                 {
                   class: `gantt-task-list-row ${isHighlighted ? "highlighted" : ""} ${isDimmed ? "dimmed" : ""}`,
                   style: {
-                    height: `${props.rowHeight}px`,
-                    lineHeight: `${props.rowHeight}px`,
+                    height: `${h4}px`,
                     borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)",
                     opacity: isDimmed ? 0.4 : 1,
                     background: isHighlighted ? "var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))" : "transparent",
@@ -2068,7 +2234,7 @@ function TaskList(props) {
                         }
                       }
                     ),
-                    /* @__PURE__ */ u4("span", { children: label.name })
+                    /* @__PURE__ */ u4("span", { style: { overflow: "hidden", textOverflow: "ellipsis" }, title: label.tooltip, children: label.name })
                   ]
                 },
                 label.key
@@ -2173,7 +2339,7 @@ function Timeline(props) {
     }
   }, [scrollLeft]);
   const taskBars = [];
-  let rowIndex = 0;
+  const groupLayout = [];
   const projectColorMap = /* @__PURE__ */ new Map();
   for (const p5 of store.projects.value) {
     projectColorMap.set(p5.id, p5.color ?? getDefaultColor(p5.id));
@@ -2186,29 +2352,61 @@ function Timeline(props) {
     return DEFAULT_COLORS[Math.abs(hash) % DEFAULT_COLORS.length];
   }
   for (const group of groups) {
+    const groupTasks = [];
     for (const task of group.tasks) {
       const startVal = task.startDate.value;
-      const endVal = task.endDate.value;
       if (!startVal)
         continue;
-      const end = endVal ?? startVal;
+      const endVal = task.endDate.value ?? startVal;
       const left = originToBody(dateToPx2(startVal));
-      const right = originToBody(dateToPx2(end));
+      const right = originToBody(dateToPx2(endVal));
       const width = Math.max(right - left, 4);
       const projectColor = task.projectId.value ? projectColorMap.get(task.projectId.value) ?? getDefaultColor(task.projectId.value) : getDefaultColor(task.id);
-      taskBars.push({
-        task,
-        left,
-        width,
-        rowIndex,
-        color: projectColor
-      });
+      groupTasks.push({ task, left, width, color: projectColor });
     }
-    rowIndex++;
+    groupTasks.sort((a4, b3) => a4.left - b3.left);
+    const lanes = [];
+    for (const gt of groupTasks) {
+      let assigned = false;
+      for (let li = 0; li < lanes.length; li++) {
+        if (gt.left >= lanes[li]) {
+          lanes[li] = gt.left + gt.width;
+          taskBars.push({
+            ...gt,
+            groupIndex: groupLayout.length,
+            groupStartY: 0,
+            // filled in below
+            laneIndex: li
+          });
+          assigned = true;
+          break;
+        }
+      }
+      if (!assigned) {
+        lanes.push(gt.left + gt.width);
+        taskBars.push({
+          ...gt,
+          groupIndex: groupLayout.length,
+          groupStartY: 0,
+          laneIndex: lanes.length - 1
+        });
+      }
+    }
+    const laneCount = Math.max(1, lanes.length);
+    const height = ROW_HEIGHT2 + (laneCount - 1) * LANE_OFFSET;
+    const startY = groupLayout.length === 0 ? 0 : groupLayout[groupLayout.length - 1].startY + groupLayout[groupLayout.length - 1].height;
+    groupLayout.push({ startY, height, laneCount });
+    for (let i5 = taskBars.length - 1; i5 >= 0; i5--) {
+      if (taskBars[i5].groupIndex === groupLayout.length - 1) {
+        taskBars[i5] = { ...taskBars[i5], groupStartY: startY };
+      } else {
+        break;
+      }
+    }
   }
+  const totalHeight = groupLayout.length > 0 ? groupLayout[groupLayout.length - 1].startY + groupLayout[groupLayout.length - 1].height : 0;
   const highlightedIds = store.highlightedTaskIds.value;
   const hasSelection = store.selectedEntity.value !== null;
-  const totalRows = groups.length;
   const gridAbsAligned = Math.floor((bodyOriginPx + scrollLeft - GRID_BUFFER_PX) / DAY_WIDTH2) * DAY_WIDTH2;
   const gridLeft = gridAbsAligned - bodyOriginPx;
   const headerTranslateX = gridLeft - scrollLeft;
@@ -2242,7 +2440,7 @@ function Timeline(props) {
             style: {
               position: "relative",
               width: `${bodyTotalWidth}px`,
-              height: `${totalRows * ROW_HEIGHT2}px`
+              height: `${totalHeight}px`
             },
             children: [
               /* @__PURE__ */ u4(TimelineGrid, { dayWidth: DAY_WIDTH2, scrollLeft, viewportWidth: viewportWidth.value, bufferPx: GRID_BUFFER_PX, bodyOriginPx }),
@@ -2254,6 +2452,9 @@ function Timeline(props) {
                 }
               ),
               groups.map((group, gi) => {
+                const layout = groupLayout[gi];
+                if (!layout)
+                  return null;
                 const isHighlighted = props.highlightedRowKeys.has(group.key);
                 const isDimmed = props.dimmedRowKeys.has(group.key);
                 const dragHovering = dragState.value?.currentPersonId != null && (dragState.value.currentPersonId === group.key || dragState.value.currentPersonId === null && group.key === "__unassigned__");
@@ -2262,10 +2463,10 @@ function Timeline(props) {
                   {
                     style: {
                       position: "absolute",
-                      top: `${gi * ROW_HEIGHT2}px`,
+                      top: `${layout.startY}px`,
                       left: 0,
                       width: "100%",
-                      height: `${ROW_HEIGHT2}px`,
+                      height: `${layout.height}px`,
                       borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)",
                       opacity: isDimmed ? 0.4 : 1,
                       background: dragHovering ? "var(--gantt-drag-hover-bg, rgba(74, 144, 217, 0.2))" : isHighlighted ? "var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))" : "transparent",
@@ -2278,10 +2479,12 @@ function Timeline(props) {
                   group.key
                 );
               }),
-              taskBars.map(({ task, left, width, rowIndex: ri, color }) => /* @__PURE__ */ u4(
+              taskBars.map(({ task, left, width, groupStartY, laneIndex, color }) => /* @__PURE__ */ u4(
                 TaskBar,
                 {
-                  rowIndex: ri,
+                  rowIndex: 0,
+                  groupStartY,
+                  laneIndex,
                   paneType,
                   data: {
                     id: task.id,
@@ -2294,15 +2497,40 @@ function Timeline(props) {
                     progress: task.progress.value
                   },
                   rowHeight: ROW_HEIGHT2,
+                  laneOffset: LANE_OFFSET,
                   onPointerDown: props.onTaskPointerDown,
                   onClick: props.onTaskClick
                 },
                 task.id
               )),
+              paneType === "project" && groups.map((group, gi) => {
+                const layout = groupLayout[gi];
+                if (!layout)
+                  return null;
+                const projectId = group.projectId;
+                if (!projectId || projectId === "__no_project__")
+                  return null;
+                const project = store.mergedProjects.value.find((p5) => p5.id === projectId);
+                if (!project?.keyDates?.length)
+                  return null;
+                return project.keyDates.map((kd, ki) => /* @__PURE__ */ u4(
+                  KeyDateMarker,
+                  {
+                    leftPx: originToBody(dateToPx2(kd.date)),
+                    groupTopY: layout.startY,
+                    name: kd.name,
+                    date: kd.date,
+                    color: kd.color,
+                    icon: kd.icon
+                  },
+                  `${projectId}-kd-${ki}`
+                ));
+              }),
               dragState.value && (() => {
                 const ds = dragState.value;
                 const barHeight = ROW_HEIGHT2 * 0.6;
-                const barTop = ds.rowIndex * ROW_HEIGHT2 + (ROW_HEIGHT2 - barHeight) / 2;
+                const ghostLayout = groupLayout[ds.rowIndex];
+                const barTop = ghostLayout ? ghostLayout.startY + (ROW_HEIGHT2 - barHeight) / 2 : ds.rowIndex * ROW_HEIGHT2 + (ROW_HEIGHT2 - barHeight) / 2;
                 const ghostTask = store.mergedTasks.value.find((t4) => t4.id === ds.taskId);
                 const ghostTitle = ghostTask?.title.value ?? "";
                 if (ds.paneType !== paneType)
@@ -2347,13 +2575,53 @@ function GanttPane(props) {
   const groups = type === "person" ? store.personGroups.value : store.projectGroups.value;
   const paneType = type;
   const labels = T2(
-    () => groups.map((g3) => ({
-      key: g3.personId ?? g3.projectId,
-      name: type === "person" ? g3.personName : g3.projectName,
-      color: type === "project" ? g3.color : void 0
-    })),
+    () => groups.map((g3) => {
+      const key = type === "person" ? g3.personId : g3.projectId;
+      if (type === "person") {
+        const pg = g3;
+        const displayName = pg.position ? `${pg.position} \xB7 ${pg.personName}` : pg.personName;
+        return {
+          key,
+          name: displayName,
+          color: void 0,
+          tooltip: pg.personId === "__unassigned__" ? void 0 : `ID: ${pg.personId}`
+        };
+      }
+      return {
+        key,
+        name: g3.projectName,
+        color: g3.color,
+        tooltip: void 0
+      };
+    }),
     [groups]
   );
+  const groupHeights = T2(() => {
+    return groups.map((group) => {
+      const ranges = [];
+      for (const task of group.tasks) {
+        const s5 = task.startDate.value;
+        if (!s5)
+          continue;
+        ranges.push({ start: s5, end: task.endDate.value ?? s5 });
+      }
+      ranges.sort((a4, b3) => a4.start.localeCompare(b3.start));
+      const lanes = [];
+      for (const dr of ranges) {
+        let assigned = false;
+        for (let li = 0; li < lanes.length; li++) {
+          if (dr.start >= lanes[li]) {
+            lanes[li] = dr.end;
+            assigned = true;
+            break;
+          }
+        }
+        if (!assigned)
+          lanes.push(dr.end);
+      }
+      return ROW_HEIGHT2 + (Math.max(1, lanes.length) - 1) * LANE_OFFSET;
+    });
+  }, [groups]);
   const highlightedIds = store.highlightedTaskIds.value;
   const hasSelection = store.selectedEntity.value !== null;
   const highlightedRowKeys = T2(() => {
@@ -2394,10 +2662,33 @@ function GanttPane(props) {
       TaskList,
       {
         labels,
-        rowHeight: ROW_HEIGHT2,
+        rowHeights: groupHeights,
         highlightedRowKeys,
         dimmedRowKeys,
-        onRowClick: handleRowClick
+        onRowClick: handleRowClick,
+        headerContent: type === "person" ? /* @__PURE__ */ u4(
+          "button",
+          {
+            class: "gantt-sort-toggle",
+            onClick: () => {
+              store.personSortMode.value = store.personSortMode.value === "name" ? "position" : "name";
+            },
+            title: `Sort: ${store.personSortMode.value === "name" ? "by name" : "by position"}`,
+            style: {
+              padding: "2px 8px",
+              border: "1px solid var(--background-modifier-border, #ccc)",
+              borderRadius: "4px",
+              background: "var(--background-secondary, #f5f5f5)",
+              cursor: "pointer",
+              fontSize: "11px",
+              whiteSpace: "nowrap"
+            },
+            children: [
+              "Sort: ",
+              store.personSortMode.value === "name" ? "Name" : "Position"
+            ]
+          }
+        ) : void 0
       }
     ),
     /* @__PURE__ */ u4(
@@ -2420,6 +2711,14 @@ function GanttPane(props) {
     )
   ] });
 }
+var KEY_DATE_PRESETS = [
+  { name: "\u9A8C\u6536\u65F6\u95F4", color: "#98C379", icon: "\u2713" },
+  { name: "\u4E0A\u7EBF\u65F6\u95F4", color: "#61AFEF", icon: "\u25B2" },
+  { name: "\u63D0\u6D4B\u65F6\u95F4", color: "#C678DD", icon: "\u25C6" },
+  { name: "\u8BC4\u5BA1\u65F6\u95F4", color: "#E5C07B", icon: "\u25CE" },
+  { name: "\u4EA4\u4ED8\u65F6\u95F4", color: "#56B6C2", icon: "\u25CF" },
+  { name: "\u542F\u52A8\u65F6\u95F4", color: "#4A90D9", icon: "\u25B6" }
+];
 function UnassignedPanel(props) {
   const projects = props.store.unassignedProjects.value;
   if (projects.length === 0) {
@@ -2513,6 +2812,484 @@ function UnassignedPanel(props) {
     }
   );
 }
+function ProjectDetail(props) {
+  const { store } = props;
+  const sel = store.selectedEntity.value;
+  const editing = useSignal(false);
+  if (!sel || sel.type !== "project")
+    return null;
+  const project = store.mergedProjects.value.find((p5) => p5.id === sel.id);
+  if (!project)
+    return null;
+  const projectOverrides = store.edits.value?.projectOverrides?.[project.id];
+  const description = projectOverrides?.description ?? project.description ?? "";
+  const requester = projectOverrides?.requester ?? project.requester ?? "";
+  const keyDates = projectOverrides?.keyDates ?? project.keyDates ?? [];
+  const keyLinks = projectOverrides?.keyLinks ?? project.keyLinks ?? [];
+  const editDescription = useSignal(description);
+  const editRequester = useSignal(requester);
+  const editKeyDates = useSignal(
+    keyDates.map((kd) => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon }))
+  );
+  const editKeyLinks = useSignal(
+    keyLinks.map((kl) => ({ ...kl }))
+  );
+  function handleEdit() {
+    editDescription.value = description;
+    editRequester.value = requester;
+    editKeyDates.value = keyDates.map((kd) => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon }));
+    editKeyLinks.value = keyLinks.map((kl) => ({ ...kl }));
+    editing.value = true;
+  }
+  async function handleSave() {
+    await store.persistProjectEdit(project.id, "description", editDescription.value || void 0);
+    await store.persistProjectEdit(project.id, "requester", editRequester.value || void 0);
+    await store.persistProjectEdit(project.id, "keyDates", editKeyDates.value.length > 0 ? editKeyDates.value.map((kd) => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon })) : void 0);
+    await store.persistProjectEdit(project.id, "keyLinks", editKeyLinks.value.length > 0 ? editKeyLinks.value : void 0);
+    editing.value = false;
+  }
+  function handleCancel() {
+    editing.value = false;
+  }
+  const fieldStyle = { marginBottom: "12px" };
+  const labelStyle = { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" };
+  const valueStyle = { fontSize: "13px", wordBreak: "break-word" };
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      class: "gantt-detail-panel",
+      style: {
+        width: `${RIGHT_PANEL_WIDTH}px`,
+        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
+        padding: "12px",
+        fontSize: "13px",
+        color: "var(--text-normal, #333)",
+        overflowY: "auto",
+        background: "var(--background-secondary, #f5f5f5)"
+      },
+      children: [
+        /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }, children: [
+          /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px", flex: 1 }, children: [
+            project.color && /* @__PURE__ */ u4("span", { style: {
+              width: "12px",
+              height: "12px",
+              borderRadius: "3px",
+              background: project.color,
+              flexShrink: 0
+            } }),
+            /* @__PURE__ */ u4("span", { style: { fontWeight: "bold", fontSize: "14px", wordBreak: "break-word" }, children: project.name })
+          ] }),
+          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px", flexShrink: 0 }, children: editing.value ? /* @__PURE__ */ u4(S, { children: [
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: handleSave,
+                style: {
+                  padding: "2px 8px",
+                  border: "1px solid var(--interactive-accent, #4A90D9)",
+                  borderRadius: "4px",
+                  background: "var(--interactive-accent, #4A90D9)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontSize: "11px"
+                },
+                children: "Save"
+              }
+            ),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: handleCancel,
+                style: {
+                  padding: "2px 8px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  background: "var(--background-secondary, #f5f5f5)",
+                  cursor: "pointer",
+                  fontSize: "11px"
+                },
+                children: "Cancel"
+              }
+            )
+          ] }) : /* @__PURE__ */ u4(S, { children: [
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: handleEdit,
+                style: {
+                  padding: "2px 8px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  background: "var(--background-secondary, #f5f5f5)",
+                  cursor: "pointer",
+                  fontSize: "11px"
+                },
+                children: "Edit"
+              }
+            ),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => store.selectEntity(null),
+                style: {
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "16px",
+                  lineHeight: 1,
+                  padding: "0 2px",
+                  color: "var(--text-muted, #999)"
+                },
+                title: "Close detail panel",
+                children: "x"
+              }
+            )
+          ] }) })
+        ] }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: "Description" }),
+          editing.value ? /* @__PURE__ */ u4(
+            "textarea",
+            {
+              value: editDescription.value,
+              onInput: (e4) => {
+                editDescription.value = e4.target.value;
+              },
+              rows: 4,
+              style: {
+                width: "100%",
+                boxSizing: "border-box",
+                resize: "vertical",
+                fontSize: "12px",
+                padding: "4px",
+                borderRadius: "4px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                background: "var(--background-primary, #fff)",
+                color: "var(--text-normal, #333)"
+              },
+              placeholder: "Project description..."
+            }
+          ) : /* @__PURE__ */ u4("div", { style: valueStyle, children: description || "\u2014" })
+        ] }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: "Requester" }),
+          editing.value ? /* @__PURE__ */ u4(
+            "input",
+            {
+              type: "text",
+              value: editRequester.value,
+              onInput: (e4) => {
+                editRequester.value = e4.target.value;
+              },
+              style: {
+                width: "100%",
+                boxSizing: "border-box",
+                fontSize: "12px",
+                padding: "4px",
+                borderRadius: "4px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                background: "var(--background-primary, #fff)",
+                color: "var(--text-normal, #333)"
+              },
+              placeholder: "Stakeholder or department..."
+            }
+          ) : /* @__PURE__ */ u4("div", { style: valueStyle, children: requester || "\u2014" })
+        ] }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: "Key Dates" }),
+          editing.value ? /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: [
+            /* @__PURE__ */ u4("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "4px" }, children: KEY_DATE_PRESETS.map((preset) => /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => {
+                  editKeyDates.value = [...editKeyDates.value, {
+                    name: preset.name,
+                    date: todayString(),
+                    color: preset.color,
+                    icon: preset.icon
+                  }];
+                },
+                title: preset.name,
+                style: {
+                  padding: "2px 6px",
+                  fontSize: "10px",
+                  borderRadius: "3px",
+                  cursor: "pointer",
+                  border: `1px solid ${preset.color}`,
+                  background: "var(--background-primary, #fff)",
+                  color: preset.color,
+                  whiteSpace: "nowrap"
+                },
+                children: [
+                  /* @__PURE__ */ u4("span", { style: {
+                    display: "inline-block",
+                    width: "12px",
+                    height: "12px",
+                    lineHeight: "12px",
+                    textAlign: "center",
+                    fontSize: "9px",
+                    borderRadius: "2px",
+                    background: preset.color,
+                    color: "#fff",
+                    marginRight: "3px"
+                  }, children: preset.icon }),
+                  preset.name
+                ]
+              },
+              preset.name
+            )) }),
+            editKeyDates.value.map((kd, i5) => /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "3px", alignItems: "center" }, children: [
+              /* @__PURE__ */ u4(
+                "input",
+                {
+                  type: "color",
+                  value: kd.color ?? "#E5C07B",
+                  onInput: (e4) => {
+                    const next = [...editKeyDates.value];
+                    next[i5] = { ...next[i5], color: e4.target.value };
+                    editKeyDates.value = next;
+                  },
+                  title: "Marker color",
+                  style: { width: "22px", height: "22px", padding: "0", border: "none", borderRadius: "3px", cursor: "pointer", flexShrink: 0 }
+                }
+              ),
+              /* @__PURE__ */ u4(
+                "input",
+                {
+                  type: "text",
+                  value: kd.icon ?? "",
+                  onInput: (e4) => {
+                    const next = [...editKeyDates.value];
+                    next[i5] = { ...next[i5], icon: e4.target.value || void 0 };
+                    editKeyDates.value = next;
+                  },
+                  placeholder: "\u25C6",
+                  maxLength: 2,
+                  title: "Icon (1-2 chars shown in marker)",
+                  style: {
+                    width: "22px",
+                    fontSize: "11px",
+                    padding: "3px",
+                    textAlign: "center",
+                    borderRadius: "3px",
+                    flexShrink: 0,
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    background: "var(--background-primary, #fff)",
+                    color: "var(--text-normal, #333)"
+                  }
+                }
+              ),
+              /* @__PURE__ */ u4(
+                "input",
+                {
+                  type: "text",
+                  value: kd.name,
+                  onInput: (e4) => {
+                    const next = [...editKeyDates.value];
+                    next[i5] = { ...next[i5], name: e4.target.value };
+                    editKeyDates.value = next;
+                  },
+                  placeholder: "Name",
+                  style: {
+                    flex: 1,
+                    fontSize: "11px",
+                    padding: "3px",
+                    borderRadius: "3px",
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    background: "var(--background-primary, #fff)",
+                    color: "var(--text-normal, #333)"
+                  }
+                }
+              ),
+              /* @__PURE__ */ u4(
+                "input",
+                {
+                  type: "date",
+                  value: kd.date,
+                  onInput: (e4) => {
+                    const next = [...editKeyDates.value];
+                    next[i5] = { ...next[i5], date: e4.target.value };
+                    editKeyDates.value = next;
+                  },
+                  style: {
+                    width: "110px",
+                    fontSize: "11px",
+                    padding: "3px",
+                    borderRadius: "3px",
+                    flexShrink: 0,
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    background: "var(--background-primary, #fff)",
+                    color: "var(--text-normal, #333)"
+                  }
+                }
+              ),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: () => {
+                    editKeyDates.value = editKeyDates.value.filter((_3, idx) => idx !== i5);
+                  },
+                  style: {
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "14px",
+                    color: "var(--text-error, #e00)",
+                    padding: "0 2px",
+                    lineHeight: 1,
+                    flexShrink: 0
+                  },
+                  title: "Remove key date",
+                  children: "x"
+                }
+              )
+            ] }, i5)),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => {
+                  editKeyDates.value = [...editKeyDates.value, { name: "", date: "", color: "#E5C07B", icon: "" }];
+                },
+                style: {
+                  padding: "2px 8px",
+                  border: "1px dashed var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  marginTop: "2px"
+                },
+                children: "+ Custom Key Date"
+              }
+            )
+          ] }) : /* @__PURE__ */ u4("div", { children: keyDates.length > 0 ? keyDates.map((kd, i5) => /* @__PURE__ */ u4("div", { style: { fontSize: "12px", padding: "2px 0", display: "flex", gap: "6px", alignItems: "center" }, children: [
+            /* @__PURE__ */ u4("span", { style: {
+              display: "inline-block",
+              width: "10px",
+              height: "10px",
+              borderRadius: "2px",
+              background: kd.color ?? "var(--gantt-key-date-color, #E5C07B)",
+              flexShrink: 0,
+              transform: "rotate(45deg)"
+            } }),
+            kd.icon && /* @__PURE__ */ u4("span", { style: { fontSize: "9px", fontWeight: "bold", color: kd.color ?? "var(--text-muted, #999)", flexShrink: 0 }, children: kd.icon }),
+            /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", minWidth: "80px" }, children: kd.date }),
+            /* @__PURE__ */ u4("span", { children: kd.name })
+          ] }, i5)) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" }) })
+        ] }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: "Key Links" }),
+          editing.value ? /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: [
+            editKeyLinks.value.map((kl, i5) => /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px", alignItems: "center" }, children: [
+              /* @__PURE__ */ u4(
+                "input",
+                {
+                  type: "text",
+                  value: kl.name,
+                  onInput: (e4) => {
+                    const next = [...editKeyLinks.value];
+                    next[i5] = { ...next[i5], name: e4.target.value };
+                    editKeyLinks.value = next;
+                  },
+                  placeholder: "Link name",
+                  style: {
+                    width: "80px",
+                    fontSize: "11px",
+                    padding: "3px",
+                    borderRadius: "3px",
+                    flexShrink: 0,
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    background: "var(--background-primary, #fff)",
+                    color: "var(--text-normal, #333)"
+                  }
+                }
+              ),
+              /* @__PURE__ */ u4(
+                "input",
+                {
+                  type: "url",
+                  value: kl.url,
+                  onInput: (e4) => {
+                    const next = [...editKeyLinks.value];
+                    next[i5] = { ...next[i5], url: e4.target.value };
+                    editKeyLinks.value = next;
+                  },
+                  placeholder: "https://...",
+                  style: {
+                    flex: 1,
+                    fontSize: "11px",
+                    padding: "3px",
+                    borderRadius: "3px",
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    background: "var(--background-primary, #fff)",
+                    color: "var(--text-normal, #333)"
+                  }
+                }
+              ),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: () => {
+                    editKeyLinks.value = editKeyLinks.value.filter((_3, idx) => idx !== i5);
+                  },
+                  style: {
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "14px",
+                    color: "var(--text-error, #e00)",
+                    padding: "0 2px",
+                    lineHeight: 1,
+                    flexShrink: 0
+                  },
+                  title: "Remove link",
+                  children: "x"
+                }
+              )
+            ] }, i5)),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => {
+                  editKeyLinks.value = [...editKeyLinks.value, { name: "", url: "" }];
+                },
+                style: {
+                  padding: "2px 8px",
+                  border: "1px dashed var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  marginTop: "2px"
+                },
+                children: "+ Add Link"
+              }
+            )
+          ] }) : /* @__PURE__ */ u4("div", { children: keyLinks.length > 0 ? keyLinks.map((kl, i5) => /* @__PURE__ */ u4("div", { style: { fontSize: "12px", padding: "2px 0" }, children: /* @__PURE__ */ u4(
+            "a",
+            {
+              href: kl.url,
+              target: "_blank",
+              rel: "noopener noreferrer",
+              style: {
+                color: "var(--interactive-accent, #4A90D9)",
+                textDecoration: "none",
+                display: "flex",
+                alignItems: "center",
+                gap: "4px"
+              },
+              children: [
+                /* @__PURE__ */ u4("span", { style: { fontSize: "10px" }, children: "\u2197" }),
+                kl.name || kl.url
+              ]
+            }
+          ) }, i5)) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" }) })
+        ] })
+      ]
+    }
+  );
+}
 function DetailPanel(props) {
   const { store } = props;
   const sel = store.selectedEntity.value;
@@ -2558,7 +3335,7 @@ function DetailPanel(props) {
                 marginLeft: "4px"
               },
               title: "Close detail panel",
-              children: "\xD7"
+              children: "x"
             }
           )
         ] }),
@@ -2613,11 +3390,7 @@ function DetailPanel(props) {
               fontSize: "11px"
             }, children: tag }, tag)) })
           ] }),
-          /* @__PURE__ */ u4("div", { style: {
-            fontSize: "11px",
-            color: "var(--text-muted, #999)",
-            marginTop: "4px"
-          }, children: [
+          /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginTop: "4px" }, children: [
             /* @__PURE__ */ u4("div", { style: { textDecoration: sourceStyle }, children: sourceLabel }),
             task.upstreamDeleted && /* @__PURE__ */ u4("div", { style: { color: "var(--text-error, #e00)", marginTop: "2px" }, children: "Deleted upstream" })
           ] })
@@ -2659,7 +3432,8 @@ function DualPane(props) {
     document.addEventListener("pointerup", onUp);
   }
   const sel = store.selectedEntity.value;
-  const showDetail = sel?.type === "task";
+  const showTaskDetail = sel?.type === "task";
+  const showProjectDetail = sel?.type === "project";
   return /* @__PURE__ */ u4("div", { class: "gantt-dual-pane", style: { display: "flex", flexDirection: "column", height: "100%", width: "100%" }, children: /* @__PURE__ */ u4("div", { style: { display: "flex", flex: 1, overflow: "hidden" }, children: [
     /* @__PURE__ */ u4("div", { style: { flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }, children: [
       /* @__PURE__ */ u4("div", { style: { flex: `0 0 ${paneRatio.value * 100}%`, display: "flex", overflow: "hidden" }, children: [
@@ -2678,7 +3452,7 @@ function DualPane(props) {
             onDragOver: props.onDragOver
           }
         ),
-        !showDetail && /* @__PURE__ */ u4(UnassignedPanel, { store, onDragStart: () => {
+        !showTaskDetail && !showProjectDetail && /* @__PURE__ */ u4(UnassignedPanel, { store, onDragStart: () => {
         } })
       ] }),
       /* @__PURE__ */ u4(
@@ -2712,7 +3486,8 @@ function DualPane(props) {
         }
       ) })
     ] }),
-    showDetail && /* @__PURE__ */ u4(DetailPanel, { store })
+    showTaskDetail && /* @__PURE__ */ u4(DetailPanel, { store }),
+    showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store })
   ] }) });
 }
 function GanttChart(props) {
@@ -2780,6 +3555,30 @@ function GanttChart(props) {
               },
               onClick: () => store.selectEntity(null),
               children: "Clear Selection"
+            }
+          ),
+          /* @__PURE__ */ u4(
+            "button",
+            {
+              class: "gantt-btn",
+              title: "Re-run all connectors to fetch latest data",
+              style: {
+                padding: "4px 12px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "4px",
+                background: "var(--background-secondary, #f5f5f5)",
+                cursor: "pointer",
+                fontSize: "12px"
+              },
+              onClick: async () => {
+                const view = store.views.value.find((v5) => v5.id === store.currentViewId.value);
+                if (!view)
+                  return;
+                for (const cid of view.connectors) {
+                  await store.refreshConnector(cid);
+                }
+              },
+              children: "Refresh"
             }
           ),
           /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", fontSize: "12px" }, children: [
@@ -2925,14 +3724,44 @@ function createObsidianConnectorLoader(adapter, requestUrl) {
     }
   };
 }
+function createObsidianConnectorContext(config, vaultAdapter, requestUrl) {
+  return {
+    config,
+    log: (...args) => console.log("[Gantt Connector]", ...args),
+    request: async (url, opts) => {
+      const result = await requestUrl({
+        url,
+        method: opts?.method ?? "GET",
+        headers: opts?.headers,
+        body: opts?.body
+      });
+      return {
+        ok: result.status >= 200 && result.status < 300,
+        status: result.status,
+        json: async () => result.json,
+        text: async () => String(result.json)
+      };
+    },
+    readFile: async (path) => {
+      return await vaultAdapter.read(path);
+    },
+    parseCSV: (text, options) => {
+      return parseCSV(text, options);
+    }
+  };
+}
 
 // src/platform.ts
 function createObsidianPlatform(app) {
   const adapter = app.vault.adapter;
   const storage = createObsidianStorage(adapter);
-  const connectorLoader = createObsidianConnectorLoader(adapter, (opts) => {
-    throw new Error("requestUrl not bound \u2014 call bindRequestUrl first");
-  });
+  const fetchRef = {
+    requestUrl: () => {
+      throw new Error("requestUrl not bound \u2014 call bindRequestUrl first");
+    }
+  };
+  const connectorLoader = createObsidianConnectorLoader(adapter, (...args) => fetchRef.requestUrl(...args));
+  const createConnectorContext = (config) => createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args));
   const theme = {
     isDark: () => {
       const body = document.body;
@@ -2949,14 +3778,17 @@ function createObsidianPlatform(app) {
     },
     variables: {}
   };
-  return {
+  const platform = {
     storage,
     fetch: globalThis.fetch.bind(globalThis),
     connectorLoader,
+    createConnectorContext,
     watcher: null,
     // File watching handled by Obsidian's vault events
     theme
   };
+  platform._fetchRef = fetchRef;
+  return platform;
 }
 
 // src/view.tsx
@@ -2983,13 +3815,72 @@ var GanttView = class extends import_obsidian.ItemView {
     root.style.width = "100%";
     root.style.height = "100%";
     R(k(GanttChart, { store: this.store }), root);
+    await this.seedIfEmpty();
+  }
+  async seedIfEmpty() {
+    if (!this.platform || !this.store)
+      return;
     try {
       const viewFiles = await this.platform.storage.list("views");
       if (viewFiles.length > 0) {
         const viewId = viewFiles[0].replace(/\.json$/, "");
         await this.store.loadView(viewId);
+        return;
       }
-    } catch {
+      const persons = [
+        { id: "alice", name: "Alice Chen", position: "Engineer" },
+        { id: "bob", name: "Bob Martinez", position: "Designer" },
+        { id: "carol", name: "Carol Wu", position: "Manager" }
+      ];
+      const projects = [
+        { id: "proj-api", name: "API Redesign", color: "#4A90D9", description: "Redesign the core API endpoints for v2", requester: "Platform Team" },
+        { id: "proj-mobile", name: "Mobile App v2", color: "#7B61F8" },
+        { id: "proj-infra", name: "Infrastructure", color: "#98C379" },
+        { id: "proj-ux", name: "UX Overhaul", color: "#E06C75" }
+      ];
+      const tasks = [
+        { id: "t1", title: "Design new endpoints", startDate: "2026-06-01", endDate: "2026-06-08", progress: 1, personId: "alice", projectId: "proj-api" },
+        { id: "t2", title: "Implement auth middleware", startDate: "2026-06-03", endDate: "2026-06-12", progress: 0.6, personId: "bob", projectId: "proj-api" },
+        { id: "t3", title: "Write API tests", startDate: "2026-06-10", endDate: "2026-06-18", progress: 0.1, personId: "carol", projectId: "proj-api" },
+        { id: "t4", title: "Deploy API to staging", startDate: "2026-06-19", endDate: "2026-06-22", progress: 0, personId: "alice", projectId: "proj-api" },
+        { id: "t5", title: "Home screen redesign", startDate: "2026-05-28", endDate: "2026-06-10", progress: 0.8, personId: "carol", projectId: "proj-mobile" },
+        { id: "t6", title: "Push notification system", startDate: "2026-06-05", endDate: "2026-06-20", progress: 0.3, personId: "bob", projectId: "proj-mobile" },
+        { id: "t7", title: "Offline sync engine", startDate: "2026-06-15", endDate: "2026-07-05", progress: 0, personId: "bob", projectId: "proj-mobile" },
+        { id: "t8", title: "Set up CI/CD pipeline", startDate: "2026-05-25", endDate: "2026-06-02", progress: 0.95, personId: "alice", projectId: "proj-infra" },
+        { id: "t9", title: "Database migration plan", startDate: "2026-06-08", endDate: "2026-06-16", progress: 0.4, personId: "carol", projectId: "proj-infra" },
+        { id: "t10", title: "User research sessions", startDate: "2026-06-01", endDate: "2026-06-07", progress: 0.5, personId: "alice", projectId: "proj-ux" },
+        { id: "t11", title: "Wireframe review", startDate: "2026-06-01", endDate: "2026-06-05", progress: 0.7, personId: "alice", projectId: "proj-ux" }
+      ];
+      const cache = {
+        connectorId: "demo",
+        lastFetch: (/* @__PURE__ */ new Date()).toISOString(),
+        lastError: null,
+        tasks,
+        persons,
+        projects
+      };
+      const view = {
+        id: "demo",
+        name: "Demo View",
+        connectors: ["demo"],
+        display: {
+          defaultGroupBy: "person",
+          visibleColumns: ["progress", "person"]
+        }
+      };
+      const edits = {
+        viewId: "demo",
+        overrides: {},
+        order: [],
+        hidden: [],
+        localTasks: []
+      };
+      await this.platform.storage.write("views/demo.json", JSON.stringify(view, null, 2));
+      await this.platform.storage.write("cache/demo.json", JSON.stringify(cache, null, 2));
+      await this.platform.storage.write("edits/demo.json", JSON.stringify(edits, null, 2));
+      await this.store.loadView("demo");
+    } catch (e4) {
+      console.error("[Gantt] Seed failed:", e4);
     }
   }
   async onClose() {

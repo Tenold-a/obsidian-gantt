@@ -1,7 +1,8 @@
 import { render } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { createGanttStore, GanttChart } from '@obsidian-gantt/ui';
-import type { GanttPlatform, IStorage, Theme, IConnectorLoader } from '@obsidian-gantt/core';
+import type { GanttPlatform, IStorage, Theme, IConnectorLoader, ConnectorContext, CsvParseOptions } from '@obsidian-gantt/core';
+import { parseCSV } from '@obsidian-gantt/core';
 
 // ── Browser localStorage adapter ──────────────────────────────────
 
@@ -50,12 +51,33 @@ const dummyConnectorLoader: IConnectorLoader = {
   },
 };
 
+// ── Web connector context factory ──────────────────────────────────
+
+function createWebConnectorContext(config: Record<string, unknown>): ConnectorContext {
+  return {
+    config,
+    log: (...args: unknown[]) => console.log('[Gantt Connector]', ...args),
+    request: (url: string, opts?: RequestInit) => window.fetch(url, opts),
+    readFile: async (path: string): Promise<string> => {
+      const response = await window.fetch(path);
+      if (!response.ok) {
+        throw new Error(`Failed to read file: ${response.status} ${response.statusText}`);
+      }
+      return await response.text();
+    },
+    parseCSV: (text: string, options?: CsvParseOptions): Record<string, string>[] => {
+      return parseCSV(text, options);
+    },
+  };
+}
+
 // ── Platform ──────────────────────────────────────────────────────
 
 const platform: GanttPlatform = {
   storage: browserStorage,
   fetch: window.fetch.bind(window),
   connectorLoader: dummyConnectorLoader,
+  createConnectorContext: (config: Record<string, unknown>) => createWebConnectorContext(config),
   watcher: null,
   theme: browserTheme,
 };

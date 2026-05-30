@@ -1,0 +1,13 @@
+id,title,startDate,endDate,progress,personId,projectId
+api-design,设计新接口,2026-06-01,2026-06-08,1,zhangsan,api-refactor
+api-auth,实现认证中间件,2026-06-03,2026-06-12,0.6,lisi,api-refactor
+api-tests,编写API测试,2026-06-10,2026-06-18,0.1,wangwu,api-refactor
+api-deploy,部署到预发布环境,2026-06-19,2026-06-22,0,zhangsan,api-refactor
+mobile-home,首页重新设计,2026-05-28,2026-06-10,0.8,wangwu,mobile-v2
+mobile-push,推送通知系统,2026-06-05,2026-06-20,0.3,lisi,mobile-v2
+mobile-offline,离线同步引擎,2026-06-15,2026-07-05,0,lisi,mobile-v2
+infra-cicd,搭建CI/CD流水线,2026-05-25,2026-06-02,0.95,zhangsan,infra
+infra-db,数据库迁移方案,2026-06-08,2026-06-16,0.4,wangwu,infra
+ux-research,用户调研访谈,2026-06-01,2026-06-07,0.5,zhangsan,ux-overhaul
+ux-prototype,原型设计,2026-06-08,2026-06-20,0,wangwu,ux-overhaul
+ux-testing,可用性测试,2026-06-21,2026-06-30,0,lisi,ux-overhaul

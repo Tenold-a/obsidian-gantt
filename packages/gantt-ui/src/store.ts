@@ -332,9 +332,18 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     error.value = null;
 
     try {
-      // Read connector config
-      const configRaw = await platform.storage.read(`connectors/${safeName(connectorId)}.json`);
-      const connConfig: Record<string, unknown> = configRaw ? JSON.parse(configRaw) : {};
+      // Read connector config — auto-create if missing
+      const configPath = `connectors/${safeName(connectorId)}.json`;
+      let configRaw = await platform.storage.read(configPath);
+      let connConfig: Record<string, unknown>;
+      if (configRaw) {
+        connConfig = JSON.parse(configRaw);
+      } else {
+        // No config file yet — create a default one with default script path
+        connConfig = { script: `connectors/${connectorId}.js` };
+        await platform.storage.write(configPath, JSON.stringify(connConfig, null, 2));
+        console.log(`[Gantt] Auto-created connector config: ${configPath}`);
+      }
       const scriptPath = (connConfig.script as string) || `connectors/${safeName(connectorId)}.js`;
 
       // Load the connector module
@@ -365,7 +374,9 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
         cache,
       ];
     } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[Gantt] Failed to refresh connector "${connectorId}":`, msg);
+      error.value = msg;
     } finally {
       isLoading.value = false;
     }

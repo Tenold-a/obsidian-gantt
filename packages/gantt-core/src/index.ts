@@ -21,6 +21,10 @@ export {
 } from './date-utils';
 export type { MonthRange } from './date-utils';
 
+// Re-export CSV parser
+export { parseCSV } from './csv-parser';
+export type { CsvParseOptions } from './csv-parser';
+
 // ============================================================
 // Canonical Data Types (output by connector transform())
 // ============================================================
@@ -124,6 +128,10 @@ export interface ConnectorContext {
   request: (url: string, options?: RequestInit) => Promise<Response>;
   /** Debug logger */
   log: (message: string) => void;
+  /** Read a local file and return its content as a string */
+  readFile?: (path: string) => Promise<string>;
+  /** Parse CSV text into an array of record objects */
+  parseCSV?: (text: string, options?: CsvParseOptions) => Record<string, string>[];
 }
 
 /** Exports expected from a connector script file. */
@@ -280,6 +288,8 @@ export interface GanttPlatform {
   storage: IStorage;
   fetch: typeof globalThis.fetch;
   connectorLoader: IConnectorLoader;
+  /** Create a ConnectorContext for executing connector scripts */
+  createConnectorContext: (config: Record<string, unknown>) => ConnectorContext;
   watcher: IWatcher | null;
   theme: Theme;
 }

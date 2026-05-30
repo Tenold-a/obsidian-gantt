@@ -1534,6 +1534,27 @@ export function GanttChart(props: {
         >
           Clear Selection
         </button>
+        <button
+          class="gantt-btn"
+          title="Re-run all connectors to fetch latest data"
+          style={{
+            padding: '4px 12px',
+            border: '1px solid var(--background-modifier-border, #ccc)',
+            borderRadius: '4px',
+            background: 'var(--background-secondary, #f5f5f5)',
+            cursor: 'pointer',
+            fontSize: '12px',
+          }}
+          onClick={async () => {
+            const view = store.views.value.find(v => v.id === store.currentViewId.value);
+            if (!view) return;
+            for (const cid of view.connectors) {
+              await store.refreshConnector(cid);
+            }
+          }}
+        >
+          Refresh
+        </button>
         <span style={{ color: 'var(--text-muted, #999)', fontSize: '12px' }}>
           {store.mergedTasks.value.length} tasks · {store.personGroups.value.length} people · {store.projectGroups.value.length} projects
         </span>
