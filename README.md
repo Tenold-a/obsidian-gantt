@@ -4,6 +4,28 @@
 
 <img width="1986" height="1016" alt="image" src="https://github.com/user-attachments/assets/34239ab0-616d-4211-bdf9-8dd46bdf55fc" />
 
+## 安装与使用
+
+### 从 Release 安装（推荐）
+
+1. 前往 [Releases](https://github.com/Tenold-a/obsidian-gantt/releases) 页面，下载最新的 `obsidian-gantt.zip`
+2. 解压得到 `obsidian-gantt` 文件夹，放入 Obsidian vault 的 `.obsidian/plugins/` 目录
+3. 打开 Obsidian → 设置 → 第三方插件 → 启用「Safe mode」关闭 → 找到「Gantt Chart」→ 点击启用
+4. 点击左侧边栏的 📊 图标即可打开甘特图视图
+
+### 手动构建
+
+```bash
+git clone https://github.com/Tenold-a/obsidian-gantt.git
+cd obsidian-gantt
+npm install
+npm run build --workspace=packages/gantt-core
+npm run build --workspace=packages/gantt-ui
+npm run build --workspace=packages/obsidian-plugin
+```
+
+构建产物在 `packages/obsidian-plugin/`，将 `main.js`、`styles.css`、`manifest.json` 以及 `csv-connector.js` 和示例 CSV 文件复制到 `.obsidian/plugins/obsidian-gantt/` 即可。
+
 ## 功能
 
 ### 双窗格甘特图
