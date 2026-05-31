@@ -113,8 +113,16 @@ export interface Project {
   keyDates?: KeyDate[];
   /** Named hyperlinks (design files, docs, etc.) */
   keyLinks?: KeyLink[];
+  /** Arbitrary tags for categorization and filtering */
+  tags?: string[];
   /** Connector-specific extra data */
   metadata?: Record<string, unknown>;
+}
+
+/** A managed tag definition with display color. */
+export interface TagDefinition {
+  name: string;
+  color: string;
 }
 
 /** Standardised output from a connector's transform() function. */
@@ -237,7 +245,7 @@ export interface EditsOverlay {
   /** Tasks created locally (no upstream source) */
   localTasks: Task[];
   /** Project-level field overrides keyed by project ID */
-  projectOverrides?: Record<string, Partial<Pick<Project, 'name' | 'status' | 'description' | 'requester' | 'keyDates' | 'keyLinks'>>>;
+  projectOverrides?: Record<string, Partial<Pick<Project, 'name' | 'status' | 'description' | 'requester' | 'keyDates' | 'keyLinks' | 'tags'>>>;
   /** Task IDs marked for deletion */
   deletedTasks?: string[];
   /** Project IDs marked for deletion */

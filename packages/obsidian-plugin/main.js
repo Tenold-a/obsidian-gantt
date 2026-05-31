@@ -1413,6 +1413,13 @@ function createGanttStore(platform) {
   const personScrollTop = y3(0);
   const projectScrollTop = y3(0);
   const personSortMode = y3("name");
+  const projectSortMode = y3("name");
+  const projectSortKeyDates = y3(["\u4E0A\u7EBF\u65F6\u95F4"]);
+  const filterTimeStart = y3("");
+  const filterTimeEnd = y3("");
+  const filterStatuses = y3(/* @__PURE__ */ new Set());
+  const filterTags = y3(/* @__PURE__ */ new Set());
+  const tagDefinitions = y3([]);
   const isLoading = y3(false);
   const error = y3(null);
   let scrollGuardActive = false;
@@ -1530,7 +1537,7 @@ function createGanttStore(platform) {
   });
   const projectGroups = g2(() => {
     const map = /* @__PURE__ */ new Map();
-    const projectInfoMap = new Map(projects.value.map((p5) => [p5.id, p5]));
+    const projectInfoMap = new Map(mergedProjects.value.map((p5) => [p5.id, p5]));
     for (const t4 of mergedTasks.value) {
       const key = t4.projectId.value || "__no_project__";
       if (!map.has(key))
@@ -1547,7 +1554,46 @@ function createGanttStore(platform) {
         tasks
       });
     }
-    groups.sort((a4, b3) => a4.projectName.localeCompare(b3.projectName));
+    const sortMode = projectSortMode.value;
+    if (sortMode === "time") {
+      const sortKeyDates = projectSortKeyDates.value;
+      const projectTimeInfo = /* @__PURE__ */ new Map();
+      for (const [projectId, projectTasks] of map) {
+        const info = projectInfoMap.get(projectId);
+        let sortDate = null;
+        for (const kdName of sortKeyDates) {
+          const kd = info?.keyDates?.find((k3) => k3.name === kdName);
+          if (kd?.date) {
+            sortDate = kd.date;
+            break;
+          }
+        }
+        let lastEnd = null;
+        for (const t4 of projectTasks) {
+          const e4 = t4.endDate.value;
+          if (e4 && (!lastEnd || e4 > lastEnd))
+            lastEnd = e4;
+        }
+        projectTimeInfo.set(projectId, { sortDate, lastEnd });
+      }
+      groups.sort((a4, b3) => {
+        const infoA = projectTimeInfo.get(a4.projectId);
+        const infoB = projectTimeInfo.get(b3.projectId);
+        const dateA = infoA?.sortDate ?? null;
+        const dateB = infoB?.sortDate ?? null;
+        const effA = dateA ?? infoA?.lastEnd ?? null;
+        const effB = dateB ?? infoB?.lastEnd ?? null;
+        if (effA && effB)
+          return effA.localeCompare(effB);
+        if (effA)
+          return -1;
+        if (effB)
+          return 1;
+        return a4.projectName.localeCompare(b3.projectName);
+      });
+    } else {
+      groups.sort((a4, b3) => a4.projectName.localeCompare(b3.projectName));
+    }
     return groups;
   });
   const unassignedProjects = g2(() => {
@@ -1600,6 +1646,137 @@ function createGanttStore(platform) {
     }
     return computeTimelineRange(allDates, 7);
   });
+  const scrollTargetDate = g2(() => {
+    const sel = selectedEntity.value;
+    if (!sel)
+      return null;
+    if (sel.type === "task") {
+      const task = mergedTasks.value.find((t4) => t4.id === sel.id);
+      const s5 = task?.startDate.value;
+      const e4 = task?.endDate.value;
+      if (!s5)
+        return null;
+      if (!e4 || s5 === e4)
+        return s5;
+      return addDays(s5, Math.floor(daysBetween(s5, e4) / 2));
+    }
+    if (sel.type === "project") {
+      const project = mergedProjects.value.find((p5) => p5.id === sel.id);
+      for (const kdName of projectSortKeyDates.value) {
+        const kd = project?.keyDates?.find((k3) => k3.name === kdName);
+        if (kd?.date)
+          return kd.date;
+      }
+      const projectTasks = mergedTasks.value.filter((t4) => t4.projectId.value === sel.id);
+      let earliest = null;
+      let latest = null;
+      for (const t4 of projectTasks) {
+        const s5 = t4.startDate.value;
+        const e4 = t4.endDate.value ?? s5;
+        if (s5) {
+          if (!earliest || s5 < earliest)
+            earliest = s5;
+          if (!latest || e4 > latest)
+            latest = e4;
+        }
+      }
+      if (!earliest)
+        return null;
+      if (!latest || earliest === latest)
+        return earliest;
+      return addDays(earliest, Math.floor(daysBetween(earliest, latest) / 2));
+    }
+    return null;
+  });
+  const filteredProjectGroupKeys = g2(() => {
+    const timeStart = filterTimeStart.value;
+    const timeEnd = filterTimeEnd.value;
+    const statuses = filterStatuses.value;
+    const tags = filterTags.value;
+    if (!timeStart && !timeEnd && statuses.size === 0 && tags.size === 0) {
+      return null;
+    }
+    const matchingIds = /* @__PURE__ */ new Set();
+    for (const group of projectGroups.value) {
+      const projectId = group.projectId;
+      if (projectId === "__no_project__") {
+        matchingIds.add(projectId);
+        continue;
+      }
+      const project = mergedProjects.value.find((p5) => p5.id === projectId);
+      if (!project)
+        continue;
+      let match = true;
+      if (match && (timeStart || timeEnd)) {
+        let timeMatch = false;
+        if (project.keyDates) {
+          for (const kd of project.keyDates) {
+            if ((!timeStart || kd.date >= timeStart) && (!timeEnd || kd.date <= timeEnd)) {
+              timeMatch = true;
+              break;
+            }
+          }
+        }
+        if (!timeMatch) {
+          for (const task of group.tasks) {
+            const s5 = task.startDate.value;
+            const e4 = task.endDate.value ?? s5;
+            if (s5 && e4) {
+              const taskEndBeforeStart = timeStart && e4 < timeStart;
+              const taskStartAfterEnd = timeEnd && s5 > timeEnd;
+              if (!taskEndBeforeStart && !taskStartAfterEnd) {
+                timeMatch = true;
+                break;
+              }
+            }
+          }
+        }
+        match = timeMatch;
+      }
+      if (match && statuses.size > 0) {
+        const projStatus = project.status ?? "pending";
+        match = statuses.has(projStatus);
+      }
+      if (match && tags.size > 0) {
+        const projTags = project.tags ?? [];
+        match = projTags.some((t4) => tags.has(t4));
+      }
+      if (match)
+        matchingIds.add(projectId);
+    }
+    return matchingIds;
+  });
+  const filterDimmedTaskIds = g2(() => {
+    const matchingKeys = filteredProjectGroupKeys.value;
+    if (matchingKeys === null)
+      return /* @__PURE__ */ new Set();
+    const dimmed = /* @__PURE__ */ new Set();
+    for (const group of projectGroups.value) {
+      if (!matchingKeys.has(group.projectId)) {
+        for (const task of group.tasks) {
+          dimmed.add(task.id);
+        }
+      }
+    }
+    return dimmed;
+  });
+  const availableFilterTags = g2(() => {
+    const nameSet = /* @__PURE__ */ new Set();
+    for (const td of tagDefinitions.value)
+      nameSet.add(td.name);
+    for (const p5 of projects.value) {
+      for (const t4 of p5.tags ?? [])
+        nameSet.add(t4);
+    }
+    const projOverrides = edits.value?.projectOverrides ?? {};
+    for (const [, overrides] of Object.entries(projOverrides)) {
+      if (overrides.tags) {
+        for (const t4 of overrides.tags)
+          nameSet.add(t4);
+      }
+    }
+    return [...nameSet].sort().map((n3) => ({ value: n3, label: n3 }));
+  });
   const conflicts = g2(() => {
     const currentEdits = edits.value;
     if (!currentEdits)
@@ -1633,6 +1810,8 @@ function createGanttStore(platform) {
         caches.value = loadedCaches;
         edits.value = viewEdits;
       });
+      await loadTags();
+      await loadSettings();
     } catch (e4) {
       error.value = e4 instanceof Error ? e4.message : String(e4);
     } finally {
@@ -1821,17 +2000,18 @@ function createGanttStore(platform) {
   async function setProjectStatus(projectId, status) {
     await persistProjectEdit(projectId, "status", status);
   }
-  async function pushChanges() {
+  async function pushChanges(selectedIds) {
     const currentEdits = edits.value;
     const viewId = currentViewId.value;
     if (!currentEdits || !viewId)
       return [];
     const results = [];
+    const hasSelection = selectedIds !== void 0 && selectedIds.size > 0;
     const payload = {
       tasks: [],
       projects: [],
-      deletedTaskIds: currentEdits.deletedTasks ?? [],
-      deletedProjectIds: currentEdits.deletedProjects ?? []
+      deletedTaskIds: hasSelection ? (currentEdits.deletedTasks ?? []).filter((id) => selectedIds.has(id)) : currentEdits.deletedTasks ?? [],
+      deletedProjectIds: hasSelection ? (currentEdits.deletedProjects ?? []).filter((id) => selectedIds.has(id)) : currentEdits.deletedProjects ?? []
     };
     const pushedTaskIds = /* @__PURE__ */ new Set();
     const pushedProjectIds = /* @__PURE__ */ new Set();
@@ -1839,6 +2019,8 @@ function createGanttStore(platform) {
     const overrideIds = new Set(Object.keys(currentEdits.overrides));
     for (const task of allMerged) {
       if (task.connectorId !== null && overrideIds.has(task.id)) {
+        if (hasSelection && !selectedIds.has(task.id))
+          continue;
         payload.tasks.push({
           id: task.id,
           title: task.title.value,
@@ -1856,11 +2038,15 @@ function createGanttStore(platform) {
       }
     }
     for (const lt of currentEdits.localTasks) {
+      if (hasSelection && !selectedIds.has(lt.id))
+        continue;
       payload.tasks.push(lt);
       pushedTaskIds.add(lt.id);
     }
     if (currentEdits.projectOverrides) {
       for (const [projectId, overrides] of Object.entries(currentEdits.projectOverrides)) {
+        if (hasSelection && !selectedIds.has(projectId))
+          continue;
         const project = caches.value.flatMap((c4) => c4.projects).find((p5) => p5.id === projectId);
         if (project) {
           payload.projects.push({ ...project, ...overrides });
@@ -1868,10 +2054,16 @@ function createGanttStore(platform) {
         pushedProjectIds.add(projectId);
       }
     }
-    for (const id of payload.deletedTaskIds)
+    for (const id of payload.deletedTaskIds) {
+      if (hasSelection && !selectedIds.has(id))
+        continue;
       pushedTaskIds.add(id);
-    for (const id of payload.deletedProjectIds)
+    }
+    for (const id of payload.deletedProjectIds) {
+      if (hasSelection && !selectedIds.has(id))
+        continue;
       pushedProjectIds.add(id);
+    }
     for (const cache of caches.value) {
       try {
         const configPath = `connectors/${safeName(cache.connectorId)}.json`;
@@ -1923,6 +2115,181 @@ function createGanttStore(platform) {
       }
     }
     return results;
+  }
+  async function dismissChanges(selectedIds) {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId || selectedIds.size === 0)
+      return;
+    const newOverrides = { ...currentEdits.overrides };
+    const newProjectOverrides = { ...currentEdits.projectOverrides ?? {} };
+    let localTasks = [...currentEdits.localTasks];
+    let deletedTasks = [...currentEdits.deletedTasks ?? []];
+    let deletedProjects = [...currentEdits.deletedProjects ?? []];
+    for (const id of selectedIds) {
+      delete newOverrides[id];
+      localTasks = localTasks.filter((lt) => lt.id !== id);
+      deletedTasks = deletedTasks.filter((did) => did !== id);
+      delete newProjectOverrides[id];
+      deletedProjects = deletedProjects.filter((did) => did !== id);
+    }
+    const cleared = {
+      ...currentEdits,
+      overrides: newOverrides,
+      localTasks,
+      projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : void 0,
+      deletedTasks: deletedTasks.length > 0 ? deletedTasks : void 0,
+      deletedProjects: deletedProjects.length > 0 ? deletedProjects : void 0
+    };
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(cleared, null, 2));
+    edits.value = cleared;
+  }
+  async function loadTags() {
+    const viewId = currentViewId.value;
+    if (!viewId)
+      return;
+    const raw = await platform.storage.read(`tags/${safeName(viewId)}.json`);
+    if (raw) {
+      try {
+        const data = JSON.parse(raw);
+        tagDefinitions.value = data.tags ?? [];
+      } catch {
+      }
+    }
+  }
+  async function createTag(name, color) {
+    const viewId = currentViewId.value;
+    if (!viewId)
+      return;
+    if (tagDefinitions.value.some((t4) => t4.name === name))
+      return;
+    const updated = [...tagDefinitions.value, { name, color }];
+    await platform.storage.write(`tags/${safeName(viewId)}.json`, JSON.stringify({ tags: updated }, null, 2));
+    tagDefinitions.value = updated;
+  }
+  async function updateTag(oldName, newName, color) {
+    const viewId = currentViewId.value;
+    if (!viewId)
+      return;
+    const updated = tagDefinitions.value.map(
+      (t4) => t4.name === oldName ? { name: newName, color: color ?? t4.color } : t4
+    );
+    await platform.storage.write(`tags/${safeName(viewId)}.json`, JSON.stringify({ tags: updated }, null, 2));
+    tagDefinitions.value = updated;
+    if (oldName !== newName) {
+      const currentEdits = edits.value;
+      if (currentEdits) {
+        let changed = false;
+        const newProjectOverrides = { ...currentEdits.projectOverrides ?? {} };
+        for (const [projectId, overrides] of Object.entries(newProjectOverrides)) {
+          if (overrides.tags?.includes(oldName)) {
+            newProjectOverrides[projectId] = {
+              ...overrides,
+              tags: overrides.tags.map((t4) => t4 === oldName ? newName : t4)
+            };
+            changed = true;
+          }
+        }
+        for (const p5 of projects.value) {
+          if (p5.tags?.includes(oldName) && !newProjectOverrides[p5.id]) {
+            newProjectOverrides[p5.id] = {
+              ...newProjectOverrides[p5.id] ?? {},
+              tags: (p5.tags ?? []).map((t4) => t4 === oldName ? newName : t4)
+            };
+            changed = true;
+          }
+        }
+        if (changed) {
+          const updatedEdits = {
+            ...currentEdits,
+            projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : void 0
+          };
+          await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updatedEdits, null, 2));
+          edits.value = updatedEdits;
+        }
+      }
+    }
+  }
+  async function deleteTag(name) {
+    const viewId = currentViewId.value;
+    if (!viewId)
+      return;
+    const updated = tagDefinitions.value.filter((t4) => t4.name !== name);
+    await platform.storage.write(`tags/${safeName(viewId)}.json`, JSON.stringify({ tags: updated }, null, 2));
+    tagDefinitions.value = updated;
+    const currentEdits = edits.value;
+    if (currentEdits) {
+      let changed = false;
+      const newProjectOverrides = { ...currentEdits.projectOverrides ?? {} };
+      for (const [projectId, overrides] of Object.entries(newProjectOverrides)) {
+        if (overrides.tags?.includes(name)) {
+          const newTags = overrides.tags.filter((t4) => t4 !== name);
+          newProjectOverrides[projectId] = {
+            ...overrides,
+            tags: newTags.length > 0 ? newTags : []
+          };
+          changed = true;
+        }
+      }
+      for (const p5 of projects.value) {
+        if (p5.tags?.includes(name) && !newProjectOverrides[p5.id]) {
+          newProjectOverrides[p5.id] = {
+            ...newProjectOverrides[p5.id] ?? {},
+            tags: (p5.tags ?? []).filter((t4) => t4 !== name)
+          };
+          changed = true;
+        }
+      }
+      if (changed) {
+        const updatedEdits = {
+          ...currentEdits,
+          projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : void 0
+        };
+        await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updatedEdits, null, 2));
+        edits.value = updatedEdits;
+      }
+    }
+  }
+  async function loadSettings() {
+    const viewId = currentViewId.value;
+    if (!viewId)
+      return;
+    const raw = await platform.storage.read(`settings/${safeName(viewId)}.json`);
+    if (!raw)
+      return;
+    try {
+      const data = JSON.parse(raw);
+      if (data.filterTimeStart !== void 0)
+        filterTimeStart.value = data.filterTimeStart ?? "";
+      if (data.filterTimeEnd !== void 0)
+        filterTimeEnd.value = data.filterTimeEnd ?? "";
+      if (data.filterStatuses)
+        filterStatuses.value = new Set(data.filterStatuses);
+      if (data.filterTags)
+        filterTags.value = new Set(data.filterTags);
+      if (data.personSortMode)
+        personSortMode.value = data.personSortMode;
+      if (data.projectSortMode)
+        projectSortMode.value = data.projectSortMode;
+      if (data.projectSortKeyDates)
+        projectSortKeyDates.value = data.projectSortKeyDates;
+    } catch {
+    }
+  }
+  async function saveSettings() {
+    const viewId = currentViewId.value;
+    if (!viewId)
+      return;
+    const data = {
+      filterTimeStart: filterTimeStart.value,
+      filterTimeEnd: filterTimeEnd.value,
+      filterStatuses: [...filterStatuses.value],
+      filterTags: [...filterTags.value],
+      personSortMode: personSortMode.value,
+      projectSortMode: projectSortMode.value,
+      projectSortKeyDates: projectSortKeyDates.value
+    };
+    await platform.storage.write(`settings/${safeName(viewId)}.json`, JSON.stringify(data, null, 2));
   }
   const pendingChanges = g2(() => {
     const currentEdits = edits.value;
@@ -2134,13 +2501,24 @@ function createGanttStore(platform) {
     unassignedProjects,
     selectedEntity,
     highlightedTaskIds,
+    scrollTargetDate,
     sharedScrollLeft,
     personScrollTop,
     projectScrollTop,
     personSortMode,
+    projectSortMode,
+    projectSortKeyDates,
+    filterTimeStart,
+    filterTimeEnd,
+    filterStatuses,
+    filterTags,
+    filteredProjectGroupKeys,
+    filterDimmedTaskIds,
+    availableFilterTags,
     timelineRange,
     conflicts,
     pendingChanges,
+    tagDefinitions,
     isLoading,
     error,
     loadView,
@@ -2154,7 +2532,14 @@ function createGanttStore(platform) {
     deleteProject,
     setTaskStatus,
     setProjectStatus,
-    pushChanges
+    pushChanges,
+    dismissChanges,
+    loadTags,
+    createTag,
+    updateTag,
+    deleteTag,
+    saveSettings,
+    loadSettings
   };
 }
 function TimelineGrid(props) {
@@ -2837,7 +3222,23 @@ function TaskList(props) {
                         children: label.position
                       }
                     ),
-                    /* @__PURE__ */ u4("span", { style: { overflow: "hidden", textOverflow: "ellipsis" }, title: label.tooltip, children: label.name })
+                    /* @__PURE__ */ u4("span", { style: { overflow: "hidden", textOverflow: "ellipsis" }, title: label.tooltip, children: label.name }),
+                    label.tags && label.tags.length > 0 && /* @__PURE__ */ u4("span", { style: { display: "flex", gap: "3px", marginLeft: "auto", flexShrink: 0 }, children: label.tags.map((tag) => /* @__PURE__ */ u4(
+                      "span",
+                      {
+                        style: {
+                          padding: "0 4px",
+                          borderRadius: "3px",
+                          fontSize: "9px",
+                          lineHeight: "16px",
+                          background: label.tagColors?.get(tag) ?? "var(--background-modifier-border, #e0e0e0)",
+                          color: "#fff",
+                          whiteSpace: "nowrap"
+                        },
+                        children: tag
+                      },
+                      tag
+                    )) })
                   ]
                 },
                 label.key
@@ -2941,6 +3342,22 @@ function Timeline(props) {
       containerRef.current.scrollLeft = scrollLeft;
     }
   }, [scrollLeft]);
+  const lastHandledDate = A2(null);
+  y2(() => {
+    const targetDate = store.scrollTargetDate.value;
+    if (!targetDate || targetDate === lastHandledDate.current)
+      return;
+    lastHandledDate.current = targetDate;
+    const el = containerRef.current;
+    if (!el)
+      return;
+    const targetPx = originToBody(dateToPx2(targetDate));
+    const targetScroll = targetPx - el.clientWidth / 2;
+    requestAnimationFrame(() => {
+      el.scrollLeft = Math.max(0, targetScroll);
+      props.onScroll(el.scrollLeft, el.scrollTop);
+    });
+  }, [store.scrollTargetDate.value]);
   const taskBars = [];
   const groupLayout = [];
   const projectColorMap = /* @__PURE__ */ new Map();
@@ -3112,7 +3529,7 @@ function Timeline(props) {
                     width,
                     color,
                     isHighlighted: highlightedIds.has(task.id),
-                    isDimmed: hasSelection && !highlightedIds.has(task.id),
+                    isDimmed: hasSelection && !highlightedIds.has(task.id) || paneType === "person" && props.filterDimmedTaskIds.has(task.id),
                     progress: task.progress.value
                   },
                   rowHeight: ROW_HEIGHT2,
@@ -3215,7 +3632,11 @@ function Timeline(props) {
 }
 function GanttPane(props) {
   const { store, type } = props;
-  const groups = type === "person" ? store.personGroups.value : store.projectGroups.value;
+  const rawGroups = type === "person" ? store.personGroups.value : store.projectGroups.value;
+  const filterMatches = store.filteredProjectGroupKeys.value;
+  const filterActive = filterMatches !== null;
+  const filterDimmedIds = store.filterDimmedTaskIds.value;
+  const groups = filterActive && type === "project" ? rawGroups.filter((g3) => filterMatches.has(g3.projectId)) : rawGroups;
   const paneType = type;
   const labels = T2(
     () => groups.map((g3) => {
@@ -3235,7 +3656,9 @@ function GanttPane(props) {
         key,
         name: g3.projectName,
         color: g3.color,
-        tooltip: void 0
+        tooltip: void 0,
+        tags: store.mergedProjects.value.find((p5) => p5.id === key)?.tags,
+        tagColors: new Map(store.tagDefinitions.value.map((t4) => [t4.name, t4.color]))
       };
     }),
     [groups]
@@ -3317,6 +3740,7 @@ function GanttPane(props) {
             class: "gantt-sort-toggle",
             onClick: () => {
               store.personSortMode.value = store.personSortMode.value === "name" ? "position" : "name";
+              store.saveSettings();
             },
             title: `Sort: ${store.personSortMode.value === "name" ? "by name" : "by position"}`,
             style: {
@@ -3333,7 +3757,56 @@ function GanttPane(props) {
               store.personSortMode.value === "name" ? "Name" : "Position"
             ]
           }
-        ) : void 0
+        ) : /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ u4(
+            "button",
+            {
+              class: "gantt-sort-toggle",
+              onClick: () => {
+                store.projectSortMode.value = store.projectSortMode.value === "name" ? "time" : "name";
+                store.saveSettings();
+              },
+              title: `Sort: ${store.projectSortMode.value === "name" ? "by name" : "by time"}`,
+              style: {
+                padding: "2px 8px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "4px",
+                background: "var(--background-secondary, #f5f5f5)",
+                cursor: "pointer",
+                fontSize: "11px",
+                whiteSpace: "nowrap"
+              },
+              children: [
+                "Sort: ",
+                store.projectSortMode.value === "name" ? "Name" : "Time"
+              ]
+            }
+          ),
+          store.projectSortMode.value === "time" && /* @__PURE__ */ u4(
+            "input",
+            {
+              type: "text",
+              value: store.projectSortKeyDates.value.join(", "),
+              onInput: (e4) => {
+                const raw = e4.target.value;
+                const names = raw.split(/[,，]/).map((s5) => s5.trim()).filter(Boolean);
+                store.projectSortKeyDates.value = names.length > 0 ? names : ["\u4E0A\u7EBF\u65F6\u95F4"];
+                store.saveSettings();
+              },
+              title: "Key date names for sort priority (comma-separated)",
+              placeholder: "\u4E0A\u7EBF\u65F6\u95F4",
+              style: {
+                padding: "2px 4px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "3px",
+                background: "var(--background-primary, #fff)",
+                color: "var(--text-normal, #333)",
+                fontSize: "10px",
+                width: "80px"
+              }
+            }
+          )
+        ] })
       }
     ),
     /* @__PURE__ */ u4(
@@ -3347,6 +3820,7 @@ function GanttPane(props) {
         onScroll: props.onScroll,
         highlightedRowKeys,
         dimmedRowKeys,
+        filterDimmedTaskIds: type === "person" ? store.filterDimmedTaskIds.value : /* @__PURE__ */ new Set(),
         onRowClick: handleRowClick,
         onTaskClick: handleTaskClick,
         onTaskPointerDown: props.onTaskPointerDown,
@@ -3357,6 +3831,7 @@ function GanttPane(props) {
     )
   ] });
 }
+var PRESET_COLORS = ["#E06C75", "#61AFEF", "#98C379", "#E5C07B", "#C678DD", "#56B6C2", "#D19A66", "#4A90D9"];
 var KEY_DATE_PRESETS = [
   { name: "\u9A8C\u6536\u65F6\u95F4", color: "#98C379", icon: "\u2713" },
   { name: "\u4E0A\u7EBF\u65F6\u95F4", color: "#61AFEF", icon: "\u25B2" },
@@ -3424,13 +3899,14 @@ function UnassignedPanel(props) {
             onDragStart: (e4) => {
               e4.dataTransfer?.setData("text/plain", JSON.stringify({ projectId: p5.id, projectName: p5.name }));
             },
+            onClick: () => props.store.selectEntity({ type: "project", id: p5.id }),
             style: {
               padding: "8px 10px",
               marginBottom: "6px",
               border: "1px solid var(--gantt-grid-line-day, #e0e0e0)",
               borderRadius: "6px",
               background: "var(--background-secondary, #f5f5f5)",
-              cursor: "grab",
+              cursor: "pointer",
               fontSize: "12px",
               display: "flex",
               alignItems: "center",
@@ -3506,11 +3982,46 @@ function ProjectDetail(props) {
   const editKeyLinks = useSignal(
     keyLinks.map((kl) => ({ ...kl }))
   );
+  const projectTags = projectOverrides?.tags ?? project.tags ?? [];
+  const editTags = useSignal([...projectTags]);
+  const editTagInput = useSignal("");
+  const editTagInputRef = A2(null);
+  const knownTags = T2(() => {
+    const set = /* @__PURE__ */ new Set();
+    for (const p5 of store.mergedProjects.value) {
+      for (const t4 of p5.tags ?? [])
+        set.add(t4);
+    }
+    const defs = store.tagDefinitions?.value;
+    if (defs) {
+      for (const d4 of defs)
+        set.add(d4.name);
+    }
+    return [...set].sort();
+  }, [store.mergedProjects.value]);
+  function addTag() {
+    const tag = editTagInput.value.trim();
+    if (!tag || editTags.value.includes(tag))
+      return;
+    editTags.value = [...editTags.value, tag];
+    editTagInput.value = "";
+    editTagInputRef.current?.focus();
+  }
+  function removeTag(tag) {
+    editTags.value = editTags.value.filter((t4) => t4 !== tag);
+  }
+  function handleTagInputKeyDown(e4) {
+    if (e4.key === "Enter") {
+      e4.preventDefault();
+      addTag();
+    }
+  }
   function handleEdit() {
     editDescription.value = description;
     editRequester.value = requester;
     editKeyDates.value = keyDates.map((kd) => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon }));
     editKeyLinks.value = keyLinks.map((kl) => ({ ...kl }));
+    editTags.value = [...projectTags];
     editing.value = true;
   }
   async function handleSave() {
@@ -3518,6 +4029,15 @@ function ProjectDetail(props) {
     await store.persistProjectEdit(project.id, "requester", editRequester.value || void 0);
     await store.persistProjectEdit(project.id, "keyDates", editKeyDates.value.length > 0 ? editKeyDates.value.map((kd) => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon })) : void 0);
     await store.persistProjectEdit(project.id, "keyLinks", editKeyLinks.value.length > 0 ? editKeyLinks.value : void 0);
+    await store.persistProjectEdit(project.id, "tags", editTags.value.length > 0 ? editTags.value : void 0);
+    const existingNames = new Set(store.tagDefinitions.value.map((t4) => t4.name));
+    const presetColors = ["#E06C75", "#61AFEF", "#98C379", "#E5C07B", "#C678DD", "#56B6C2", "#D19A66", "#4A90D9"];
+    for (const tag of editTags.value) {
+      if (!existingNames.has(tag)) {
+        await store.createTag(tag, presetColors[Math.floor(Math.random() * presetColors.length)]);
+        existingNames.add(tag);
+      }
+    }
     editing.value = false;
   }
   function handleCancel() {
@@ -3696,6 +4216,96 @@ function ProjectDetail(props) {
               children: STATUS_OPTIONS.map((opt) => /* @__PURE__ */ u4("option", { value: opt.value, children: opt.label }, opt.value))
             }
           )
+        ] }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: "Tags" }),
+          editing.value ? /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "6px" }, children: [
+            /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px" }, children: [
+              /* @__PURE__ */ u4(
+                "input",
+                {
+                  ref: editTagInputRef,
+                  type: "text",
+                  value: editTagInput.value,
+                  onInput: (e4) => {
+                    editTagInput.value = e4.target.value;
+                  },
+                  onKeyDown: handleTagInputKeyDown,
+                  placeholder: "Add tag...",
+                  list: "project-tag-suggestions",
+                  style: {
+                    flex: 1,
+                    fontSize: "11px",
+                    padding: "3px 6px",
+                    borderRadius: "3px",
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    background: "var(--background-primary, #fff)",
+                    color: "var(--text-normal, #333)"
+                  }
+                }
+              ),
+              /* @__PURE__ */ u4("datalist", { id: "project-tag-suggestions", children: knownTags.filter((t4) => !editTags.value.includes(t4)).map((t4) => /* @__PURE__ */ u4("option", { value: t4 }, t4)) }),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: addTag,
+                  style: {
+                    padding: "3px 10px",
+                    border: "1px solid var(--interactive-accent, #4A90D9)",
+                    borderRadius: "3px",
+                    background: "var(--interactive-accent, #4A90D9)",
+                    color: "#fff",
+                    cursor: "pointer",
+                    fontSize: "11px",
+                    whiteSpace: "nowrap"
+                  },
+                  children: "+"
+                }
+              )
+            ] }),
+            editTags.value.length > 0 ? /* @__PURE__ */ u4("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" }, children: editTags.value.map((tag) => /* @__PURE__ */ u4(
+              "span",
+              {
+                style: {
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "3px",
+                  padding: "1px 6px",
+                  borderRadius: "10px",
+                  fontSize: "11px",
+                  background: "var(--interactive-accent, #4A90D9)",
+                  color: "#fff"
+                },
+                children: [
+                  tag,
+                  /* @__PURE__ */ u4(
+                    "span",
+                    {
+                      onClick: () => removeTag(tag),
+                      style: { cursor: "pointer", fontSize: "13px", lineHeight: 1, opacity: 0.7 },
+                      title: `Remove tag "${tag}"`,
+                      children: "x"
+                    }
+                  )
+                ]
+              },
+              tag
+            )) }) : /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)" }, children: "No tags" })
+          ] }) : /* @__PURE__ */ u4("div", { children: projectTags.length > 0 ? /* @__PURE__ */ u4("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" }, children: projectTags.map((tag) => /* @__PURE__ */ u4(
+            "span",
+            {
+              style: {
+                display: "inline-block",
+                padding: "1px 6px",
+                borderRadius: "10px",
+                fontSize: "11px",
+                background: "var(--background-modifier-border, #e0e0e0)",
+                color: "var(--text-normal, #333)"
+              },
+              children: tag
+            },
+            tag
+          )) }) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" }) })
         ] }),
         /* @__PURE__ */ u4(
           "div",
@@ -4131,6 +4741,7 @@ function DetailPanel(props) {
     return null;
   const personName = task.personId.value ? store.persons.value.find((p5) => p5.id === task.personId.value)?.name ?? task.personId.value : null;
   const project = task.projectId.value ? store.projects.value.find((p5) => p5.id === task.projectId.value) : null;
+  const projectOverrides = project ? store.edits.value?.projectOverrides?.[project.id] ?? null : null;
   const editTitle = useSignal(false);
   const editTitleValue = useSignal(task.title.value);
   let titleInputRef = null;
@@ -4292,27 +4903,6 @@ function DetailPanel(props) {
           ] }),
           /* @__PURE__ */ u4(FieldRow, { label: "Person", value: personName ?? "-" }),
           /* @__PURE__ */ u4("div", { children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Project" }),
-            /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
-              project?.color && /* @__PURE__ */ u4("span", { style: {
-                width: "10px",
-                height: "10px",
-                borderRadius: "2px",
-                background: project.color,
-                flexShrink: 0
-              } }),
-              /* @__PURE__ */ u4(
-                "span",
-                {
-                  style: { cursor: "pointer", color: "var(--interactive-accent, #4A90D9)" },
-                  onClick: () => project && store.selectEntity({ type: "project", id: project.id }),
-                  title: "Click to view project details",
-                  children: project?.name ?? task.projectId.value ?? "-"
-                }
-              )
-            ] })
-          ] }),
-          /* @__PURE__ */ u4("div", { children: [
             /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Link" }),
             task.url.value ? /* @__PURE__ */ u4(
               "a",
@@ -4347,6 +4937,32 @@ function DetailPanel(props) {
               background: "var(--background-modifier-border, #e0e0e0)",
               fontSize: "11px"
             }, children: tag }, tag)) })
+          ] }),
+          /* @__PURE__ */ u4("div", { style: { borderTop: "1px solid var(--background-modifier-border, #e0e0e0)", paddingTop: "10px", marginTop: "2px" }, children: [
+            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "4px" }, children: "Project" }),
+            project ? /* @__PURE__ */ u4(
+              "div",
+              {
+                style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" },
+                onClick: () => store.selectEntity({ type: "project", id: project.id }),
+                title: "Click to view project details",
+                children: [
+                  project.color && /* @__PURE__ */ u4("span", { style: {
+                    width: "12px",
+                    height: "12px",
+                    borderRadius: "3px",
+                    background: project.color,
+                    flexShrink: 0
+                  } }),
+                  /* @__PURE__ */ u4("span", { style: { color: "var(--interactive-accent, #4A90D9)", fontSize: "13px", fontWeight: 500 }, children: project.name }),
+                  /* @__PURE__ */ u4(StatusBadge, { status: projectOverrides?.status ?? project.status ?? "pending" }),
+                  /* @__PURE__ */ u4("span", { style: { fontSize: "10px", color: "var(--text-muted, #999)", marginLeft: "auto" }, children: "View \u2192" })
+                ]
+              }
+            ) : task.projectId.value ? /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)" }, children: [
+              task.projectId.value,
+              " (deleted)"
+            ] }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)" }, children: "No project" })
           ] }),
           /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginTop: "4px" }, children: [
             /* @__PURE__ */ u4("div", { style: { textDecoration: sourceStyle }, children: sourceLabel }),
@@ -4447,30 +5063,393 @@ function ConfirmDialog(props) {
     }
   );
 }
+function TagManagementPanel(props) {
+  const { store } = props;
+  const newName = useSignal("");
+  const newColor = useSignal(PRESET_COLORS[0]);
+  const editingTag = useSignal(null);
+  const editName = useSignal("");
+  const editColor = useSignal("");
+  const deleteConfirmName = useSignal(null);
+  const creating = useSignal(false);
+  const errorMsg = useSignal("");
+  const usageCounts = T2(() => {
+    const counts = /* @__PURE__ */ new Map();
+    for (const p5 of store.mergedProjects.value) {
+      for (const t4 of p5.tags ?? []) {
+        counts.set(t4, (counts.get(t4) ?? 0) + 1);
+      }
+    }
+    const overrides = store.edits.value?.projectOverrides ?? {};
+    for (const [, o4] of Object.entries(overrides)) {
+      if (o4.tags) {
+        for (const t4 of o4.tags) {
+          if (!counts.has(t4))
+            counts.set(t4, 0);
+        }
+      }
+    }
+    return counts;
+  }, [store.mergedProjects.value, store.edits.value]);
+  async function handleCreate() {
+    const name = newName.value.trim();
+    if (!name)
+      return;
+    if (store.tagDefinitions.value.some((t4) => t4.name === name)) {
+      errorMsg.value = `Tag "${name}" already exists`;
+      return;
+    }
+    errorMsg.value = "";
+    creating.value = true;
+    try {
+      await store.createTag(name, newColor.value);
+      newName.value = "";
+      newColor.value = PRESET_COLORS[0];
+    } catch (e4) {
+      errorMsg.value = `Failed: ${e4 instanceof Error ? e4.message : String(e4)}`;
+    } finally {
+      creating.value = false;
+    }
+  }
+  function handleCreateKeyDown(e4) {
+    if (e4.key === "Enter") {
+      e4.preventDefault();
+      handleCreate();
+    }
+  }
+  function startEdit(tag) {
+    editingTag.value = tag.name;
+    editName.value = tag.name;
+    editColor.value = tag.color;
+  }
+  async function saveEdit() {
+    const oldName = editingTag.value;
+    const newNameVal = editName.value.trim();
+    if (!oldName || !newNameVal)
+      return;
+    if (newNameVal !== oldName && store.tagDefinitions.value.some((t4) => t4.name === newNameVal)) {
+      errorMsg.value = `Tag "${newNameVal}" already exists`;
+      return;
+    }
+    errorMsg.value = "";
+    try {
+      await store.updateTag(oldName, newNameVal, editColor.value);
+      editingTag.value = null;
+    } catch (e4) {
+      errorMsg.value = `Failed: ${e4 instanceof Error ? e4.message : String(e4)}`;
+    }
+  }
+  function cancelEdit() {
+    editingTag.value = null;
+  }
+  function handleEditKeyDown(e4) {
+    if (e4.key === "Enter") {
+      e4.preventDefault();
+      saveEdit();
+    }
+    if (e4.key === "Escape")
+      cancelEdit();
+  }
+  function confirmDelete(name) {
+    deleteConfirmName.value = name;
+  }
+  async function handleDelete() {
+    if (!deleteConfirmName.value)
+      return;
+    const name = deleteConfirmName.value;
+    deleteConfirmName.value = null;
+    errorMsg.value = "";
+    try {
+      await store.deleteTag(name);
+    } catch (e4) {
+      errorMsg.value = `Failed: ${e4 instanceof Error ? e4.message : String(e4)}`;
+    }
+  }
+  const tagList = store.tagDefinitions.value;
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      class: "gantt-confirm-backdrop",
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1e3
+      },
+      onClick: (e4) => {
+        if (e4.target === e4.currentTarget)
+          props.onClose();
+      },
+      children: /* @__PURE__ */ u4(
+        "div",
+        {
+          style: {
+            background: "var(--background-primary, #fff)",
+            borderRadius: "8px",
+            padding: "0",
+            maxWidth: "500px",
+            width: "90%",
+            maxHeight: "75vh",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+            color: "var(--text-normal, #333)"
+          },
+          children: [
+            /* @__PURE__ */ u4("div", { style: {
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "20px 24px 16px",
+              borderBottom: "1px solid var(--background-modifier-border, #eee)"
+            }, children: [
+              /* @__PURE__ */ u4("h3", { style: { margin: 0, fontSize: "16px" }, children: "Tag Management" }),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: props.onClose,
+                  style: {
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "18px",
+                    lineHeight: 1,
+                    padding: "0 2px",
+                    color: "var(--text-muted, #999)"
+                  },
+                  children: "x"
+                }
+              )
+            ] }),
+            /* @__PURE__ */ u4("div", { style: { overflowY: "auto", padding: "16px 24px", flex: 1 }, children: [
+              /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "6px", alignItems: "center", marginBottom: "16px" }, children: [
+                /* @__PURE__ */ u4(
+                  "input",
+                  {
+                    type: "color",
+                    value: newColor.value,
+                    onInput: (e4) => {
+                      newColor.value = e4.target.value;
+                    },
+                    title: "Tag color",
+                    style: { width: "28px", height: "28px", padding: "0", border: "none", borderRadius: "4px", cursor: "pointer", flexShrink: 0 }
+                  }
+                ),
+                /* @__PURE__ */ u4(
+                  "input",
+                  {
+                    type: "text",
+                    value: newName.value,
+                    onInput: (e4) => {
+                      newName.value = e4.target.value;
+                    },
+                    onKeyDown: handleCreateKeyDown,
+                    placeholder: "New tag name...",
+                    style: {
+                      flex: 1,
+                      fontSize: "12px",
+                      padding: "4px 8px",
+                      borderRadius: "4px",
+                      border: "1px solid var(--background-modifier-border, #ccc)",
+                      background: "var(--background-primary, #fff)",
+                      color: "var(--text-normal, #333)"
+                    }
+                  }
+                ),
+                /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: handleCreate,
+                    disabled: creating.value || !newName.value.trim() || store.tagDefinitions.value.some((t4) => t4.name === newName.value.trim()),
+                    style: {
+                      padding: "4px 12px",
+                      border: "none",
+                      borderRadius: "4px",
+                      background: creating.value ? "var(--background-modifier-border, #ccc)" : "var(--interactive-accent, #4A90D9)",
+                      color: "#fff",
+                      cursor: creating.value || !newName.value.trim() ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                      whiteSpace: "nowrap",
+                      opacity: newName.value.trim() ? 1 : 0.5
+                    },
+                    children: creating.value ? "..." : "Create"
+                  }
+                )
+              ] }),
+              errorMsg.value && /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-error, #e00)", marginBottom: "8px" }, children: errorMsg.value }),
+              tagList.length === 0 ? /* @__PURE__ */ u4("div", { style: { color: "var(--text-muted, #999)", fontSize: "13px", textAlign: "center", padding: "20px 0" }, children: "No tags defined yet. Create one above." }) : /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "6px" }, children: tagList.map((tag) => /* @__PURE__ */ u4(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "8px 10px",
+                    border: "1px solid var(--background-modifier-border, #e0e0e0)",
+                    borderRadius: "6px",
+                    background: "var(--background-secondary, #f5f5f5)"
+                  },
+                  children: editingTag.value === tag.name ? /* @__PURE__ */ u4(S, { children: [
+                    /* @__PURE__ */ u4(
+                      "input",
+                      {
+                        type: "color",
+                        value: editColor.value,
+                        onInput: (e4) => {
+                          editColor.value = e4.target.value;
+                        },
+                        style: { width: "24px", height: "24px", padding: "0", border: "none", borderRadius: "4px", cursor: "pointer", flexShrink: 0 }
+                      }
+                    ),
+                    /* @__PURE__ */ u4(
+                      "input",
+                      {
+                        type: "text",
+                        value: editName.value,
+                        onInput: (e4) => {
+                          editName.value = e4.target.value;
+                        },
+                        onKeyDown: handleEditKeyDown,
+                        style: {
+                          flex: 1,
+                          fontSize: "12px",
+                          padding: "3px 6px",
+                          borderRadius: "3px",
+                          border: "1px solid var(--interactive-accent, #4A90D9)",
+                          background: "var(--background-primary, #fff)",
+                          color: "var(--text-normal, #333)"
+                        }
+                      }
+                    ),
+                    /* @__PURE__ */ u4("button", { onClick: saveEdit, style: { padding: "2px 6px", border: "none", borderRadius: "3px", background: "var(--interactive-accent, #4A90D9)", color: "#fff", cursor: "pointer", fontSize: "11px" }, children: "Save" }),
+                    /* @__PURE__ */ u4("button", { onClick: cancelEdit, style: { padding: "2px 6px", border: "1px solid var(--background-modifier-border, #ccc)", borderRadius: "3px", background: "transparent", cursor: "pointer", fontSize: "11px" }, children: "Cancel" })
+                  ] }) : /* @__PURE__ */ u4(S, { children: [
+                    /* @__PURE__ */ u4("span", { style: {
+                      width: "14px",
+                      height: "14px",
+                      borderRadius: "3px",
+                      background: tag.color,
+                      flexShrink: 0
+                    } }),
+                    /* @__PURE__ */ u4("span", { style: { flex: 1, fontSize: "13px", fontWeight: 500 }, children: tag.name }),
+                    /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--text-muted, #999)" }, children: [
+                      usageCounts.get(tag.name) ?? 0,
+                      " projects"
+                    ] }),
+                    /* @__PURE__ */ u4(
+                      "button",
+                      {
+                        onClick: () => startEdit(tag),
+                        title: "Edit tag",
+                        style: { background: "none", border: "none", cursor: "pointer", fontSize: "13px", color: "var(--text-muted, #999)", padding: "0 2px" },
+                        children: "\u270E"
+                      }
+                    ),
+                    deleteConfirmName.value === tag.name ? /* @__PURE__ */ u4(S, { children: [
+                      /* @__PURE__ */ u4(
+                        "button",
+                        {
+                          onClick: handleDelete,
+                          title: "Confirm delete",
+                          style: { background: "var(--text-error, #e00)", border: "none", borderRadius: "3px", cursor: "pointer", fontSize: "10px", color: "#fff", padding: "2px 6px", whiteSpace: "nowrap" },
+                          children: "Sure?"
+                        }
+                      ),
+                      /* @__PURE__ */ u4(
+                        "button",
+                        {
+                          onClick: () => {
+                            deleteConfirmName.value = null;
+                          },
+                          title: "Cancel delete",
+                          style: { background: "none", border: "1px solid var(--background-modifier-border, #ccc)", borderRadius: "3px", cursor: "pointer", fontSize: "10px", color: "var(--text-muted, #999)", padding: "2px 4px" },
+                          children: "x"
+                        }
+                      )
+                    ] }) : /* @__PURE__ */ u4(
+                      "button",
+                      {
+                        onClick: () => confirmDelete(tag.name),
+                        title: "Delete tag",
+                        style: { background: "none", border: "none", cursor: "pointer", fontSize: "13px", color: "var(--text-error, #e00)", padding: "0 2px" },
+                        children: "\u{1F5D1}"
+                      }
+                    )
+                  ] })
+                },
+                tag.name
+              )) })
+            ] })
+          ]
+        }
+      )
+    }
+  );
+}
 function PendingChangesPanel(props) {
   const { store } = props;
   const changes = store.pendingChanges.value;
   const pushing = useSignal(false);
   const pushResults = useSignal(null);
+  const dismissConfirm = useSignal(false);
+  const selectedIds = useSignal(new Set(changes.map((c4) => `${c4.entityType}:${c4.entityId}`)));
+  function selectedEntityIds() {
+    const ids = /* @__PURE__ */ new Set();
+    for (const key of selectedIds.value) {
+      const colonIdx = key.lastIndexOf(":");
+      if (colonIdx > 0)
+        ids.add(key.slice(colonIdx + 1));
+    }
+    return ids;
+  }
+  function toggleSelect(key) {
+    const next = new Set(selectedIds.value);
+    if (next.has(key))
+      next.delete(key);
+    else
+      next.add(key);
+    selectedIds.value = next;
+  }
+  function selectAll() {
+    selectedIds.value = new Set(changes.map((c4) => `${c4.entityType}:${c4.entityId}`));
+  }
+  function deselectAll() {
+    selectedIds.value = /* @__PURE__ */ new Set();
+  }
   async function handlePush() {
+    const ids = selectedEntityIds();
+    if (ids.size === 0)
+      return;
     pushing.value = true;
     pushResults.value = null;
     try {
-      const results = await store.pushChanges();
+      const results = await store.pushChanges(ids);
       pushResults.value = results;
     } finally {
       pushing.value = false;
     }
   }
+  async function handleDismiss() {
+    if (!dismissConfirm.value) {
+      dismissConfirm.value = true;
+      return;
+    }
+    const ids = selectedEntityIds();
+    if (ids.size === 0)
+      return;
+    await store.dismissChanges(ids);
+    dismissConfirm.value = false;
+    selectedIds.value = /* @__PURE__ */ new Set();
+  }
+  const selectedCount = selectedIds.value.size;
+  const totalCount = changes.length;
   const stats = {
     added: changes.filter((c4) => c4.changeType === "added").length,
     modified: changes.filter((c4) => c4.changeType === "modified").length,
     deleted: changes.filter((c4) => c4.changeType === "deleted").length
-  };
-  const changeTypeLabel = {
-    added: "New",
-    modified: "Updated",
-    deleted: "Deleted"
   };
   const changeTypeColor = {
     added: "#4caf50",
@@ -4561,76 +5540,91 @@ function PendingChangesPanel(props) {
                 }
               )
             ] }),
-            /* @__PURE__ */ u4("div", { style: { overflowY: "auto", padding: "16px 24px", flex: 1 }, children: changes.length === 0 ? /* @__PURE__ */ u4("div", { style: { color: "var(--text-muted, #999)", fontSize: "13px", padding: "20px 0", textAlign: "center" }, children: "No pending changes. All local modifications have been pushed." }) : /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: changes.map((change, i5) => /* @__PURE__ */ u4(
-              "div",
-              {
-                class: "gantt-change-card",
-                style: {
-                  border: "1px solid var(--background-modifier-border, #e0e0e0)",
-                  borderRadius: "6px",
-                  padding: "12px",
-                  fontSize: "12px"
+            /* @__PURE__ */ u4("div", { style: { overflowY: "auto", padding: "16px 24px", flex: 1 }, children: changes.length === 0 ? /* @__PURE__ */ u4("div", { style: { color: "var(--text-muted, #999)", fontSize: "13px", padding: "20px 0", textAlign: "center" }, children: "No pending changes. All local modifications have been pushed." }) : /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: changes.map((change, i5) => {
+              const key = `${change.entityType}:${change.entityId}`;
+              const isSelected = selectedIds.value.has(key);
+              return /* @__PURE__ */ u4(
+                "div",
+                {
+                  class: "gantt-change-card",
+                  style: {
+                    border: "1px solid var(--background-modifier-border, #e0e0e0)",
+                    borderRadius: "6px",
+                    padding: "12px",
+                    fontSize: "12px",
+                    opacity: isSelected ? 1 : 0.5,
+                    transition: "opacity 0.15s"
+                  },
+                  children: [
+                    /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }, children: [
+                      /* @__PURE__ */ u4(
+                        "input",
+                        {
+                          type: "checkbox",
+                          checked: isSelected,
+                          onChange: () => toggleSelect(key),
+                          style: { margin: 0, flexShrink: 0 }
+                        }
+                      ),
+                      /* @__PURE__ */ u4("span", { style: {
+                        display: "inline-block",
+                        padding: "1px 6px",
+                        borderRadius: "3px",
+                        fontSize: "9px",
+                        fontWeight: 700,
+                        color: "#fff",
+                        background: changeTypeColor[change.changeType],
+                        letterSpacing: "0.5px",
+                        flexShrink: 0
+                      }, children: changeTypeBadge[change.changeType] }),
+                      /* @__PURE__ */ u4("span", { style: {
+                        fontSize: "10px",
+                        color: "var(--text-muted, #999)",
+                        textTransform: "uppercase",
+                        flexShrink: 0
+                      }, children: change.entityType === "task" ? "Task" : "Project" }),
+                      /* @__PURE__ */ u4("span", { style: {
+                        fontWeight: 600,
+                        fontSize: "13px",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        flex: 1
+                      }, children: change.entityName })
+                    ] }),
+                    change.changeType === "modified" && change.fields && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "3px", marginLeft: "24px" }, children: change.fields.map((f5, j4) => /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "baseline", gap: "6px" }, children: [
+                      /* @__PURE__ */ u4("span", { style: {
+                        color: "var(--text-muted, #999)",
+                        fontSize: "11px",
+                        minWidth: "70px",
+                        flexShrink: 0
+                      }, children: [
+                        f5.label,
+                        ":"
+                      ] }),
+                      /* @__PURE__ */ u4("span", { style: {
+                        color: "var(--interactive-accent, #4A90D9)",
+                        fontWeight: 500
+                      }, children: f5.field === "keyDates" ? `${f5.newValue.length} dates` : f5.field === "keyLinks" ? `${f5.newValue.length} links` : f5.field === "tags" ? `[${f5.newValue.join(", ")}]` : f5.field === "dependencies" ? `[${f5.newValue.join(", ")}]` : String(f5.newValue) })
+                    ] }, j4)) }),
+                    change.changeType === "added" && change.addedSummary && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "3px", marginLeft: "24px" }, children: Object.entries(change.addedSummary).map(([key2, val]) => /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "baseline", gap: "6px" }, children: [
+                      /* @__PURE__ */ u4("span", { style: {
+                        color: "var(--text-muted, #999)",
+                        fontSize: "11px",
+                        minWidth: "50px",
+                        flexShrink: 0
+                      }, children: [
+                        key2,
+                        ":"
+                      ] }),
+                      /* @__PURE__ */ u4("span", { style: { color: "#4caf50", fontWeight: 500 }, children: String(val) })
+                    ] }, key2)) }),
+                    change.changeType === "deleted" && /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-error, #e53935)", marginLeft: "24px" }, children: change.relatedInfo ? `Will be deleted \xB7 ${change.relatedInfo}` : "Will be deleted" })
+                  ]
                 },
-                children: [
-                  /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }, children: [
-                    /* @__PURE__ */ u4("span", { style: {
-                      display: "inline-block",
-                      padding: "1px 6px",
-                      borderRadius: "3px",
-                      fontSize: "9px",
-                      fontWeight: 700,
-                      color: "#fff",
-                      background: changeTypeColor[change.changeType],
-                      letterSpacing: "0.5px",
-                      flexShrink: 0
-                    }, children: changeTypeBadge[change.changeType] }),
-                    /* @__PURE__ */ u4("span", { style: {
-                      fontSize: "10px",
-                      color: "var(--text-muted, #999)",
-                      textTransform: "uppercase",
-                      flexShrink: 0
-                    }, children: change.entityType === "task" ? "Task" : "Project" }),
-                    /* @__PURE__ */ u4("span", { style: {
-                      fontWeight: 600,
-                      fontSize: "13px",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      flex: 1
-                    }, children: change.entityName })
-                  ] }),
-                  change.changeType === "modified" && change.fields && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "3px" }, children: change.fields.map((f5, j4) => /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "baseline", gap: "6px" }, children: [
-                    /* @__PURE__ */ u4("span", { style: {
-                      color: "var(--text-muted, #999)",
-                      fontSize: "11px",
-                      minWidth: "70px",
-                      flexShrink: 0
-                    }, children: [
-                      f5.label,
-                      ":"
-                    ] }),
-                    /* @__PURE__ */ u4("span", { style: {
-                      color: "var(--interactive-accent, #4A90D9)",
-                      fontWeight: 500
-                    }, children: f5.field === "keyDates" ? `${f5.newValue.length} dates` : f5.field === "keyLinks" ? `${f5.newValue.length} links` : f5.field === "tags" ? `[${f5.newValue.join(", ")}]` : f5.field === "dependencies" ? `[${f5.newValue.join(", ")}]` : String(f5.newValue) })
-                  ] }, j4)) }),
-                  change.changeType === "added" && change.addedSummary && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "3px" }, children: Object.entries(change.addedSummary).map(([key, val]) => /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "baseline", gap: "6px" }, children: [
-                    /* @__PURE__ */ u4("span", { style: {
-                      color: "var(--text-muted, #999)",
-                      fontSize: "11px",
-                      minWidth: "50px",
-                      flexShrink: 0
-                    }, children: [
-                      key,
-                      ":"
-                    ] }),
-                    /* @__PURE__ */ u4("span", { style: { color: "#4caf50", fontWeight: 500 }, children: String(val) })
-                  ] }, key)) }),
-                  change.changeType === "deleted" && /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-error, #e53935)" }, children: change.relatedInfo ? `Will be deleted \xB7 ${change.relatedInfo}` : "Will be deleted" })
-                ]
-              },
-              `${change.entityType}-${change.entityId}-${change.changeType}-${i5}`
-            )) }) }),
+                `${change.entityType}-${change.entityId}-${change.changeType}-${i5}`
+              );
+            }) }) }),
             changes.length > 0 && /* @__PURE__ */ u4("div", { style: {
               padding: "12px 24px",
               borderTop: "1px solid var(--background-modifier-border, #eee)",
@@ -4638,23 +5632,66 @@ function PendingChangesPanel(props) {
               alignItems: "center",
               gap: "12px"
             }, children: [
+              /* @__PURE__ */ u4("button", { onClick: selectAll, style: {
+                padding: "4px 8px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "3px",
+                background: "transparent",
+                cursor: "pointer",
+                fontSize: "11px"
+              }, children: "All" }),
+              /* @__PURE__ */ u4("button", { onClick: deselectAll, style: {
+                padding: "4px 8px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "3px",
+                background: "transparent",
+                cursor: "pointer",
+                fontSize: "11px"
+              }, children: "None" }),
+              /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--text-muted, #999)" }, children: [
+                selectedCount,
+                " of ",
+                totalCount,
+                " selected"
+              ] }),
+              /* @__PURE__ */ u4("div", { style: { flex: 1 } }),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: handleDismiss,
+                  disabled: selectedCount === 0,
+                  class: "gantt-btn",
+                  style: {
+                    padding: "6px 14px",
+                    border: "1px solid var(--text-error, #e00)",
+                    borderRadius: "4px",
+                    background: dismissConfirm.value ? "var(--text-error, #e53935)" : "transparent",
+                    color: dismissConfirm.value ? "#fff" : "var(--text-error, #e00)",
+                    cursor: selectedCount === 0 ? "not-allowed" : "pointer",
+                    fontSize: "12px",
+                    opacity: selectedCount === 0 ? 0.5 : 1
+                  },
+                  children: dismissConfirm.value ? "Click again to confirm" : `Dismiss (${selectedCount})`
+                }
+              ),
               /* @__PURE__ */ u4(
                 "button",
                 {
                   onClick: handlePush,
-                  disabled: pushing.value,
+                  disabled: pushing.value || selectedCount === 0,
                   class: "gantt-btn",
                   style: {
                     padding: "8px 20px",
                     border: "none",
                     borderRadius: "4px",
-                    background: pushing.value ? "var(--background-modifier-border, #ccc)" : "var(--interactive-accent, #4A90D9)",
+                    background: pushing.value || selectedCount === 0 ? "var(--background-modifier-border, #ccc)" : "var(--interactive-accent, #4A90D9)",
                     color: "#fff",
-                    cursor: pushing.value ? "not-allowed" : "pointer",
+                    cursor: pushing.value || selectedCount === 0 ? "not-allowed" : "pointer",
                     fontSize: "13px",
-                    fontWeight: 500
+                    fontWeight: 500,
+                    opacity: selectedCount === 0 ? 0.5 : 1
                   },
-                  children: pushing.value ? "Pushing..." : `Push ${changes.length} Changes`
+                  children: pushing.value ? "Pushing..." : `Push (${selectedCount})`
                 }
               ),
               pushResults.value && /* @__PURE__ */ u4("span", { style: { fontSize: "12px" }, children: [
@@ -4776,11 +5813,103 @@ function DualPane(props) {
     showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store, onDelete: props.onDeleteProject })
   ] }) });
 }
+function FilterMultiSelect(props) {
+  const open = useSignal(false);
+  const containerRef = A2(null);
+  y2(() => {
+    function handleClick(e4) {
+      if (containerRef.current && !containerRef.current.contains(e4.target)) {
+        open.value = false;
+      }
+    }
+    if (open.value) {
+      document.addEventListener("click", handleClick);
+      return () => document.removeEventListener("click", handleClick);
+    }
+  }, [open.value]);
+  function toggle(val) {
+    const next = new Set(props.selected);
+    if (next.has(val))
+      next.delete(val);
+    else
+      next.add(val);
+    props.onChange(next);
+  }
+  return /* @__PURE__ */ u4("div", { ref: containerRef, style: { position: "relative" }, children: [
+    /* @__PURE__ */ u4(
+      "button",
+      {
+        onClick: () => {
+          open.value = !open.value;
+        },
+        title: `Filter by ${props.label}`,
+        style: {
+          padding: "2px 8px",
+          fontSize: "11px",
+          borderRadius: "3px",
+          whiteSpace: "nowrap",
+          border: `1px solid ${props.selected.size > 0 ? "var(--interactive-accent, #4A90D9)" : "var(--background-modifier-border, #ccc)"}`,
+          background: props.selected.size > 0 ? "var(--interactive-accent, #4A90D9)" : "var(--background-secondary, #f5f5f5)",
+          color: props.selected.size > 0 ? "#fff" : "var(--text-normal, #333)",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: "3px"
+        },
+        children: [
+          props.label,
+          props.selected.size > 0 ? ` (${props.selected.size})` : "",
+          /* @__PURE__ */ u4("span", { style: { fontSize: "9px" }, children: open.value ? "\u25B2" : "\u25BC" })
+        ]
+      }
+    ),
+    open.value && /* @__PURE__ */ u4("div", { style: {
+      position: "absolute",
+      top: "100%",
+      right: 0,
+      zIndex: 100,
+      background: "var(--background-primary, #fff)",
+      borderRadius: "4px",
+      boxShadow: "0 2px 10px rgba(0,0,0,0.15)",
+      minWidth: "140px",
+      maxHeight: "200px",
+      overflowY: "auto",
+      marginTop: "2px",
+      border: "1px solid var(--background-modifier-border, #ccc)"
+    }, children: props.options.length === 0 ? /* @__PURE__ */ u4("div", { style: { padding: "8px 12px", fontSize: "11px", color: "var(--text-muted, #999)" }, children: "No options" }) : props.options.map((opt) => /* @__PURE__ */ u4("label", { style: {
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      padding: "4px 10px",
+      cursor: "pointer",
+      fontSize: "12px",
+      whiteSpace: "nowrap"
+    }, children: [
+      /* @__PURE__ */ u4(
+        "input",
+        {
+          type: "checkbox",
+          checked: props.selected.has(opt.value),
+          onChange: () => toggle(opt.value),
+          style: { margin: 0 }
+        }
+      ),
+      opt.label
+    ] }, opt.value)) })
+  ] });
+}
 function GanttChart(props) {
   const { store } = props;
   const dragHandler = createDragHandler(store);
   const confirmState = useSignal(null);
   const showPendingPanel = useSignal(false);
+  const showTagPanel = useSignal(false);
+  let saveTimer = null;
+  function scheduleSave() {
+    if (saveTimer)
+      clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => store.saveSettings(), 500);
+  }
   function handleDeleteTask(taskId, title) {
     confirmState.value = {
       message: `Are you sure you want to delete task "${title}"? This action can be undone until changes are pushed upstream.`,
@@ -4809,6 +5938,10 @@ function GanttChart(props) {
         }
         if (showPendingPanel.value) {
           showPendingPanel.value = false;
+          return;
+        }
+        if (showTagPanel.value) {
+          showTagPanel.value = false;
           return;
         }
         store.selectEntity(null);
@@ -4924,6 +6057,25 @@ function GanttChart(props) {
               ]
             }
           ),
+          /* @__PURE__ */ u4(
+            "button",
+            {
+              class: "gantt-btn",
+              title: "Manage tag definitions",
+              style: {
+                padding: "4px 12px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "4px",
+                background: "var(--background-secondary, #f5f5f5)",
+                cursor: "pointer",
+                fontSize: "12px"
+              },
+              onClick: () => {
+                showTagPanel.value = true;
+              },
+              children: "Tags"
+            }
+          ),
           /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", fontSize: "12px" }, children: [
             store.mergedTasks.value.length,
             " tasks \xB7 ",
@@ -4932,7 +6084,79 @@ function GanttChart(props) {
             store.projectGroups.value.length,
             " projects"
           ] }),
-          /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", fontSize: "12px", marginLeft: "auto" }, children: store.conflicts.value.length > 0 ? `\u26A0 ${store.conflicts.value.length} conflicts` : "" })
+          /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", fontSize: "12px", marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px" }, children: [
+            /* @__PURE__ */ u4(
+              "input",
+              {
+                type: "date",
+                value: store.filterTimeStart.value,
+                onInput: (e4) => {
+                  store.filterTimeStart.value = e4.target.value;
+                  scheduleSave();
+                },
+                title: "Filter start date",
+                style: {
+                  padding: "2px 4px",
+                  fontSize: "11px",
+                  borderRadius: "3px",
+                  width: "110px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  background: "var(--background-primary, #fff)",
+                  color: "var(--text-normal, #333)"
+                }
+              }
+            ),
+            /* @__PURE__ */ u4("span", { style: { fontSize: "11px" }, children: "\u2014" }),
+            /* @__PURE__ */ u4(
+              "input",
+              {
+                type: "date",
+                value: store.filterTimeEnd.value,
+                onInput: (e4) => {
+                  store.filterTimeEnd.value = e4.target.value;
+                  scheduleSave();
+                },
+                title: "Filter end date",
+                style: {
+                  padding: "2px 4px",
+                  fontSize: "11px",
+                  borderRadius: "3px",
+                  width: "110px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  background: "var(--background-primary, #fff)",
+                  color: "var(--text-normal, #333)"
+                }
+              }
+            ),
+            /* @__PURE__ */ u4(
+              FilterMultiSelect,
+              {
+                label: "Status",
+                options: STATUS_OPTIONS.map((o4) => ({ value: o4.value, label: o4.label })),
+                selected: store.filterStatuses.value,
+                onChange: (s5) => {
+                  store.filterStatuses.value = s5;
+                  scheduleSave();
+                }
+              }
+            ),
+            /* @__PURE__ */ u4(
+              FilterMultiSelect,
+              {
+                label: "Tags",
+                options: store.availableFilterTags.value,
+                selected: store.filterTags.value,
+                onChange: (s5) => {
+                  store.filterTags.value = s5;
+                  scheduleSave();
+                }
+              }
+            ),
+            store.filteredProjectGroupKeys.value !== null && /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--interactive-accent, #4A90D9)", fontWeight: 500 }, children: [
+              store.filteredProjectGroupKeys.value.size,
+              " matching"
+            ] })
+          ] })
         ]
       }
     ),
@@ -4964,6 +6188,15 @@ function GanttChart(props) {
         store,
         onClose: () => {
           showPendingPanel.value = false;
+        }
+      }
+    ),
+    showTagPanel.value && /* @__PURE__ */ u4(
+      TagManagementPanel,
+      {
+        store,
+        onClose: () => {
+          showTagPanel.value = false;
         }
       }
     )
@@ -5179,6 +6412,18 @@ var GanttView = class extends import_obsidian.ItemView {
   async onOpen() {
     this.platform = createObsidianPlatform(this.app);
     this.store = createGanttStore(this.platform);
+    const vault = this.app.vault;
+    const BASE2 = "obsidian-gantt-data";
+    for (const sub of ["tags", "settings"]) {
+      const dir = `${BASE2}/${sub}`;
+      try {
+        const exists = await vault.adapter.exists(dir);
+        if (!exists) {
+          await vault.createFolder(dir);
+        }
+      } catch {
+      }
+    }
     const root = this.contentEl.createDiv("gantt-root");
     root.style.width = "100%";
     root.style.height = "100%";
@@ -5282,7 +6527,7 @@ var GanttPlugin = class extends import_obsidian2.Plugin {
       workspace.revealLeaf(leaves[0]);
       return;
     }
-    await workspace.getRightLeaf(false)?.setViewState({
+    await workspace.getLeaf(false)?.setViewState({
       type: VIEW_TYPE,
       active: true
     });

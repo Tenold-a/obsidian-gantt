@@ -30,6 +30,19 @@ export class GanttView extends ItemView {
     this.platform = createObsidianPlatform(this.app as any);
     this.store = createGanttStore(this.platform);
 
+    // Ensure subdirectories exist for tags and settings
+    const vault = (this.app as any).vault;
+    const BASE = 'obsidian-gantt-data';
+    for (const sub of ['tags', 'settings']) {
+      const dir = `${BASE}/${sub}`;
+      try {
+        const exists = await vault.adapter.exists(dir);
+        if (!exists) {
+          await vault.createFolder(dir);
+        }
+      } catch { /* ignore */ }
+    }
+
     const root = this.contentEl.createDiv('gantt-root');
     root.style.width = '100%';
     root.style.height = '100%';

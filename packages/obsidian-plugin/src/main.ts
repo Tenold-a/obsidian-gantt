@@ -37,7 +37,7 @@ export default class GanttPlugin extends Plugin {
       return;
     }
 
-    await workspace.getRightLeaf(false)?.setViewState({
+    await workspace.getLeaf(false)?.setViewState({
       type: VIEW_TYPE,
       active: true,
     });

@@ -10,12 +10,15 @@ import type {
   ViewDefinition,
   Conflict,
   PushChangesPayload,
+  TagDefinition,
 } from '@obsidian-gantt/core';
 import {
   mergeAll,
   detectConflicts,
   applyFieldReset,
   computeTimelineRange,
+  daysBetween,
+  addDays,
 } from '@obsidian-gantt/core';
 
 export interface PersonGroup {
@@ -74,10 +77,24 @@ export interface GanttStore {
 
   // Sort mode
   personSortMode: ReturnType<typeof signal<'name' | 'position'>>;
+  projectSortMode: ReturnType<typeof signal<'name' | 'time'>>;
+  projectSortKeyDates: ReturnType<typeof signal<string[]>>;
+
+  // Filtering
+  filterTimeStart: ReturnType<typeof signal<string>>;
+  filterTimeEnd: ReturnType<typeof signal<string>>;
+  filterStatuses: ReturnType<typeof signal<Set<string>>>;
+  filterTags: ReturnType<typeof signal<Set<string>>>;
+  filteredProjectGroupKeys: ReturnType<typeof computed<Set<string> | null>>;
+  filterDimmedTaskIds: ReturnType<typeof computed<Set<string>>>;
+  availableFilterTags: ReturnType<typeof computed<{ value: string; label: string }[]>>;
 
   // Selection & highlight
   selectedEntity: ReturnType<typeof signal<SelectedEntity | null>>;
   highlightedTaskIds: ReturnType<typeof computed<Set<string>>>;
+
+  // Scroll target for auto-scroll on selection change
+  scrollTargetDate: ReturnType<typeof computed<string | null>>;
 
   // Scroll
   sharedScrollLeft: ReturnType<typeof signal<number>>;
@@ -92,6 +109,9 @@ export interface GanttStore {
 
   // Pending changes
   pendingChanges: ReturnType<typeof computed<PendingEntityChange[]>>;
+
+  // Tag definitions
+  tagDefinitions: ReturnType<typeof signal<TagDefinition[]>>;
 
   // Loading state
   isLoading: ReturnType<typeof signal<boolean>>;
@@ -110,6 +130,14 @@ export interface GanttStore {
   setTaskStatus(taskId: string, status: string): Promise<void>;
   setProjectStatus(projectId: string, status: string): Promise<void>;
   pushChanges(): Promise<{ connectorId: string; success: boolean; error?: string }[]>;
+  dismissChanges(selectedIds: Set<string>): Promise<void>;
+
+  // Tag management
+  loadTags(): Promise<void>;
+  createTag(name: string, color: string): Promise<void>;
+  updateTag(oldName: string, newName: string, color?: string): Promise<void>;
+  deleteTag(name: string): Promise<void>;
+  saveSettings(): Promise<void>;
 }
 
 const DAY_WIDTH = 30;
@@ -131,6 +159,13 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
   const personScrollTop = signal<number>(0);
   const projectScrollTop = signal<number>(0);
   const personSortMode = signal<'name' | 'position'>('name');
+  const projectSortMode = signal<'name' | 'time'>('name');
+  const projectSortKeyDates = signal<string[]>(['上线时间']);
+  const filterTimeStart = signal<string>('');
+  const filterTimeEnd = signal<string>('');
+  const filterStatuses = signal<Set<string>>(new Set());
+  const filterTags = signal<Set<string>>(new Set());
+  const tagDefinitions = signal<TagDefinition[]>([]);
   const isLoading = signal<boolean>(false);
   const error = signal<string | null>(null);
 
@@ -260,7 +295,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
   const projectGroups = computed<ProjectGroup[]>(() => {
     const map = new Map<string, LocalTask[]>();
-    const projectInfoMap = new Map(projects.value.map(p => [p.id, p]));
+    const projectInfoMap = new Map(mergedProjects.value.map(p => [p.id, p]));
 
     for (const t of mergedTasks.value) {
       const key = t.projectId.value || '__no_project__';
@@ -279,7 +314,50 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       });
     }
 
-    groups.sort((a, b) => a.projectName.localeCompare(b.projectName));
+    const sortMode = projectSortMode.value;
+
+    if (sortMode === 'time') {
+      const sortKeyDates = projectSortKeyDates.value;
+      // Pre-compute time info per project: matching key date, last task end
+      const projectTimeInfo = new Map<string, { sortDate: string | null; lastEnd: string | null }>();
+      for (const [projectId, projectTasks] of map) {
+        const info = projectInfoMap.get(projectId);
+        // Find first matching key date from the configured list
+        let sortDate: string | null = null;
+        for (const kdName of sortKeyDates) {
+          const kd = info?.keyDates?.find(k => k.name === kdName);
+          if (kd?.date) { sortDate = kd.date; break; }
+        }
+        let lastEnd: string | null = null;
+        for (const t of projectTasks) {
+          const e = t.endDate.value;
+          if (e && (!lastEnd || e > lastEnd)) lastEnd = e;
+        }
+        projectTimeInfo.set(projectId, { sortDate, lastEnd });
+      }
+
+      groups.sort((a, b) => {
+        const infoA = projectTimeInfo.get(a.projectId);
+        const infoB = projectTimeInfo.get(b.projectId);
+        const dateA = infoA?.sortDate ?? null;
+        const dateB = infoB?.sortDate ?? null;
+
+        // Each project's effective date: key date if present, else last end date
+        const effA = dateA ?? infoA?.lastEnd ?? null;
+        const effB = dateB ?? infoB?.lastEnd ?? null;
+
+        // 1. Both have an effective date → sort by it
+        if (effA && effB) return effA.localeCompare(effB);
+        // 2. One has it → it comes first
+        if (effA) return -1;
+        if (effB) return 1;
+        // 3. Neither has any date → alphabetical
+        return a.projectName.localeCompare(b.projectName);
+      });
+    } else {
+      groups.sort((a, b) => a.projectName.localeCompare(b.projectName));
+    }
+
     return groups;
   });
 
@@ -341,6 +419,157 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     return computeTimelineRange(allDates, 7);
   });
 
+  const scrollTargetDate = computed<string | null>(() => {
+    const sel = selectedEntity.value;
+    if (!sel) return null;
+
+    if (sel.type === 'task') {
+      const task = mergedTasks.value.find(t => t.id === sel.id);
+      const s = task?.startDate.value;
+      const e = task?.endDate.value;
+      if (!s) return null;
+      if (!e || s === e) return s;
+      return addDays(s, Math.floor(daysBetween(s, e) / 2));
+    }
+
+    if (sel.type === 'project') {
+      const project = mergedProjects.value.find(p => p.id === sel.id);
+      // Try configured sort key dates first
+      for (const kdName of projectSortKeyDates.value) {
+        const kd = project?.keyDates?.find(k => k.name === kdName);
+        if (kd?.date) return kd.date;
+      }
+
+      const projectTasks = mergedTasks.value.filter(t => t.projectId.value === sel.id);
+      let earliest: string | null = null;
+      let latest: string | null = null;
+      for (const t of projectTasks) {
+        const s = t.startDate.value;
+        const e = t.endDate.value ?? s;
+        if (s) {
+          if (!earliest || s < earliest) earliest = s;
+          if (!latest || e > latest) latest = e;
+        }
+      }
+      if (!earliest) return null;
+      if (!latest || earliest === latest) return earliest;
+      return addDays(earliest, Math.floor(daysBetween(earliest, latest) / 2));
+    }
+
+    return null;
+  });
+
+  // Filtering computed: which projects match all active filters.
+  // Returns null when no filters are active ("show all").
+  // Returns a Set (possibly empty) when filters are active.
+  const filteredProjectGroupKeys = computed(() => {
+    const timeStart = filterTimeStart.value;
+    const timeEnd = filterTimeEnd.value;
+    const statuses = filterStatuses.value;
+    const tags = filterTags.value;
+
+    // No filters active — return null to signal "show everything"
+    if (!timeStart && !timeEnd && statuses.size === 0 && tags.size === 0) {
+      return null;
+    }
+
+    const matchingIds = new Set<string>();
+    for (const group of projectGroups.value) {
+      const projectId = group.projectId;
+      if (projectId === '__no_project__') {
+        matchingIds.add(projectId);
+        continue;
+      }
+
+      const project = mergedProjects.value.find(p => p.id === projectId);
+      if (!project) continue;
+
+      let match = true;
+
+      // Time range filter: project must have keyDate or task date intersecting [start, end]
+      if (match && (timeStart || timeEnd)) {
+        let timeMatch = false;
+        // Check key dates
+        if (project.keyDates) {
+          for (const kd of project.keyDates) {
+            if ((!timeStart || kd.date >= timeStart) && (!timeEnd || kd.date <= timeEnd)) {
+              timeMatch = true;
+              break;
+            }
+          }
+        }
+        // Check task dates
+        if (!timeMatch) {
+          for (const task of group.tasks) {
+            const s = task.startDate.value;
+            const e = task.endDate.value ?? s;
+            if (s && e) {
+              const taskEndBeforeStart = timeStart && e < timeStart;
+              const taskStartAfterEnd = timeEnd && s > timeEnd;
+              if (!taskEndBeforeStart && !taskStartAfterEnd) {
+                timeMatch = true;
+                break;
+              }
+            }
+          }
+        }
+        match = timeMatch;
+      }
+
+      // Status filter: project status must be in selected set
+      if (match && statuses.size > 0) {
+        const projStatus = project.status ?? 'pending';
+        match = statuses.has(projStatus);
+      }
+
+      // Tag filter: project must have at least one selected tag (OR logic)
+      if (match && tags.size > 0) {
+        const projTags = project.tags ?? [];
+        match = projTags.some(t => tags.has(t));
+      }
+
+      if (match) matchingIds.add(projectId);
+    }
+
+    return matchingIds;
+  });
+
+  // Filtering computed: task IDs that belong to projects hidden by filter
+  const filterDimmedTaskIds = computed(() => {
+    const matchingKeys = filteredProjectGroupKeys.value;
+    // null = no filter active, nothing is dimmed
+    if (matchingKeys === null) return new Set<string>();
+
+    const dimmed = new Set<string>();
+    for (const group of projectGroups.value) {
+      if (!matchingKeys.has(group.projectId)) {
+        for (const task of group.tasks) {
+          dimmed.add(task.id);
+        }
+      }
+    }
+    return dimmed;
+  });
+
+  // Available tag options for filter dropdown — from tagDefinitions + project tags
+  const availableFilterTags = computed(() => {
+    const nameSet = new Set<string>();
+    // From tag definitions
+    for (const td of tagDefinitions.value) nameSet.add(td.name);
+    // From all projects
+    for (const p of projects.value) {
+      for (const t of (p.tags ?? [])) nameSet.add(t);
+    }
+    // From project overrides
+    const projOverrides = edits.value?.projectOverrides ?? {};
+    for (const [, overrides] of Object.entries(projOverrides)) {
+      if (overrides.tags) {
+        for (const t of overrides.tags) nameSet.add(t);
+      }
+    }
+    return [...nameSet].sort().map(n => ({ value: n, label: n }));
+  });
+
   const conflicts = computed(() => {
     const currentEdits = edits.value;
     if (!currentEdits) return [];
@@ -383,6 +612,10 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
         caches.value = loadedCaches;
         edits.value = viewEdits;
       });
+
+      // Load tag definitions and settings
+      await loadTags();
+      await loadSettings();
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -513,7 +746,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     const projectOverrides = { ...(currentEdits.projectOverrides ?? {}) };
     const projectFields = { ...(projectOverrides[projectId] ?? {}) };
     (projectFields as Record<string, unknown>)[fieldName] = value;
-    projectOverrides[projectId] = projectFields as Partial<Pick<Project, 'name' | 'status' | 'description' | 'requester' | 'keyDates' | 'keyLinks'>>;
+    projectOverrides[projectId] = projectFields as Partial<Pick<Project, 'name' | 'status' | 'description' | 'requester' | 'keyDates' | 'keyLinks' | 'tags'>>;
 
     const updated: EditsOverlay = {
       ...currentEdits,
@@ -616,19 +849,26 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     await persistProjectEdit(projectId, 'status', status);
   }
 
-  async function pushChanges(): Promise<{ connectorId: string; success: boolean; error?: string }[]> {
+  async function pushChanges(selectedIds?: Set<string>): Promise<{ connectorId: string; success: boolean; error?: string }[]> {
     const currentEdits = edits.value;
     const viewId = currentViewId.value;
     if (!currentEdits || !viewId) return [];
 
     const results: { connectorId: string; success: boolean; error?: string }[] = [];
 
+    // Build a filter set from selectedIds if provided
+    const hasSelection = selectedIds !== undefined && selectedIds.size > 0;
+
     // Build push payload from all local changes
     const payload: PushChangesPayload = {
       tasks: [],
       projects: [],
-      deletedTaskIds: currentEdits.deletedTasks ?? [],
-      deletedProjectIds: currentEdits.deletedProjects ?? [],
+      deletedTaskIds: hasSelection
+        ? (currentEdits.deletedTasks ?? []).filter(id => selectedIds!.has(id))
+        : (currentEdits.deletedTasks ?? []),
+      deletedProjectIds: hasSelection
+        ? (currentEdits.deletedProjects ?? []).filter(id => selectedIds!.has(id))
+        : (currentEdits.deletedProjects ?? []),
     };
 
     // Track which task/project IDs are in the payload for selective clearing
@@ -641,6 +881,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     for (const task of allMerged) {
       // Only include upstream tasks with overrides (local tasks handled separately)
       if (task.connectorId !== null && overrideIds.has(task.id)) {
+        if (hasSelection && !selectedIds!.has(task.id)) continue;
         payload.tasks.push({
           id: task.id,
           title: task.title.value,
@@ -660,6 +901,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
     // Include locally created tasks (connectorId === null)
     for (const lt of currentEdits.localTasks) {
+      if (hasSelection && !selectedIds!.has(lt.id)) continue;
       payload.tasks.push(lt);
       pushedTaskIds.add(lt.id);
     }
@@ -667,6 +909,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     // Collect project overrides
     if (currentEdits.projectOverrides) {
       for (const [projectId, overrides] of Object.entries(currentEdits.projectOverrides)) {
+        if (hasSelection && !selectedIds!.has(projectId)) continue;
         const project = caches.value
           .flatMap(c => c.projects)
           .find(p => p.id === projectId);
@@ -678,8 +921,14 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     }
 
     // Add deleted task/project IDs
-    for (const id of payload.deletedTaskIds) pushedTaskIds.add(id);
-    for (const id of payload.deletedProjectIds) pushedProjectIds.add(id);
+    for (const id of payload.deletedTaskIds) {
+      if (hasSelection && !selectedIds!.has(id)) continue;
+      pushedTaskIds.add(id);
+    }
+    for (const id of payload.deletedProjectIds) {
+      if (hasSelection && !selectedIds!.has(id)) continue;
+      pushedProjectIds.add(id);
+    }
 
     // Try pushing through each connector
     for (const cache of caches.value) {
@@ -742,6 +991,199 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     }
 
     return results;
+  }
+
+  async function dismissChanges(selectedIds: Set<string>): Promise<void> {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId || selectedIds.size === 0) return;
+
+    const newOverrides = { ...currentEdits.overrides };
+    const newProjectOverrides = { ...(currentEdits.projectOverrides ?? {}) };
+    let localTasks = [...currentEdits.localTasks];
+    let deletedTasks = [...(currentEdits.deletedTasks ?? [])];
+    let deletedProjects = [...(currentEdits.deletedProjects ?? [])];
+
+    for (const id of selectedIds) {
+      // Remove task override
+      delete newOverrides[id];
+      // Remove local task
+      localTasks = localTasks.filter(lt => lt.id !== id);
+      // Remove from deleted tasks
+      deletedTasks = deletedTasks.filter(did => did !== id);
+      // Remove project override
+      delete newProjectOverrides[id];
+      // Remove from deleted projects
+      deletedProjects = deletedProjects.filter(did => did !== id);
+    }
+
+    const cleared: EditsOverlay = {
+      ...currentEdits,
+      overrides: newOverrides,
+      localTasks,
+      projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : undefined,
+      deletedTasks: deletedTasks.length > 0 ? deletedTasks : undefined,
+      deletedProjects: deletedProjects.length > 0 ? deletedProjects : undefined,
+    };
+
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(cleared, null, 2));
+    edits.value = cleared;
+  }
+
+  // ── Tag management actions ──
+
+  async function loadTags(): Promise<void> {
+    const viewId = currentViewId.value;
+    if (!viewId) return;
+    const raw = await platform.storage.read(`tags/${safeName(viewId)}.json`);
+    if (raw) {
+      try {
+        const data = JSON.parse(raw);
+        tagDefinitions.value = data.tags ?? [];
+      } catch { /* ignore parse errors */ }
+    }
+  }
+
+  async function createTag(name: string, color: string): Promise<void> {
+    const viewId = currentViewId.value;
+    if (!viewId) return;
+
+    // Check duplicate
+    if (tagDefinitions.value.some(t => t.name === name)) return;
+
+    const updated = [...tagDefinitions.value, { name, color }];
+    await platform.storage.write(`tags/${safeName(viewId)}.json`, JSON.stringify({ tags: updated }, null, 2));
+    tagDefinitions.value = updated;
+  }
+
+  async function updateTag(oldName: string, newName: string, color?: string): Promise<void> {
+    const viewId = currentViewId.value;
+    if (!viewId) return;
+
+    const updated = tagDefinitions.value.map(t =>
+      t.name === oldName ? { name: newName, color: color ?? t.color } : t
+    );
+    await platform.storage.write(`tags/${safeName(viewId)}.json`, JSON.stringify({ tags: updated }, null, 2));
+    tagDefinitions.value = updated;
+
+    // Sync rename across all project overrides and upstream projects
+    if (oldName !== newName) {
+      const currentEdits = edits.value;
+      if (currentEdits) {
+        let changed = false;
+        const newProjectOverrides = { ...(currentEdits.projectOverrides ?? {}) };
+
+        // Update overrides that have the old tag
+        for (const [projectId, overrides] of Object.entries(newProjectOverrides)) {
+          if (overrides.tags?.includes(oldName)) {
+            newProjectOverrides[projectId] = {
+              ...overrides,
+              tags: overrides.tags.map(t => t === oldName ? newName : t),
+            };
+            changed = true;
+          }
+        }
+
+        // Also sync upstream projects that have the old tag but no override yet
+        for (const p of projects.value) {
+          if (p.tags?.includes(oldName) && !newProjectOverrides[p.id]) {
+            newProjectOverrides[p.id] = {
+              ...(newProjectOverrides[p.id] ?? {}),
+              tags: (p.tags ?? []).map(t => t === oldName ? newName : t),
+            };
+            changed = true;
+          }
+        }
+
+        if (changed) {
+          const updatedEdits: EditsOverlay = {
+            ...currentEdits,
+            projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : undefined,
+          };
+          await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updatedEdits, null, 2));
+          edits.value = updatedEdits;
+        }
+      }
+    }
+  }
+
+  async function deleteTag(name: string): Promise<void> {
+    const viewId = currentViewId.value;
+    if (!viewId) return;
+
+    // Remove tag from definitions
+    const updated = tagDefinitions.value.filter(t => t.name !== name);
+    await platform.storage.write(`tags/${safeName(viewId)}.json`, JSON.stringify({ tags: updated }, null, 2));
+    tagDefinitions.value = updated;
+
+    // Clean up references in project overrides and upstream projects
+    const currentEdits = edits.value;
+    if (currentEdits) {
+      let changed = false;
+      const newProjectOverrides = { ...(currentEdits.projectOverrides ?? {}) };
+      for (const [projectId, overrides] of Object.entries(newProjectOverrides)) {
+        if (overrides.tags?.includes(name)) {
+          const newTags = overrides.tags.filter(t => t !== name);
+          newProjectOverrides[projectId] = {
+            ...overrides,
+            tags: newTags.length > 0 ? newTags : [],
+          };
+          changed = true;
+        }
+      }
+      // Also clean upstream projects that have the tag but no override
+      for (const p of projects.value) {
+        if (p.tags?.includes(name) && !newProjectOverrides[p.id]) {
+          newProjectOverrides[p.id] = {
+            ...(newProjectOverrides[p.id] ?? {}),
+            tags: (p.tags ?? []).filter(t => t !== name),
+          };
+          changed = true;
+        }
+      }
+      if (changed) {
+        const updatedEdits: EditsOverlay = {
+          ...currentEdits,
+          projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : undefined,
+        };
+        await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updatedEdits, null, 2));
+        edits.value = updatedEdits;
+      }
+    }
+  }
+
+  // ── Settings persistence ──
+
+  async function loadSettings(): Promise<void> {
+    const viewId = currentViewId.value;
+    if (!viewId) return;
+    const raw = await platform.storage.read(`settings/${safeName(viewId)}.json`);
+    if (!raw) return;
+    try {
+      const data = JSON.parse(raw);
+      if (data.filterTimeStart !== undefined) filterTimeStart.value = data.filterTimeStart ?? '';
+      if (data.filterTimeEnd !== undefined) filterTimeEnd.value = data.filterTimeEnd ?? '';
+      if (data.filterStatuses) filterStatuses.value = new Set(data.filterStatuses as string[]);
+      if (data.filterTags) filterTags.value = new Set(data.filterTags as string[]);
+      if (data.personSortMode) personSortMode.value = data.personSortMode;
+      if (data.projectSortMode) projectSortMode.value = data.projectSortMode;
+      if (data.projectSortKeyDates) projectSortKeyDates.value = data.projectSortKeyDates;
+    } catch { /* ignore */ }
+  }
+
+  async function saveSettings(): Promise<void> {
+    const viewId = currentViewId.value;
+    if (!viewId) return;
+    const data = {
+      filterTimeStart: filterTimeStart.value,
+      filterTimeEnd: filterTimeEnd.value,
+      filterStatuses: [...filterStatuses.value],
+      filterTags: [...filterTags.value],
+      personSortMode: personSortMode.value,
+      projectSortMode: projectSortMode.value,
+      projectSortKeyDates: projectSortKeyDates.value,
+    };
+    await platform.storage.write(`settings/${safeName(viewId)}.json`, JSON.stringify(data, null, 2));
   }
 
   // ── Pending changes computed ──
@@ -981,13 +1423,24 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     unassignedProjects,
     selectedEntity,
     highlightedTaskIds,
+    scrollTargetDate,
     sharedScrollLeft,
     personScrollTop,
     projectScrollTop,
     personSortMode,
+    projectSortMode,
+    projectSortKeyDates,
+    filterTimeStart,
+    filterTimeEnd,
+    filterStatuses,
+    filterTags,
+    filteredProjectGroupKeys,
+    filterDimmedTaskIds,
+    availableFilterTags,
     timelineRange,
     conflicts,
     pendingChanges,
+    tagDefinitions,
     isLoading,
     error,
     loadView,
@@ -1002,6 +1455,13 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     setTaskStatus,
     setProjectStatus,
     pushChanges,
+    dismissChanges,
+    loadTags,
+    createTag,
+    updateTag,
+    deleteTag,
+    saveSettings,
+    loadSettings,
   };
 }
 

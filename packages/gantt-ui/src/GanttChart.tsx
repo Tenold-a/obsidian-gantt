@@ -53,7 +53,7 @@ function pxToDate(px: number): string {
 // ============================================================
 
 function TaskList(props: {
-  labels: { key: string; name: string; color?: string; position?: string; positionColor?: string; tooltip?: string }[];
+  labels: { key: string; name: string; color?: string; position?: string; positionColor?: string; tooltip?: string; tags?: string[]; tagColors?: Map<string, string> }[];
   rowHeights: number[];
   scrollTop?: number;
   highlightedRowKeys?: Set<string>;
@@ -130,6 +130,24 @@ function TaskList(props: {
                 </span>
               )}
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={label.tooltip}>{label.name}</span>
+              {label.tags && label.tags.length > 0 && (
+                <span style={{ display: 'flex', gap: '3px', marginLeft: 'auto', flexShrink: 0 }}>
+                  {label.tags.map(tag => (
+                    <span
+                      key={tag}
+                      style={{
+                        padding: '0 4px',
+                        borderRadius: '3px',
+                        fontSize: '9px',
+                        lineHeight: '16px',
+                        background: label.tagColors?.get(tag) ?? 'var(--background-modifier-border, #e0e0e0)',
+                        color: '#fff',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >{tag}</span>
+                  ))}
+                </span>
+              )}
             </div>
           );
         })}
@@ -151,6 +169,7 @@ function Timeline(props: {
   onScroll: (scrollLeft: number, scrollTop: number) => void;
   highlightedRowKeys: Set<string>;
   dimmedRowKeys: Set<string>;
+  filterDimmedTaskIds: Set<string>;
   onRowClick: (key: string) => void;
   onTaskClick: (taskId: string) => void;
   onTaskPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
@@ -265,6 +284,22 @@ function Timeline(props: {
       containerRef.current.scrollLeft = scrollLeft;
     }
   }, [scrollLeft]);
+
+  // Auto-scroll to target date when selection changes
+  const lastHandledDate = useRef<string | null>(null);
+  useEffect(() => {
+    const targetDate = store.scrollTargetDate.value;
+    if (!targetDate || targetDate === lastHandledDate.current) return;
+    lastHandledDate.current = targetDate;
+    const el = containerRef.current;
+    if (!el) return;
+    const targetPx = originToBody(dateToPx(targetDate));
+    const targetScroll = targetPx - el.clientWidth / 2;
+    requestAnimationFrame(() => {
+      el.scrollLeft = Math.max(0, targetScroll);
+      props.onScroll(el.scrollLeft, el.scrollTop);
+    });
+  }, [store.scrollTargetDate.value]);
 
   // Task bar data with lane assignment
   const taskBars: Array<{
@@ -478,7 +513,7 @@ function Timeline(props: {
               width,
               color,
               isHighlighted: highlightedIds.has(task.id),
-              isDimmed: hasSelection && !highlightedIds.has(task.id),
+              isDimmed: (hasSelection && !highlightedIds.has(task.id)) || (paneType === 'person' && props.filterDimmedTaskIds.has(task.id)),
               progress: task.progress.value,
             }}
             rowHeight={ROW_HEIGHT}
@@ -599,7 +634,15 @@ function GanttPane(props: {
   onDragOver: (e: DragEvent) => void;
 }) {
   const { store, type } = props;
-  const groups = type === 'person' ? store.personGroups.value : store.projectGroups.value;
+  const rawGroups = type === 'person' ? store.personGroups.value : store.projectGroups.value;
+
+  // Apply project filtering — null = no filter active, Set = active filter
+  const filterMatches = store.filteredProjectGroupKeys.value;
+  const filterActive = filterMatches !== null;
+  const filterDimmedIds = store.filterDimmedTaskIds.value;
+  const groups = filterActive && type === 'project'
+    ? rawGroups.filter(g => filterMatches!.has((g as ProjectGroup).projectId))
+    : rawGroups;
 
   const paneType: 'person' | 'project' = type;
 
@@ -622,6 +665,8 @@ function GanttPane(props: {
         name: (g as ProjectGroup).projectName,
         color: (g as ProjectGroup).color,
         tooltip: undefined as string | undefined,
+        tags: (store.mergedProjects.value.find(p => p.id === key)?.tags as string[] | undefined),
+        tagColors: new Map(store.tagDefinitions.value.map(t => [t.name, t.color] as [string, string])),
       };
     }),
     [groups],
@@ -711,6 +756,7 @@ function GanttPane(props: {
             class="gantt-sort-toggle"
             onClick={() => {
               store.personSortMode.value = store.personSortMode.value === 'name' ? 'position' : 'name';
+              store.saveSettings();
             }}
             title={`Sort: ${store.personSortMode.value === 'name' ? 'by name' : 'by position'}`}
             style={{
@@ -725,7 +771,52 @@ function GanttPane(props: {
           >
             Sort: {store.personSortMode.value === 'name' ? 'Name' : 'Position'}
           </button>
-        ) : undefined}
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+            <button
+              class="gantt-sort-toggle"
+              onClick={() => {
+                store.projectSortMode.value = store.projectSortMode.value === 'name' ? 'time' : 'name';
+                store.saveSettings();
+              }}
+              title={`Sort: ${store.projectSortMode.value === 'name' ? 'by name' : 'by time'}`}
+              style={{
+                padding: '2px 8px',
+                border: '1px solid var(--background-modifier-border, #ccc)',
+                borderRadius: '4px',
+                background: 'var(--background-secondary, #f5f5f5)',
+                cursor: 'pointer',
+                fontSize: '11px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Sort: {store.projectSortMode.value === 'name' ? 'Name' : 'Time'}
+            </button>
+            {store.projectSortMode.value === 'time' && (
+              <input
+                type="text"
+                value={store.projectSortKeyDates.value.join(', ')}
+                onInput={(e) => {
+                  const raw = (e.target as HTMLInputElement).value;
+                  const names = raw.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+                  store.projectSortKeyDates.value = names.length > 0 ? names : ['上线时间'];
+                  store.saveSettings();
+                }}
+                title="Key date names for sort priority (comma-separated)"
+                placeholder="上线时间"
+                style={{
+                  padding: '2px 4px',
+                  border: '1px solid var(--background-modifier-border, #ccc)',
+                  borderRadius: '3px',
+                  background: 'var(--background-primary, #fff)',
+                  color: 'var(--text-normal, #333)',
+                  fontSize: '10px',
+                  width: '80px',
+                }}
+              />
+            )}
+          </div>
+        )}
       />
       <Timeline
         store={store}
@@ -736,6 +827,7 @@ function GanttPane(props: {
         onScroll={props.onScroll}
         highlightedRowKeys={highlightedRowKeys}
         dimmedRowKeys={dimmedRowKeys}
+        filterDimmedTaskIds={type === 'person' ? store.filterDimmedTaskIds.value : new Set()}
         onRowClick={handleRowClick}
         onTaskClick={handleTaskClick}
         onTaskPointerDown={props.onTaskPointerDown}
@@ -821,13 +913,14 @@ function UnassignedPanel(props: {
           onDragStart={(e) => {
             e.dataTransfer?.setData('text/plain', JSON.stringify({ projectId: p.id, projectName: p.name }));
           }}
+          onClick={() => props.store.selectEntity({ type: 'project', id: p.id })}
           style={{
             padding: '8px 10px',
             marginBottom: '6px',
             border: '1px solid var(--gantt-grid-line-day, #e0e0e0)',
             borderRadius: '6px',
             background: 'var(--background-secondary, #f5f5f5)',
-            cursor: 'grab',
+            cursor: 'pointer',
             fontSize: '12px',
             display: 'flex',
             alignItems: 'center',
@@ -915,12 +1008,51 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
   const editKeyLinks = useSignal<{ name: string; url: string }[]>(
     keyLinks.map(kl => ({ ...kl })),
   );
+  const projectTags = (projectOverrides?.tags ?? project.tags ?? []) as string[];
+  const editTags = useSignal<string[]>([...projectTags]);
+  const editTagInput = useSignal('');
+  const editTagInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Collect all known tags for autocomplete (from tag definitions if available, else from all projects)
+  const knownTags = useMemo(() => {
+    const set = new Set<string>();
+    // Include tags from all projects
+    for (const p of store.mergedProjects.value) {
+      for (const t of (p.tags ?? [])) set.add(t);
+    }
+    // Also include tag definitions from store if available
+    const defs = (store as any).tagDefinitions?.value;
+    if (defs) {
+      for (const d of defs) set.add(d.name);
+    }
+    return [...set].sort();
+  }, [store.mergedProjects.value]);
+
+  function addTag() {
+    const tag = editTagInput.value.trim();
+    if (!tag || editTags.value.includes(tag)) return;
+    editTags.value = [...editTags.value, tag];
+    editTagInput.value = '';
+    editTagInputRef.current?.focus();
+  }
+
+  function removeTag(tag: string) {
+    editTags.value = editTags.value.filter(t => t !== tag);
+  }
+
+  function handleTagInputKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addTag();
+    }
+  }
 
   function handleEdit() {
     editDescription.value = description;
     editRequester.value = requester;
     editKeyDates.value = keyDates.map(kd => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon }));
     editKeyLinks.value = keyLinks.map(kl => ({ ...kl }));
+    editTags.value = [...projectTags];
     editing.value = true;
   }
 
@@ -931,6 +1063,18 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
       ? editKeyDates.value.map(kd => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon }))
       : undefined);
     await store.persistProjectEdit(project!.id, 'keyLinks', editKeyLinks.value.length > 0 ? editKeyLinks.value : undefined);
+    await store.persistProjectEdit(project!.id, 'tags', editTags.value.length > 0 ? editTags.value : undefined);
+
+    // Auto-create any new tags in tagDefinitions
+    const existingNames = new Set(store.tagDefinitions.value.map(t => t.name));
+    const presetColors = ['#E06C75', '#61AFEF', '#98C379', '#E5C07B', '#C678DD', '#56B6C2', '#D19A66', '#4A90D9'];
+    for (const tag of editTags.value) {
+      if (!existingNames.has(tag)) {
+        await store.createTag(tag, presetColors[Math.floor(Math.random() * presetColors.length)]);
+        existingNames.add(tag);
+      }
+    }
+
     editing.value = false;
   }
 
@@ -1065,6 +1209,96 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+      </div>
+
+      {/* Tags */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>Tags</div>
+        {editing.value ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {/* Tag input with autocomplete */}
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <input
+                ref={editTagInputRef}
+                type="text"
+                value={editTagInput.value}
+                onInput={(e) => { editTagInput.value = (e.target as HTMLInputElement).value; }}
+                onKeyDown={handleTagInputKeyDown}
+                placeholder="Add tag..."
+                list="project-tag-suggestions"
+                style={{
+                  flex: 1, fontSize: '11px', padding: '3px 6px', borderRadius: '3px',
+                  border: '1px solid var(--background-modifier-border, #ccc)',
+                  background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+                }}
+              />
+              <datalist id="project-tag-suggestions">
+                {knownTags.filter(t => !editTags.value.includes(t)).map(t => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
+              <button
+                onClick={addTag}
+                style={{
+                  padding: '3px 10px', border: '1px solid var(--interactive-accent, #4A90D9)',
+                  borderRadius: '3px', background: 'var(--interactive-accent, #4A90D9)',
+                  color: '#fff', cursor: 'pointer', fontSize: '11px', whiteSpace: 'nowrap',
+                }}
+              >+</button>
+            </div>
+            {/* Tag badges */}
+            {editTags.value.length > 0 ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                {editTags.value.map(tag => (
+                  <span
+                    key={tag}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '3px',
+                      padding: '1px 6px',
+                      borderRadius: '10px',
+                      fontSize: '11px',
+                      background: 'var(--interactive-accent, #4A90D9)',
+                      color: '#fff',
+                    }}
+                  >
+                    {tag}
+                    <span
+                      onClick={() => removeTag(tag)}
+                      style={{ cursor: 'pointer', fontSize: '13px', lineHeight: 1, opacity: 0.7 }}
+                      title={`Remove tag "${tag}"`}
+                    >x</span>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)' }}>No tags</div>
+            )}
+          </div>
+        ) : (
+          <div>
+            {projectTags.length > 0 ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                {projectTags.map(tag => (
+                  <span
+                    key={tag}
+                    style={{
+                      display: 'inline-block',
+                      padding: '1px 6px',
+                      borderRadius: '10px',
+                      fontSize: '11px',
+                      background: 'var(--background-modifier-border, #e0e0e0)',
+                      color: 'var(--text-normal, #333)',
+                    }}
+                  >{tag}</span>
+                ))}
+              </div>
+            ) : (
+              <div style={valueStyle}>—</div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Draggable create-task area */}
@@ -1450,6 +1684,10 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
     ? store.projects.value.find(p => p.id === task.projectId.value)
     : null;
 
+  const projectOverrides = project
+    ? (store.edits.value?.projectOverrides?.[project.id] ?? null)
+    : null;
+
   // Inline title editing
   const editTitle = useSignal(false);
   const editTitleValue = useSignal(task.title.value);
@@ -1600,24 +1838,6 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
 
         <FieldRow label="Person" value={personName ?? '-'} />
 
-        <div>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Project</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            {project?.color && (
-              <span style={{
-                width: '10px', height: '10px', borderRadius: '2px', background: project.color, flexShrink: 0,
-              }} />
-            )}
-            <span
-              style={{ cursor: 'pointer', color: 'var(--interactive-accent, #4A90D9)' }}
-              onClick={() => project && store.selectEntity({ type: 'project', id: project.id })}
-              title="Click to view project details"
-            >
-              {project?.name ?? task.projectId.value ?? '-'}
-            </span>
-          </div>
-        </div>
-
         {/* URL */}
         <div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Link</div>
@@ -1669,6 +1889,35 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
             </div>
           </div>
         )}
+
+        {/* Project section at bottom */}
+        <div style={{ borderTop: '1px solid var(--background-modifier-border, #e0e0e0)', paddingTop: '10px', marginTop: '2px' }}>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '4px' }}>Project</div>
+          {project ? (
+            <div
+              style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
+              onClick={() => store.selectEntity({ type: 'project', id: project.id })}
+              title="Click to view project details"
+            >
+              {project.color && (
+                <span style={{
+                  width: '12px', height: '12px', borderRadius: '3px', background: project.color, flexShrink: 0,
+                }} />
+              )}
+              <span style={{ color: 'var(--interactive-accent, #4A90D9)', fontSize: '13px', fontWeight: 500 }}>
+                {project.name}
+              </span>
+              <StatusBadge status={projectOverrides?.status ?? project.status ?? 'pending'} />
+              <span style={{ fontSize: '10px', color: 'var(--text-muted, #999)', marginLeft: 'auto' }}>View →</span>
+            </div>
+          ) : task.projectId.value ? (
+            <div style={{ fontSize: '12px', color: 'var(--text-muted, #999)' }}>
+              {task.projectId.value} (deleted)
+            </div>
+          ) : (
+            <div style={{ fontSize: '12px', color: 'var(--text-muted, #999)' }}>No project</div>
+          )}
+        </div>
 
         <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginTop: '4px' }}>
           <div style={{ textDecoration: sourceStyle }}>{sourceLabel}</div>
@@ -1773,6 +2022,277 @@ function ConfirmDialog(props: {
 }
 
 // ============================================================
+// TagManagementPanel — CRUD for tag definitions
+// ============================================================
+
+function TagManagementPanel(props: { store: GanttStore; onClose: () => void }) {
+  const { store } = props;
+
+  const newName = useSignal('');
+  const newColor = useSignal(PRESET_COLORS[0]);
+  const editingTag = useSignal<string | null>(null);
+  const editName = useSignal('');
+  const editColor = useSignal('');
+  const deleteConfirmName = useSignal<string | null>(null);
+  const creating = useSignal(false);
+  const errorMsg = useSignal('');
+
+  // Count usage across all projects (reads signals reactively)
+  const usageCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of store.mergedProjects.value) {
+      for (const t of (p.tags ?? [])) {
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    const overrides = store.edits.value?.projectOverrides ?? {};
+    for (const [, o] of Object.entries(overrides)) {
+      if (o.tags) {
+        for (const t of o.tags) {
+          if (!counts.has(t)) counts.set(t, 0);
+        }
+      }
+    }
+    return counts;
+  }, [store.mergedProjects.value, store.edits.value]);
+
+  async function handleCreate() {
+    const name = newName.value.trim();
+    if (!name) return;
+    // Check duplicate against current tag definitions
+    if (store.tagDefinitions.value.some(t => t.name === name)) {
+      errorMsg.value = `Tag "${name}" already exists`;
+      return;
+    }
+    errorMsg.value = '';
+    creating.value = true;
+    try {
+      await store.createTag(name, newColor.value);
+      newName.value = '';
+      newColor.value = PRESET_COLORS[0];
+    } catch (e) {
+      errorMsg.value = `Failed: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      creating.value = false;
+    }
+  }
+
+  function handleCreateKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleCreate();
+    }
+  }
+
+  function startEdit(tag: { name: string; color: string }) {
+    editingTag.value = tag.name;
+    editName.value = tag.name;
+    editColor.value = tag.color;
+  }
+
+  async function saveEdit() {
+    const oldName = editingTag.value;
+    const newNameVal = editName.value.trim();
+    if (!oldName || !newNameVal) return;
+    if (newNameVal !== oldName && store.tagDefinitions.value.some(t => t.name === newNameVal)) {
+      errorMsg.value = `Tag "${newNameVal}" already exists`;
+      return;
+    }
+    errorMsg.value = '';
+    try {
+      await store.updateTag(oldName, newNameVal, editColor.value);
+      editingTag.value = null;
+    } catch (e) {
+      errorMsg.value = `Failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  function cancelEdit() {
+    editingTag.value = null;
+  }
+
+  function handleEditKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
+    if (e.key === 'Escape') cancelEdit();
+  }
+
+  function confirmDelete(name: string) {
+    deleteConfirmName.value = name;
+  }
+
+  async function handleDelete() {
+    if (!deleteConfirmName.value) return;
+    const name = deleteConfirmName.value;
+    deleteConfirmName.value = null;
+    errorMsg.value = '';
+    try {
+      await store.deleteTag(name);
+    } catch (e) {
+      errorMsg.value = `Failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  // Reactively read tag definitions for rendering
+  const tagList = store.tagDefinitions.value;
+
+  return (
+    <div
+      class="gantt-confirm-backdrop"
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) props.onClose(); }}
+    >
+      <div
+        style={{
+          background: 'var(--background-primary, #fff)', borderRadius: '8px', padding: '0',
+          maxWidth: '500px', width: '90%', maxHeight: '75vh',
+          display: 'flex', flexDirection: 'column',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
+          color: 'var(--text-normal, #333)',
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          padding: '20px 24px 16px',
+          borderBottom: '1px solid var(--background-modifier-border, #eee)',
+        }}>
+          <h3 style={{ margin: 0, fontSize: '16px' }}>Tag Management</h3>
+          <button
+            onClick={props.onClose}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px',
+              lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
+            }}
+          >x</button>
+        </div>
+
+        {/* Body */}
+        <div style={{ overflowY: 'auto', padding: '16px 24px', flex: 1 }}>
+          {/* Create new tag */}
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '16px' }}>
+            <input
+              type="color"
+              value={newColor.value}
+              onInput={(e) => { newColor.value = (e.target as HTMLInputElement).value; }}
+              title="Tag color"
+              style={{ width: '28px', height: '28px', padding: '0', border: 'none', borderRadius: '4px', cursor: 'pointer', flexShrink: 0 }}
+            />
+            <input
+              type="text"
+              value={newName.value}
+              onInput={(e) => { newName.value = (e.target as HTMLInputElement).value; }}
+              onKeyDown={handleCreateKeyDown}
+              placeholder="New tag name..."
+              style={{
+                flex: 1, fontSize: '12px', padding: '4px 8px', borderRadius: '4px',
+                border: '1px solid var(--background-modifier-border, #ccc)',
+                background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+              }}
+            />
+            <button
+              onClick={handleCreate}
+              disabled={creating.value || !newName.value.trim() || store.tagDefinitions.value.some(t => t.name === newName.value.trim())}
+              style={{
+                padding: '4px 12px', border: 'none', borderRadius: '4px',
+                background: creating.value ? 'var(--background-modifier-border, #ccc)' : 'var(--interactive-accent, #4A90D9)', color: '#fff',
+                cursor: creating.value || !newName.value.trim() ? 'not-allowed' : 'pointer', fontSize: '12px', whiteSpace: 'nowrap',
+                opacity: newName.value.trim() ? 1 : 0.5,
+              }}
+            >{creating.value ? '...' : 'Create'}</button>
+          </div>
+          {errorMsg.value && (
+            <div style={{ fontSize: '11px', color: 'var(--text-error, #e00)', marginBottom: '8px' }}>{errorMsg.value}</div>
+          )}
+
+          {/* Tag list */}
+          {tagList.length === 0 ? (
+            <div style={{ color: 'var(--text-muted, #999)', fontSize: '13px', textAlign: 'center', padding: '20px 0' }}>
+              No tags defined yet. Create one above.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              {tagList.map(tag => (
+                <div
+                  key={tag.name}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 10px',
+                    border: '1px solid var(--background-modifier-border, #e0e0e0)',
+                    borderRadius: '6px', background: 'var(--background-secondary, #f5f5f5)',
+                  }}
+                >
+                  {editingTag.value === tag.name ? (
+                    <>
+                      <input
+                        type="color"
+                        value={editColor.value}
+                        onInput={(e) => { editColor.value = (e.target as HTMLInputElement).value; }}
+                        style={{ width: '24px', height: '24px', padding: '0', border: 'none', borderRadius: '4px', cursor: 'pointer', flexShrink: 0 }}
+                      />
+                      <input
+                        type="text"
+                        value={editName.value}
+                        onInput={(e) => { editName.value = (e.target as HTMLInputElement).value; }}
+                        onKeyDown={handleEditKeyDown}
+                        style={{
+                          flex: 1, fontSize: '12px', padding: '3px 6px', borderRadius: '3px',
+                          border: '1px solid var(--interactive-accent, #4A90D9)',
+                          background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+                        }}
+                      />
+                      <button onClick={saveEdit} style={{ padding: '2px 6px', border: 'none', borderRadius: '3px', background: 'var(--interactive-accent, #4A90D9)', color: '#fff', cursor: 'pointer', fontSize: '11px' }}>Save</button>
+                      <button onClick={cancelEdit} style={{ padding: '2px 6px', border: '1px solid var(--background-modifier-border, #ccc)', borderRadius: '3px', background: 'transparent', cursor: 'pointer', fontSize: '11px' }}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{
+                        width: '14px', height: '14px', borderRadius: '3px',
+                        background: tag.color, flexShrink: 0,
+                      }} />
+                      <span style={{ flex: 1, fontSize: '13px', fontWeight: 500 }}>{tag.name}</span>
+                      <span style={{ fontSize: '11px', color: 'var(--text-muted, #999)' }}>
+                        {usageCounts.get(tag.name) ?? 0} projects
+                      </span>
+                      <button
+                        onClick={() => startEdit(tag)}
+                        title="Edit tag"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted, #999)', padding: '0 2px' }}
+                      >✎</button>
+                      {deleteConfirmName.value === tag.name ? (
+                        <>
+                          <button
+                            onClick={handleDelete}
+                            title="Confirm delete"
+                            style={{ background: 'var(--text-error, #e00)', border: 'none', borderRadius: '3px', cursor: 'pointer', fontSize: '10px', color: '#fff', padding: '2px 6px', whiteSpace: 'nowrap' }}
+                          >Sure?</button>
+                          <button
+                            onClick={() => { deleteConfirmName.value = null; }}
+                            title="Cancel delete"
+                            style={{ background: 'none', border: '1px solid var(--background-modifier-border, #ccc)', borderRadius: '3px', cursor: 'pointer', fontSize: '10px', color: 'var(--text-muted, #999)', padding: '2px 4px' }}
+                          >x</button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => confirmDelete(tag.name)}
+                          title="Delete tag"
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-error, #e00)', padding: '0 2px' }}
+                        >🗑</button>
+                      )}
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // PendingChangesPanel — shows local edits pending push
 // ============================================================
 
@@ -1781,28 +2301,67 @@ function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) 
   const changes = store.pendingChanges.value;
   const pushing = useSignal(false);
   const pushResults = useSignal<{ connectorId: string; success: boolean; error?: string }[] | null>(null);
+  const dismissConfirm = useSignal(false);
+
+  // Selected IDs — keyed by "entityType:entityId"
+  const selectedIds = useSignal<Set<string>>(new Set(changes.map(c => `${c.entityType}:${c.entityId}`)));
+
+  function selectedEntityIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const key of selectedIds.value) {
+      const colonIdx = key.lastIndexOf(':');
+      if (colonIdx > 0) ids.add(key.slice(colonIdx + 1));
+    }
+    return ids;
+  }
+
+  function toggleSelect(key: string) {
+    const next = new Set(selectedIds.value);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    selectedIds.value = next;
+  }
+
+  function selectAll() {
+    selectedIds.value = new Set(changes.map(c => `${c.entityType}:${c.entityId}`));
+  }
+
+  function deselectAll() {
+    selectedIds.value = new Set();
+  }
 
   async function handlePush() {
+    const ids = selectedEntityIds();
+    if (ids.size === 0) return;
     pushing.value = true;
     pushResults.value = null;
     try {
-      const results = await store.pushChanges();
+      const results = await store.pushChanges(ids);
       pushResults.value = results;
     } finally {
       pushing.value = false;
     }
   }
 
+  async function handleDismiss() {
+    if (!dismissConfirm.value) {
+      dismissConfirm.value = true;
+      return;
+    }
+    const ids = selectedEntityIds();
+    if (ids.size === 0) return;
+    await store.dismissChanges(ids);
+    dismissConfirm.value = false;
+    selectedIds.value = new Set();
+  }
+
+  const selectedCount = selectedIds.value.size;
+  const totalCount = changes.length;
+
   const stats = {
     added: changes.filter(c => c.changeType === 'added').length,
     modified: changes.filter(c => c.changeType === 'modified').length,
     deleted: changes.filter(c => c.changeType === 'deleted').length,
-  };
-
-  const changeTypeLabel = {
-    added: 'New',
-    modified: 'Updated',
-    deleted: 'Deleted',
   };
 
   const changeTypeColor = {
@@ -1882,7 +2441,10 @@ function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) 
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {changes.map((change, i) => (
+              {changes.map((change, i) => {
+                const key = `${change.entityType}:${change.entityId}`;
+                const isSelected = selectedIds.value.has(key);
+                return (
                 <div
                   key={`${change.entityType}-${change.entityId}-${change.changeType}-${i}`}
                   class="gantt-change-card"
@@ -1891,10 +2453,18 @@ function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) 
                     borderRadius: '6px',
                     padding: '12px',
                     fontSize: '12px',
+                    opacity: isSelected ? 1 : 0.5,
+                    transition: 'opacity 0.15s',
                   }}
                 >
-                  {/* Card header: type badge + entity name */}
+                  {/* Card header: checkbox + type badge + entity name */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleSelect(key)}
+                      style={{ margin: 0, flexShrink: 0 }}
+                    />
                     <span style={{
                       display: 'inline-block',
                       padding: '1px 6px',
@@ -1930,7 +2500,7 @@ function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) 
 
                   {/* Modified: field changes */}
                   {change.changeType === 'modified' && change.fields && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginLeft: '24px' }}>
                       {change.fields.map((f, j) => (
                         <div key={j} style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
                           <span style={{
@@ -1962,16 +2532,16 @@ function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) 
 
                   {/* Added: summary info */}
                   {change.changeType === 'added' && change.addedSummary && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                      {Object.entries(change.addedSummary).map(([key, val]) => (
-                        <div key={key} style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginLeft: '24px' }}>
+                      {Object.entries(change.addedSummary).map(([key2, val]) => (
+                        <div key={key2} style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
                           <span style={{
                             color: 'var(--text-muted, #999)',
                             fontSize: '11px',
                             minWidth: '50px',
                             flexShrink: 0,
                           }}>
-                            {key}:
+                            {key2}:
                           </span>
                           <span style={{ color: '#4caf50', fontWeight: 500 }}>
                             {String(val)}
@@ -1983,19 +2553,20 @@ function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) 
 
                   {/* Deleted: related info */}
                   {change.changeType === 'deleted' && (
-                    <div style={{ fontSize: '11px', color: 'var(--text-error, #e53935)' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--text-error, #e53935)', marginLeft: '24px' }}>
                       {change.relatedInfo
                         ? `Will be deleted · ${change.relatedInfo}`
                         : 'Will be deleted'}
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
 
-        {/* Footer with push button */}
+        {/* Footer with push/dismiss buttons */}
         {changes.length > 0 && (
           <div style={{
             padding: '12px 24px',
@@ -2004,22 +2575,52 @@ function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) 
             alignItems: 'center',
             gap: '12px',
           }}>
+            <button onClick={selectAll} style={{
+              padding: '4px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
+              borderRadius: '3px', background: 'transparent', cursor: 'pointer', fontSize: '11px',
+            }}>All</button>
+            <button onClick={deselectAll} style={{
+              padding: '4px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
+              borderRadius: '3px', background: 'transparent', cursor: 'pointer', fontSize: '11px',
+            }}>None</button>
+            <span style={{ fontSize: '11px', color: 'var(--text-muted, #999)' }}>
+              {selectedCount} of {totalCount} selected
+            </span>
+            <div style={{ flex: 1 }} />
+            <button
+              onClick={handleDismiss}
+              disabled={selectedCount === 0}
+              class="gantt-btn"
+              style={{
+                padding: '6px 14px',
+                border: '1px solid var(--text-error, #e00)',
+                borderRadius: '4px',
+                background: dismissConfirm.value ? 'var(--text-error, #e53935)' : 'transparent',
+                color: dismissConfirm.value ? '#fff' : 'var(--text-error, #e00)',
+                cursor: selectedCount === 0 ? 'not-allowed' : 'pointer',
+                fontSize: '12px',
+                opacity: selectedCount === 0 ? 0.5 : 1,
+              }}
+            >
+              {dismissConfirm.value ? 'Click again to confirm' : `Dismiss (${selectedCount})`}
+            </button>
             <button
               onClick={handlePush}
-              disabled={pushing.value}
+              disabled={pushing.value || selectedCount === 0}
               class="gantt-btn"
               style={{
                 padding: '8px 20px',
                 border: 'none',
                 borderRadius: '4px',
-                background: pushing.value ? 'var(--background-modifier-border, #ccc)' : 'var(--interactive-accent, #4A90D9)',
+                background: (pushing.value || selectedCount === 0) ? 'var(--background-modifier-border, #ccc)' : 'var(--interactive-accent, #4A90D9)',
                 color: '#fff',
-                cursor: pushing.value ? 'not-allowed' : 'pointer',
+                cursor: (pushing.value || selectedCount === 0) ? 'not-allowed' : 'pointer',
                 fontSize: '13px',
                 fontWeight: 500,
+                opacity: selectedCount === 0 ? 0.5 : 1,
               }}
             >
-              {pushing.value ? 'Pushing...' : `Push ${changes.length} Changes`}
+              {pushing.value ? 'Pushing...' : `Push (${selectedCount})`}
             </button>
             {pushResults.value && (
               <span style={{ fontSize: '12px' }}>
@@ -2173,6 +2774,86 @@ export function DualPane(props: {
 }
 
 // ============================================================
+// FilterMultiSelect — dropdown multi-select for filter controls
+// ============================================================
+
+function FilterMultiSelect(props: {
+  label: string;
+  options: { value: string; label: string }[];
+  selected: Set<string>;
+  onChange: (selected: Set<string>) => void;
+}) {
+  const open = useSignal(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        open.value = false;
+      }
+    }
+    if (open.value) {
+      document.addEventListener('click', handleClick);
+      return () => document.removeEventListener('click', handleClick);
+    }
+  }, [open.value]);
+
+  function toggle(val: string) {
+    const next = new Set(props.selected);
+    if (next.has(val)) next.delete(val);
+    else next.add(val);
+    props.onChange(next);
+  }
+
+  return (
+    <div ref={containerRef} style={{ position: 'relative' }}>
+      <button
+        onClick={() => { open.value = !open.value; }}
+        title={`Filter by ${props.label}`}
+        style={{
+          padding: '2px 8px', fontSize: '11px', borderRadius: '3px', whiteSpace: 'nowrap',
+          border: `1px solid ${props.selected.size > 0 ? 'var(--interactive-accent, #4A90D9)' : 'var(--background-modifier-border, #ccc)'}`,
+          background: props.selected.size > 0 ? 'var(--interactive-accent, #4A90D9)' : 'var(--background-secondary, #f5f5f5)',
+          color: props.selected.size > 0 ? '#fff' : 'var(--text-normal, #333)',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px',
+        }}
+      >
+        {props.label}{props.selected.size > 0 ? ` (${props.selected.size})` : ''}
+        <span style={{ fontSize: '9px' }}>{open.value ? '▲' : '▼'}</span>
+      </button>
+      {open.value && (
+        <div style={{
+          position: 'absolute', top: '100%', right: 0, zIndex: 100,
+          background: 'var(--background-primary, #fff)', borderRadius: '4px',
+          boxShadow: '0 2px 10px rgba(0,0,0,0.15)', minWidth: '140px',
+          maxHeight: '200px', overflowY: 'auto', marginTop: '2px',
+          border: '1px solid var(--background-modifier-border, #ccc)',
+        }}>
+          {props.options.length === 0 ? (
+            <div style={{ padding: '8px 12px', fontSize: '11px', color: 'var(--text-muted, #999)' }}>No options</div>
+          ) : (
+            props.options.map(opt => (
+              <label key={opt.value} style={{
+                display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 10px',
+                cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap',
+              }}>
+                <input
+                  type="checkbox"
+                  checked={props.selected.has(opt.value)}
+                  onChange={() => toggle(opt.value)}
+                  style={{ margin: 0 }}
+                />
+                {opt.label}
+              </label>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // Top-level GanttChart component
 // ============================================================
 
@@ -2185,6 +2866,13 @@ export function GanttChart(props: {
   // Confirmation dialog state
   const confirmState = useSignal<{ message: string; onConfirm: () => void } | null>(null);
   const showPendingPanel = useSignal(false);
+  const showTagPanel = useSignal(false);
+
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => store.saveSettings(), 500);
+  }
 
   function handleDeleteTask(taskId: string, title: string) {
     confirmState.value = {
@@ -2217,6 +2905,10 @@ export function GanttChart(props: {
         }
         if (showPendingPanel.value) {
           showPendingPanel.value = false;
+          return;
+        }
+        if (showTagPanel.value) {
+          showTagPanel.value = false;
           return;
         }
         store.selectEntity(null);
@@ -2336,11 +3028,67 @@ export function GanttChart(props: {
         >
           Pending ({store.pendingChanges.value.length})
         </button>
+        <button
+          class="gantt-btn"
+          title="Manage tag definitions"
+          style={{
+            padding: '4px 12px',
+            border: '1px solid var(--background-modifier-border, #ccc)',
+            borderRadius: '4px',
+            background: 'var(--background-secondary, #f5f5f5)',
+            cursor: 'pointer',
+            fontSize: '12px',
+          }}
+          onClick={() => { showTagPanel.value = true; }}
+        >
+          Tags
+        </button>
         <span style={{ color: 'var(--text-muted, #999)', fontSize: '12px' }}>
           {store.mergedTasks.value.length} tasks · {store.personGroups.value.length} people · {store.projectGroups.value.length} projects
         </span>
-        <span style={{ color: 'var(--text-muted, #999)', fontSize: '12px', marginLeft: 'auto' }}>
-          {store.conflicts.value.length > 0 ? `⚠ ${store.conflicts.value.length} conflicts` : ''}
+        <span style={{ color: 'var(--text-muted, #999)', fontSize: '12px', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {/* Filter controls */}
+          <input
+            type="date"
+            value={store.filterTimeStart.value}
+            onInput={(e) => { store.filterTimeStart.value = (e.target as HTMLInputElement).value; scheduleSave(); }}
+            title="Filter start date"
+            style={{
+              padding: '2px 4px', fontSize: '11px', borderRadius: '3px', width: '110px',
+              border: '1px solid var(--background-modifier-border, #ccc)',
+              background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+            }}
+          />
+          <span style={{ fontSize: '11px' }}>—</span>
+          <input
+            type="date"
+            value={store.filterTimeEnd.value}
+            onInput={(e) => { store.filterTimeEnd.value = (e.target as HTMLInputElement).value; scheduleSave(); }}
+            title="Filter end date"
+            style={{
+              padding: '2px 4px', fontSize: '11px', borderRadius: '3px', width: '110px',
+              border: '1px solid var(--background-modifier-border, #ccc)',
+              background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+            }}
+          />
+          <FilterMultiSelect
+            label="Status"
+            options={STATUS_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
+            selected={store.filterStatuses.value}
+            onChange={(s) => { store.filterStatuses.value = s; scheduleSave(); }}
+          />
+          {/* Tag filter uses store.tagDefinitions */}
+          <FilterMultiSelect
+            label="Tags"
+            options={store.availableFilterTags.value}
+            selected={store.filterTags.value}
+            onChange={(s) => { store.filterTags.value = s; scheduleSave(); }}
+          />
+          {(store.filteredProjectGroupKeys.value !== null) && (
+            <span style={{ fontSize: '11px', color: 'var(--interactive-accent, #4A90D9)', fontWeight: 500 }}>
+              {store.filteredProjectGroupKeys.value.size} matching
+            </span>
+          )}
         </span>
       </div>
 
@@ -2369,6 +3117,14 @@ export function GanttChart(props: {
         <PendingChangesPanel
           store={store}
           onClose={() => { showPendingPanel.value = false; }}
+        />
+      )}
+
+      {/* Tag management panel */}
+      {showTagPanel.value && (
+        <TagManagementPanel
+          store={store}
+          onClose={() => { showTagPanel.value = false; }}
         />
       )}
     </div>
