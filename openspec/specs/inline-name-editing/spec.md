@@ -49,3 +49,10 @@ The project detail panel SHALL support inline editing of the project name by cli
 - **WHEN** a user clears the project name and saves
 - **THEN** the system SHALL revert to the previous name value
 
+### Requirement: Keyboard event isolation
+Inline editing inputs (task title and project name) SHALL stop propagation of both `keydown` and `keyup` events to prevent interference with other Obsidian plugins' global keyboard handlers.
+
+#### Scenario: Enter key in inline edit input does not leak
+- **WHEN** the user presses Enter or Escape in an inline editing text input
+- **THEN** the `keydown` and `keyup` events SHALL NOT propagate beyond the input element via `stopPropagation()`
+

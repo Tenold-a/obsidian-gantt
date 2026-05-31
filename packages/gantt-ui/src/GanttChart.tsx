@@ -992,8 +992,8 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
   }
 
   function handleNameKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter') saveName();
-    if (e.key === 'Escape') cancelName();
+    if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); saveName(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelName(); }
   }
 
   // Associated tasks
@@ -1043,6 +1043,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
   function handleTagInputKeyDown(e: KeyboardEvent) {
     if (e.key === 'Enter') {
       e.preventDefault();
+      e.stopPropagation();
       addTag();
     }
   }
@@ -1116,6 +1117,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
               onInput={(e) => { editNameValue.value = (e.target as HTMLInputElement).value; }}
               onBlur={saveName}
               onKeyDown={handleNameKeyDown}
+              onKeyUp={(e) => { e.stopPropagation(); }}
               class="gantt-inline-edit-input"
               style={{
                 flex: 1,
@@ -1224,6 +1226,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
                 value={editTagInput.value}
                 onInput={(e) => { editTagInput.value = (e.target as HTMLInputElement).value; }}
                 onKeyDown={handleTagInputKeyDown}
+                onKeyUp={(e) => { e.stopPropagation(); }}
                 placeholder="Add tag..."
                 list="project-tag-suggestions"
                 style={{
@@ -1713,8 +1716,8 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
   }
 
   function handleTitleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter') saveTitle();
-    if (e.key === 'Escape') cancelTitle();
+    if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); saveTitle(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelTitle(); }
   }
 
   const sourceLabel = task.connectorId
@@ -1749,6 +1752,7 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
             onInput={(e) => { editTitleValue.value = (e.target as HTMLInputElement).value; }}
             onBlur={saveTitle}
             onKeyDown={handleTitleKeyDown}
+            onKeyUp={(e) => { e.stopPropagation(); }}
             class="gantt-inline-edit-input"
             style={{
               flex: 1,
@@ -2080,6 +2084,7 @@ function TagManagementPanel(props: { store: GanttStore; onClose: () => void }) {
   function handleCreateKeyDown(e: KeyboardEvent) {
     if (e.key === 'Enter') {
       e.preventDefault();
+      e.stopPropagation();
       handleCreate();
     }
   }
@@ -2112,8 +2117,8 @@ function TagManagementPanel(props: { store: GanttStore; onClose: () => void }) {
   }
 
   function handleEditKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
-    if (e.key === 'Escape') cancelEdit();
+    if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); saveEdit(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelEdit(); }
   }
 
   function confirmDelete(name: string) {
@@ -2185,6 +2190,7 @@ function TagManagementPanel(props: { store: GanttStore; onClose: () => void }) {
               value={newName.value}
               onInput={(e) => { newName.value = (e.target as HTMLInputElement).value; }}
               onKeyDown={handleCreateKeyDown}
+              onKeyUp={(e) => { e.stopPropagation(); }}
               placeholder="New tag name..."
               style={{
                 flex: 1, fontSize: '12px', padding: '4px 8px', borderRadius: '4px',
@@ -2236,6 +2242,7 @@ function TagManagementPanel(props: { store: GanttStore; onClose: () => void }) {
                         value={editName.value}
                         onInput={(e) => { editName.value = (e.target as HTMLInputElement).value; }}
                         onKeyDown={handleEditKeyDown}
+                        onKeyUp={(e) => { e.stopPropagation(); }}
                         style={{
                           flex: 1, fontSize: '12px', padding: '3px 6px', borderRadius: '3px',
                           border: '1px solid var(--interactive-accent, #4A90D9)',
@@ -2516,14 +2523,14 @@ function PendingChangesPanel(props: { store: GanttStore; onClose: () => void }) 
                             fontWeight: 500,
                           }}>
                             {f.field === 'keyDates'
-                              ? `${(f.newValue as unknown[]).length} dates`
+                              ? `${((f.newValue as unknown[]) ?? []).length} dates`
                               : f.field === 'keyLinks'
-                                ? `${(f.newValue as unknown[]).length} links`
+                                ? `${((f.newValue as unknown[]) ?? []).length} links`
                                 : f.field === 'tags'
-                                  ? `[${(f.newValue as string[]).join(', ')}]`
+                                  ? `[${(f.newValue as string[] ?? []).join(', ')}]`
                                   : f.field === 'dependencies'
-                                    ? `[${(f.newValue as string[]).join(', ')}]`
-                                    : String(f.newValue)}
+                                    ? `[${(f.newValue as string[] ?? []).join(', ')}]`
+                                    : String(f.newValue ?? '(cleared)')}
                           </span>
                         </div>
                       ))}

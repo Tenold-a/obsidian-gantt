@@ -35,6 +35,27 @@ The system SHALL provide a "Dismiss Selected" action that permanently removes th
 - **WHEN** selected changes are dismissed
 - **THEN** any unselected pending changes SHALL remain in the edits overlay
 
+## ADDED Requirements
+
+### Requirement: Null-safe cleared field display
+The pending changes panel SHALL gracefully handle field overrides whose value is `undefined` (representing a cleared field), displaying a clear indication instead of crashing.
+
+#### Scenario: Cleared tags field displayed safely
+- **WHEN** a project override has `tags: undefined` (all tags removed)
+- **THEN** the panel SHALL display `(cleared)` or an empty-state indicator instead of throwing a TypeError
+
+#### Scenario: Cleared keyDates field displayed safely
+- **WHEN** a project override has `keyDates: undefined` (all key dates removed)
+- **THEN** the panel SHALL display `0 dates` instead of throwing a TypeError
+
+#### Scenario: Cleared keyLinks field displayed safely
+- **WHEN** a project override has `keyLinks: undefined`
+- **THEN** the panel SHALL display `0 links` instead of throwing a TypeError
+
+#### Scenario: Cleared dependencies field displayed safely
+- **WHEN** a task override has `dependencies: undefined`
+- **THEN** the panel SHALL display `[]` instead of throwing a TypeError
+
 ## MODIFIED Requirements
 
 ### Requirement: Push to upstream

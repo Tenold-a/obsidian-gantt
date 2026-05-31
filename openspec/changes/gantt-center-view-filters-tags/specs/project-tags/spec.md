@@ -62,3 +62,16 @@ The system SHALL display project tags as small colored badges in the project pan
 #### Scenario: Project without tags in sidebar
 - **WHEN** a project has no tags
 - **THEN** the project row SHALL show only the project name and color dot without tag badges
+
+## ADDED Requirements
+
+### Requirement: Keyboard event isolation in tag inputs
+Tag input fields in the project detail panel SHALL stop propagation of both `keydown` and `keyup` events to prevent interference with other Obsidian plugins' global keyboard handlers.
+
+#### Scenario: Enter key in tag input does not leak to other plugins
+- **WHEN** the user presses Enter in the project tag input field
+- **THEN** the `keydown` and `keyup` events SHALL NOT propagate beyond the input element via `stopPropagation()`
+
+#### Scenario: Key events in tag management inputs are isolated
+- **WHEN** the user types or presses Enter in the tag management dialog's create or edit input fields
+- **THEN** keyboard events SHALL NOT propagate to parent elements or other plugin handlers

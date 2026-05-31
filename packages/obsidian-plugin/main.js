@@ -3968,10 +3968,16 @@ function ProjectDetail(props) {
     editName.value = false;
   }
   function handleNameKeyDown(e4) {
-    if (e4.key === "Enter")
+    if (e4.key === "Enter") {
+      e4.preventDefault();
+      e4.stopPropagation();
       saveName();
-    if (e4.key === "Escape")
+    }
+    if (e4.key === "Escape") {
+      e4.preventDefault();
+      e4.stopPropagation();
       cancelName();
+    }
   }
   const associatedTasks = store.mergedTasks.value.filter((t4) => t4.projectId.value === project.id);
   const editDescription = useSignal(description);
@@ -4013,6 +4019,7 @@ function ProjectDetail(props) {
   function handleTagInputKeyDown(e4) {
     if (e4.key === "Enter") {
       e4.preventDefault();
+      e4.stopPropagation();
       addTag();
     }
   }
@@ -4083,6 +4090,9 @@ function ProjectDetail(props) {
                 },
                 onBlur: saveName,
                 onKeyDown: handleNameKeyDown,
+                onKeyUp: (e4) => {
+                  e4.stopPropagation();
+                },
                 class: "gantt-inline-edit-input",
                 style: {
                   flex: 1,
@@ -4231,6 +4241,9 @@ function ProjectDetail(props) {
                     editTagInput.value = e4.target.value;
                   },
                   onKeyDown: handleTagInputKeyDown,
+                  onKeyUp: (e4) => {
+                    e4.stopPropagation();
+                  },
                   placeholder: "Add tag...",
                   list: "project-tag-suggestions",
                   style: {
@@ -4762,10 +4775,16 @@ function DetailPanel(props) {
     editTitle.value = false;
   }
   function handleTitleKeyDown(e4) {
-    if (e4.key === "Enter")
+    if (e4.key === "Enter") {
+      e4.preventDefault();
+      e4.stopPropagation();
       saveTitle();
-    if (e4.key === "Escape")
+    }
+    if (e4.key === "Escape") {
+      e4.preventDefault();
+      e4.stopPropagation();
       cancelTitle();
+    }
   }
   const sourceLabel = task.connectorId ? `Connector: ${task.connectorId}` : task.upstreamId ? "Local override" : "Manual entry";
   const sourceStyle = task.upstreamDeleted ? "line-through" : "normal";
@@ -4798,6 +4817,9 @@ function DetailPanel(props) {
               },
               onBlur: saveTitle,
               onKeyDown: handleTitleKeyDown,
+              onKeyUp: (e4) => {
+                e4.stopPropagation();
+              },
               class: "gantt-inline-edit-input",
               style: {
                 flex: 1,
@@ -5114,6 +5136,7 @@ function TagManagementPanel(props) {
   function handleCreateKeyDown(e4) {
     if (e4.key === "Enter") {
       e4.preventDefault();
+      e4.stopPropagation();
       handleCreate();
     }
   }
@@ -5145,10 +5168,14 @@ function TagManagementPanel(props) {
   function handleEditKeyDown(e4) {
     if (e4.key === "Enter") {
       e4.preventDefault();
+      e4.stopPropagation();
       saveEdit();
     }
-    if (e4.key === "Escape")
+    if (e4.key === "Escape") {
+      e4.preventDefault();
+      e4.stopPropagation();
       cancelEdit();
+    }
   }
   function confirmDelete(name) {
     deleteConfirmName.value = name;
@@ -5247,6 +5274,9 @@ function TagManagementPanel(props) {
                       newName.value = e4.target.value;
                     },
                     onKeyDown: handleCreateKeyDown,
+                    onKeyUp: (e4) => {
+                      e4.stopPropagation();
+                    },
                     placeholder: "New tag name...",
                     style: {
                       flex: 1,
@@ -5313,6 +5343,9 @@ function TagManagementPanel(props) {
                           editName.value = e4.target.value;
                         },
                         onKeyDown: handleEditKeyDown,
+                        onKeyUp: (e4) => {
+                          e4.stopPropagation();
+                        },
                         style: {
                           flex: 1,
                           fontSize: "12px",
@@ -5605,7 +5638,7 @@ function PendingChangesPanel(props) {
                       /* @__PURE__ */ u4("span", { style: {
                         color: "var(--interactive-accent, #4A90D9)",
                         fontWeight: 500
-                      }, children: f5.field === "keyDates" ? `${f5.newValue.length} dates` : f5.field === "keyLinks" ? `${f5.newValue.length} links` : f5.field === "tags" ? `[${f5.newValue.join(", ")}]` : f5.field === "dependencies" ? `[${f5.newValue.join(", ")}]` : String(f5.newValue) })
+                      }, children: f5.field === "keyDates" ? `${(f5.newValue ?? []).length} dates` : f5.field === "keyLinks" ? `${(f5.newValue ?? []).length} links` : f5.field === "tags" ? `[${(f5.newValue ?? []).join(", ")}]` : f5.field === "dependencies" ? `[${(f5.newValue ?? []).join(", ")}]` : String(f5.newValue ?? "(cleared)") })
                     ] }, j4)) }),
                     change.changeType === "added" && change.addedSummary && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "3px", marginLeft: "24px" }, children: Object.entries(change.addedSummary).map(([key2, val]) => /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "baseline", gap: "6px" }, children: [
                       /* @__PURE__ */ u4("span", { style: {

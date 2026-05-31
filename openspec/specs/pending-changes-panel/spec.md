@@ -52,6 +52,17 @@ The system SHALL support pushing local changes to upstream systems via an option
 - **WHEN** a push operation fails with an error
 - **THEN** the local edits SHALL be preserved, an error message SHALL be displayed, and the user MAY retry
 
+### Requirement: Null-safe cleared field display
+The pending changes panel SHALL gracefully handle field overrides whose value is `undefined` (representing a cleared field), displaying a clear indication instead of crashing.
+
+#### Scenario: Cleared array field displayed safely
+- **WHEN** a field override has `tags`, `keyDates`, `keyLinks`, or `dependencies` set to `undefined` (field cleared by user)
+- **THEN** the panel SHALL display a zero-length representation (e.g., `0 dates`, `0 links`, `[]`) instead of throwing a TypeError
+
+#### Scenario: Cleared scalar field displayed safely
+- **WHEN** a field override has `description` or `requester` set to `undefined`
+- **THEN** the panel SHALL display `(cleared)` instead of throwing a TypeError
+
 ### Requirement: Connector push method interface
 The `ConnectorModule` interface SHALL be extended with an optional `push` method that accepts a changes payload and returns a success status.
 
