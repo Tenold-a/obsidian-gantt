@@ -2,6 +2,8 @@
 
 [Obsidian](https://obsidian.md) 双窗格甘特图插件。按人员和项目并排展示任务，支持拖拽编辑、连接器数据集成、本地优先的变更追踪。
 
+<img width="1986" height="1016" alt="image" src="https://github.com/user-attachments/assets/34239ab0-616d-4211-bdf9-8dd46bdf55fc" />
+
 ## 功能
 
 ### 双窗格甘特图
