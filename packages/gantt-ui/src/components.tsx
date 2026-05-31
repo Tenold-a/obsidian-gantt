@@ -1,6 +1,10 @@
 import { h } from 'preact';
 import { useRef, useEffect } from 'preact/hooks';
 import type { GanttStore } from './store';
+import type { HolidayConfig } from '@obsidian-gantt/core';
+import { getDayOfWeek, isNonWorkingDay, getDateLabelType, getNonWorkingBlocks } from '@obsidian-gantt/core';
+import type { HolidayConfig, NonWorkingBlock } from '@obsidian-gantt/core';
+import { Icon, isLucideIcon } from './icon';
 
 // ============================================================
 // TimelineGrid — dynamically positioned to cover visible viewport
@@ -16,8 +20,10 @@ export function TimelineGrid(props: {
   bufferPx: number;
   /** Body origin offset in absolute pixels. */
   bodyOriginPx: number;
+  /** Optional holiday config for weekend/holiday column shading. */
+  holidayConfig?: HolidayConfig;
 }) {
-  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx } = props;
+  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx, holidayConfig } = props;
   const dayPx = dayWidth;
   const weekPx = dayWidth * 7;
 
@@ -26,6 +32,60 @@ export function TimelineGrid(props: {
   const absAlignedLeft = Math.floor((absLeft - bufferPx) / dayPx) * dayPx;
   const left = absAlignedLeft - bodyOriginPx;
   const width = viewportWidth + 2 * bufferPx;
+
+  // Build background layers
+  const layers: string[] = [
+    // Day lines
+    `repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent ${dayPx - 1}px,
+      var(--gantt-grid-line-day, #e0e0e0) ${dayPx - 1}px,
+      var(--gantt-grid-line-day, #e0e0e0) ${dayPx}px
+    )`,
+    // Week lines
+    `repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent ${weekPx - 1}px,
+      var(--gantt-grid-line-week, #c0c0c0) ${weekPx - 1}px,
+      var(--gantt-grid-line-week, #c0c0c0) ${weekPx}px
+    )`,
+  ];
+
+  // Non-working day shading: hard-stop gradient for weekends + holidays
+  if (holidayConfig && (holidayConfig.weekendsEnabled || holidayConfig.holidaysEnabled)) {
+    const gridStartDate = absolutePixelToDate(absAlignedLeft, dayWidth);
+    const totalDays = Math.ceil(width / dayPx) + 2;
+    const stops: string[] = [];
+    let inNWD = false;
+
+    for (let i = 0; i <= totalDays; i++) {
+      const date = addDaysToDate(gridStartDate, i);
+      const isNWD = isNonWorkingDay(date, holidayConfig);
+      const px = i * dayPx;
+      if (isNWD && !inNWD) {
+        // Entering non-working: hard stop from transparent to shaded
+        stops.push(`transparent ${px}px`);
+        stops.push(`var(--gantt-weekend-bg, rgba(0,0,0,0.06)) ${px}px`);
+        inNWD = true;
+      } else if (!isNWD && inNWD) {
+        // Leaving non-working: hard stop from shaded to transparent
+        stops.push(`var(--gantt-weekend-bg, rgba(0,0,0,0.06)) ${px}px`);
+        stops.push(`transparent ${px}px`);
+        inNWD = false;
+      }
+    }
+    if (inNWD) {
+      const endPx = (totalDays + 1) * dayPx;
+      stops.push(`var(--gantt-weekend-bg, rgba(0,0,0,0.06)) ${endPx}px`);
+      stops.push(`transparent ${endPx}px`);
+    }
+
+    if (stops.length > 0) {
+      layers.push(`linear-gradient(to right, ${stops.join(', ')})`);
+    }
+  }
 
   return (
     <div
@@ -36,19 +96,7 @@ export function TimelineGrid(props: {
         left: `${left}px`,
         width: `${width}px`,
         height: '100%',
-        background: `repeating-linear-gradient(
-          to right,
-          transparent 0,
-          transparent ${dayPx - 1}px,
-          var(--gantt-grid-line-day, #e0e0e0) ${dayPx - 1}px,
-          var(--gantt-grid-line-day, #e0e0e0) ${dayPx}px
-        ), repeating-linear-gradient(
-          to right,
-          transparent 0,
-          transparent ${weekPx - 1}px,
-          var(--gantt-grid-line-week, #c0c0c0) ${weekPx - 1}px,
-          var(--gantt-grid-line-week, #c0c0c0) ${weekPx}px
-        )`,
+        background: layers.join(', '),
         pointerEvents: 'none',
       }}
     />
@@ -95,8 +143,10 @@ export function TimeHeader(props: {
   /** Buffer in pixels — must match TimelineGrid's bufferPx for alignment. */
   bufferPx: number;
   bodyOriginPx: number;
+  /** Optional holiday config for non-working day label styling. */
+  holidayConfig?: HolidayConfig;
 }) {
-  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx } = props;
+  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx, holidayConfig } = props;
 
   // Align rangeStart to the SAME absolute pixel boundary as TimelineGrid
   const visibleStartAbsPx = bodyOriginPx + scrollLeft;
@@ -168,6 +218,23 @@ export function TimeHeader(props: {
         >
           {Array.from({ length: rangeTotalDays }, (_, i) => {
             const date = addDaysToDate(rangeStart, i);
+            let labelColor = 'var(--text-muted, #999)';
+            let indicator = '';
+            let indicatorColor = '';
+            if (holidayConfig) {
+              const labelType = getDateLabelType(date, holidayConfig);
+              if (labelType === 'holiday') {
+                labelColor = 'var(--gantt-holiday-text, #c62828)';
+                indicator = '休';
+                indicatorColor = 'var(--gantt-holiday-text, #c62828)';
+              } else if (labelType === 'makeup') {
+                labelColor = 'var(--text-normal, #333)';
+                indicator = '班';
+                indicatorColor = 'var(--gantt-makeup-text, #1565c0)';
+              } else if (labelType === 'weekend') {
+                labelColor = 'var(--gantt-weekend-text, var(--text-faint))';
+              }
+            }
             return (
               <div
                 key={i}
@@ -178,10 +245,19 @@ export function TimeHeader(props: {
                   textAlign: 'center',
                   fontSize: '10px',
                   lineHeight: '20px',
-                  color: 'var(--text-muted, #999)',
+                  color: labelColor,
                 }}
               >
                 {getDayLabel(date)}
+                {indicator && (
+                  <span style={{
+                    fontSize: '7px',
+                    color: indicatorColor,
+                    marginLeft: '1px',
+                    verticalAlign: 'super',
+                    lineHeight: 1,
+                  }}>{indicator}</span>
+                )}
               </div>
             );
           })}
@@ -242,12 +318,37 @@ export function TaskBar(props: {
   paneType: 'person' | 'project';
   onPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
   onClick: (taskId: string) => void;
+  /** Task start date for non-working day overlay computation. */
+  startDate?: string | null;
+  /** Task end date for non-working day overlay computation. */
+  endDate?: string | null;
+  /** Body origin offset for pixel conversion. */
+  bodyOriginPx?: number;
+  /** Day width for pixel conversion. */
+  dayWidth?: number;
+  /** Holiday config for non-working day overlay rendering. */
+  holidayConfig?: HolidayConfig;
 }) {
-  const { data, groupStartY, laneIndex, rowHeight, laneOffset, paneType } = props;
+  const { data, groupStartY, laneIndex, rowHeight, laneOffset, paneType,
+    startDate, endDate, bodyOriginPx, dayWidth, holidayConfig } = props;
   const barHeight = rowHeight * 0.6;
   const barTop = groupStartY + (rowHeight - barHeight) / 2 + laneIndex * laneOffset;
   const barWidth = Math.max(data.width, 4);
   const showHandles = barWidth >= 12;
+
+  // Compute non-working day overlays
+  let overlays: { left: number; width: number }[] = [];
+  if (startDate && endDate && bodyOriginPx !== undefined && dayWidth && holidayConfig) {
+    const blocks = getNonWorkingBlocks(startDate, endDate, holidayConfig);
+    overlays = blocks.map(block => {
+      const blockLeft = dateToAbsolutePixel(block.start, dayWidth) - bodyOriginPx;
+      const blockRight = dateToAbsolutePixel(block.end, dayWidth) - bodyOriginPx + dayWidth;
+      return {
+        left: blockLeft - data.left,
+        width: blockRight - blockLeft,
+      };
+    });
+  }
 
   return (
     <div
@@ -288,6 +389,29 @@ export function TaskBar(props: {
       }}
       title={`${data.title}`}
     >
+      {/* Non-working day overlays */}
+      {overlays.map((ol, i) => (
+        <div
+          key={`nw-${i}`}
+          style={{
+            position: 'absolute',
+            left: `${ol.left}px`,
+            top: 0,
+            width: `${Math.max(ol.width, 0)}px`,
+            height: '100%',
+            background: `repeating-linear-gradient(
+              -45deg,
+              transparent 0,
+              transparent 3px,
+              var(--gantt-bar-holiday-stripe, rgba(255,255,255,0.35)) 3px,
+              var(--gantt-bar-holiday-stripe, rgba(255,255,255,0.35)) 6px
+            )`,
+            pointerEvents: 'none',
+            zIndex: 1,
+            borderRadius: 'inherit',
+          }}
+        />
+      ))}
       {showHandles && <span class="gantt-bar-handle gantt-bar-handle-left" />}
       {data.width > 40 ? data.title : ''}
       {showHandles && <span class="gantt-bar-handle gantt-bar-handle-right" />}
@@ -429,7 +553,7 @@ export function KeyDateMarker(props: {
   icon?: string;
   onPointerDown?: (e: PointerEvent) => void;
 }) {
-  const size = 10;
+  const size = 16;
   const bg = props.color ?? 'var(--gantt-key-date-color, #E5C07B)';
   return (
     <div
@@ -439,7 +563,7 @@ export function KeyDateMarker(props: {
       style={{
         position: 'absolute',
         left: `${props.leftPx - size / 2}px`,
-        top: `${props.groupTopY + 3}px`,
+        top: `${props.groupTopY + 1}px`,
         width: `${size}px`,
         height: `${size}px`,
         background: bg,
@@ -452,10 +576,21 @@ export function KeyDateMarker(props: {
         justifyContent: 'center',
       }}
     >
-      {props.icon && (
+      {props.icon && isLucideIcon(props.icon) ? (
         <span style={{
           transform: 'rotate(-45deg)',
-          fontSize: '7px',
+          color: '#fff',
+          pointerEvents: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}>
+          <Icon name={props.icon} size={10} />
+        </span>
+      ) : props.icon ? (
+        <span style={{
+          transform: 'rotate(-45deg)',
+          fontSize: '10px',
           color: '#fff',
           lineHeight: 1,
           fontWeight: 'bold',
@@ -463,7 +598,7 @@ export function KeyDateMarker(props: {
         }}>
           {props.icon}
         </span>
-      )}
+      ) : null}
     </div>
   );
 }

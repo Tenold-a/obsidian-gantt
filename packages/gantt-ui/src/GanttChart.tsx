@@ -12,7 +12,8 @@ import {
   isTodayDate,
 } from './components';
 import type { LocalTask } from '@obsidian-gantt/core';
-import { daysBetween, todayString } from '@obsidian-gantt/core';
+import { daysBetween, todayString, parseICS, classifyICSEvents } from '@obsidian-gantt/core';
+import { Icon, CURATED_ICONS } from './icon';
 import { createDragHandler, dragState } from './drag';
 import {
   TIMELINE_ORIGIN,
@@ -73,7 +74,7 @@ function TaskList(props: {
       }}
     >
       {/* Spacer to match header height */}
-      <div style={{ height: '44px', borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)', display: 'flex', alignItems: 'center', paddingLeft: '8px', paddingRight: '8px' }}>
+      <div style={{ height: '44px', borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)', display: 'flex', alignItems: 'center', paddingLeft: '8px', paddingRight: '8px', background: 'var(--background-primary, #ffffff)', position: 'relative', zIndex: 1 }}>
         {props.headerContent}
       </div>
       {/* Rows — synced vertically with timeline via translateY */}
@@ -419,6 +420,7 @@ function Timeline(props: {
           viewportWidth={viewportWidth.value}
           bufferPx={GRID_BUFFER_PX}
           bodyOriginPx={bodyOriginPx}
+          holidayConfig={store.holidayConfig.value}
         />
       </div>
 
@@ -457,7 +459,7 @@ function Timeline(props: {
         }}
       >
         {/* Grid */}
-        <TimelineGrid dayWidth={DAY_WIDTH} scrollLeft={scrollLeft} viewportWidth={viewportWidth.value} bufferPx={GRID_BUFFER_PX} bodyOriginPx={bodyOriginPx} />
+        <TimelineGrid dayWidth={DAY_WIDTH} scrollLeft={scrollLeft} viewportWidth={viewportWidth.value} bufferPx={GRID_BUFFER_PX} bodyOriginPx={bodyOriginPx} holidayConfig={store.holidayConfig.value} />
 
         {/* Today line */}
         <TodayLine
@@ -520,6 +522,11 @@ function Timeline(props: {
             laneOffset={LANE_OFFSET}
             onPointerDown={props.onTaskPointerDown}
             onClick={props.onTaskClick}
+            startDate={task.startDate.value}
+            endDate={task.endDate.value}
+            bodyOriginPx={bodyOriginPx}
+            dayWidth={DAY_WIDTH}
+            holidayConfig={store.holidayConfig.value}
           />
         ))}
 
@@ -842,12 +849,12 @@ function GanttPane(props: {
 const PRESET_COLORS = ['#E06C75', '#61AFEF', '#98C379', '#E5C07B', '#C678DD', '#56B6C2', '#D19A66', '#4A90D9'];
 
 const KEY_DATE_PRESETS = [
-  { name: '验收时间', color: '#98C379', icon: '✓' },
-  { name: '上线时间', color: '#61AFEF', icon: '▲' },
-  { name: '提测时间', color: '#C678DD', icon: '◆' },
-  { name: '评审时间', color: '#E5C07B', icon: '◎' },
-  { name: '交付时间', color: '#56B6C2', icon: '●' },
-  { name: '启动时间', color: '#4A90D9', icon: '▶' },
+  { name: '验收时间', color: '#98C379', icon: 'check' },
+  { name: '上线时间', color: '#61AFEF', icon: 'triangle' },
+  { name: '提测时间', color: '#C678DD', icon: 'diamond' },
+  { name: '评审时间', color: '#E5C07B', icon: 'target' },
+  { name: '交付时间', color: '#56B6C2', icon: 'circle' },
+  { name: '启动时间', color: '#4A90D9', icon: 'play' },
 ];
 
 // ============================================================
@@ -1012,6 +1019,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
   const editTags = useSignal<string[]>([...projectTags]);
   const editTagInput = useSignal('');
   const editTagInputRef = useRef<HTMLInputElement | null>(null);
+  const iconPickerOpen = useSignal<number | null>(null);
 
   // Collect all known tags for autocomplete (from tag definitions if available, else from all projects)
   const knownTags = useMemo(() => {
@@ -1170,7 +1178,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
                   background: 'transparent', cursor: 'pointer', fontSize: '13px',
                   color: 'var(--text-muted, #999)', lineHeight: 1,
                 }}
-              >✎</button>
+              ><Icon name="pencil" size={13} /></button>
               <button
                 onClick={() => props.onDelete?.(project.id, project.name)}
                 title="Delete project"
@@ -1179,7 +1187,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
                   background: 'transparent', cursor: 'pointer', fontSize: '13px',
                   color: 'var(--text-error, #e00)', lineHeight: 1,
                 }}
-              >🗑</button>
+              ><Icon name="trash-2" size={13} /></button>
               <button
                 onClick={() => store.selectEntity(null)}
                 title="Close detail panel"
@@ -1188,7 +1196,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
                   background: 'transparent', cursor: 'pointer', fontSize: '14px',
                   color: 'var(--text-muted, #999)', lineHeight: 1,
                 }}
-              >✕</button>
+              ><Icon name="x" size={14} /></button>
             </>
           )}
         </div>
@@ -1399,11 +1407,11 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
                   }}
                 >
                   <span style={{
-                    display: 'inline-block', width: '12px', height: '12px', lineHeight: '12px',
-                    textAlign: 'center', fontSize: '9px', borderRadius: '2px',
+                    display: 'inline-block', width: '12px', height: '12px',
+                    textAlign: 'center', borderRadius: '2px',
                     background: preset.color, color: '#fff', marginRight: '3px',
                   }}>
-                    {preset.icon}
+                    <Icon name={preset.icon} size={9} />
                   </span>
                   {preset.name}
                 </button>
@@ -1423,23 +1431,67 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
                   title="Marker color"
                   style={{ width: '22px', height: '22px', padding: '0', border: 'none', borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }}
                 />
-                <input
-                  type="text"
-                  value={kd.icon ?? ''}
-                  onInput={(e) => {
-                    const next = [...editKeyDates.value];
-                    next[i] = { ...next[i], icon: (e.target as HTMLInputElement).value || undefined };
-                    editKeyDates.value = next;
-                  }}
-                  placeholder="◆"
-                  maxLength={2}
-                  title="Icon (1-2 chars shown in marker)"
-                  style={{
-                    width: '22px', fontSize: '11px', padding: '3px', textAlign: 'center', borderRadius: '3px', flexShrink: 0,
-                    border: '1px solid var(--background-modifier-border, #ccc)',
-                    background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
-                  }}
-                />
+                <div style={{ position: 'relative', flexShrink: 0 }}>
+                  <button
+                    onClick={() => { iconPickerOpen.value = iconPickerOpen.value === i ? null : i; }}
+                    title={kd.icon || 'Select icon'}
+                    style={{
+                      width: '28px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      border: '1px solid var(--background-modifier-border, #ccc)', borderRadius: '3px',
+                      background: 'var(--background-primary, #fff)', cursor: 'pointer', padding: 0,
+                    }}
+                  >
+                    {kd.icon ? <Icon name={kd.icon} size={12} /> : <span style={{ fontSize: '8px', color: 'var(--text-muted, #999)' }}>◆</span>}
+                  </button>
+                  {iconPickerOpen.value === i && (
+                    <div style={{
+                      position: 'absolute', top: '100%', left: 0, zIndex: 100,
+                      background: 'var(--background-primary, #fff)',
+                      border: '1px solid var(--background-modifier-border, #ccc)',
+                      borderRadius: '4px', padding: '4px',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                      minWidth: '140px',
+                    }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '2px' }}>
+                        {CURATED_ICONS.map(iconName => (
+                          <button
+                            key={iconName}
+                            onClick={() => {
+                              const next = [...editKeyDates.value];
+                              next[i] = { ...next[i], icon: iconName };
+                              editKeyDates.value = next;
+                              iconPickerOpen.value = null;
+                            }}
+                            title={iconName}
+                            style={{
+                              width: '28px', height: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              border: (kd.icon === iconName) ? '1px solid var(--interactive-accent, #7B61F8)' : '1px solid transparent',
+                              borderRadius: '3px', background: 'transparent', cursor: 'pointer', padding: 0,
+                            }}
+                          >
+                            <Icon name={iconName} size={14} />
+                          </button>
+                        ))}
+                      </div>
+                      {kd.icon && (
+                        <button
+                          onClick={() => {
+                            const next = [...editKeyDates.value];
+                            next[i] = { ...next[i], icon: undefined };
+                            editKeyDates.value = next;
+                            iconPickerOpen.value = null;
+                          }}
+                          style={{
+                            width: '100%', marginTop: '4px', padding: '2px', fontSize: '10px',
+                            border: '1px solid var(--background-modifier-border, #ccc)', borderRadius: '3px',
+                            background: 'var(--background-primary, #fff)', cursor: 'pointer',
+                            color: 'var(--text-muted, #999)',
+                          }}
+                        >Clear icon</button>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={kd.name}
@@ -1503,8 +1555,8 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
                     transform: 'rotate(45deg)',
                   }} />
                   {kd.icon && (
-                    <span style={{ fontSize: '9px', fontWeight: 'bold', color: kd.color ?? 'var(--text-muted, #999)', flexShrink: 0 }}>
-                      {kd.icon}
+                    <span style={{ color: kd.color ?? 'var(--text-muted, #999)', flexShrink: 0 }}>
+                      <Icon name={kd.icon} size={11} />
                     </span>
                   )}
                   <span style={{ color: 'var(--text-muted, #999)', minWidth: '80px' }}>{kd.date}</span>
@@ -1782,7 +1834,7 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
               lineHeight: 1, padding: '0 2px', color: 'var(--text-error, #e00)',
             }}
             title="Delete task"
-          >🗑</button>
+          ><Icon name="trash-2" size={14} /></button>
           <button
             onClick={() => store.selectEntity(null)}
             style={{
@@ -1790,7 +1842,7 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
               lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
             }}
             title="Close detail panel"
-          >x</button>
+          ><Icon name="x" size={16} /></button>
         </div>
       </div>
 
@@ -2266,7 +2318,7 @@ function TagManagementPanel(props: { store: GanttStore; onClose: () => void }) {
                         onClick={() => startEdit(tag)}
                         title="Edit tag"
                         style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-muted, #999)', padding: '0 2px' }}
-                      >✎</button>
+                      ><Icon name="pencil" size={13} /></button>
                       {deleteConfirmName.value === tag.name ? (
                         <>
                           <button
@@ -2278,14 +2330,14 @@ function TagManagementPanel(props: { store: GanttStore; onClose: () => void }) {
                             onClick={() => { deleteConfirmName.value = null; }}
                             title="Cancel delete"
                             style={{ background: 'none', border: '1px solid var(--background-modifier-border, #ccc)', borderRadius: '3px', cursor: 'pointer', fontSize: '10px', color: 'var(--text-muted, #999)', padding: '2px 4px' }}
-                          >x</button>
+                          ><Icon name="x" size={10} /></button>
                         </>
                       ) : (
                         <button
                           onClick={() => confirmDelete(tag.name)}
                           title="Delete tag"
                           style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', color: 'var(--text-error, #e00)', padding: '0 2px' }}
-                        >🗑</button>
+                        ><Icon name="trash-2" size={13} /></button>
                       )}
                     </>
                   )}
@@ -2781,6 +2833,296 @@ export function DualPane(props: {
 }
 
 // ============================================================
+// HolidaySettingsPanel — non-working day configuration
+// ============================================================
+
+function HolidaySettingsPanel(props: { store: GanttStore; onClose: () => void }) {
+  const { store, onClose } = props;
+  const hc = store.holidayConfig.value;
+  const importing = useSignal(false);
+  const importError = useSignal<string | null>(null);
+  const urlInput = useSignal('');
+
+  async function mergeClassified(holidays: string[], makeup: string[]) {
+    if (holidays.length === 0 && makeup.length === 0) {
+      importError.value = 'No events found in the .ics data';
+      return;
+    }
+    const existingHolidays = new Set(store.holidayConfig.value.holidayDates);
+    const existingMakeup = new Set(store.holidayConfig.value.makeupWorkdays);
+    for (const d of holidays) existingHolidays.add(d);
+    for (const d of makeup) { existingMakeup.add(d); existingHolidays.delete(d); }
+    await store.saveHolidayConfig({
+      ...store.holidayConfig.value,
+      holidayDates: [...existingHolidays].sort(),
+      makeupWorkdays: [...existingMakeup].sort(),
+    });
+    urlInput.value = '';
+    importError.value = null;
+  }
+
+  async function handleImportFile() {
+    const platform = (store as any)._platform as { pickFile?: (accept: string) => Promise<{ name: string; content: string } | null> } | undefined;
+    if (!platform?.pickFile) { importError.value = 'File picker not available'; return; }
+    importing.value = true;
+    importError.value = null;
+    try {
+      const file = await platform.pickFile('.ics');
+      if (!file) { importing.value = false; return; }
+      const events = parseICS(file.content);
+      const { holidayDates, makeupWorkdays } = classifyICSEvents(events);
+      await mergeClassified(holidayDates, makeupWorkdays);
+    } catch (e) {
+      importError.value = e instanceof Error ? e.message : String(e);
+    } finally { importing.value = false; }
+  }
+
+  async function handleFetchUrl() {
+    const url = urlInput.value.trim();
+    if (!url) return;
+    importing.value = true;
+    importError.value = null;
+    try {
+      const platform = (store as any)._platform as { fetch: typeof globalThis.fetch } | undefined;
+      const response = await (platform?.fetch ?? globalThis.fetch)(url);
+      if (!response.ok) { importError.value = `Failed to fetch: ${response.status} ${response.statusText}`; return; }
+      const text = await response.text();
+      const events = parseICS(text);
+      const { holidayDates, makeupWorkdays } = classifyICSEvents(events);
+      await mergeClassified(holidayDates, makeupWorkdays);
+    } catch (e) {
+      importError.value = e instanceof Error ? e.message : String(e);
+    } finally { importing.value = false; }
+  }
+
+  async function removeHoliday(date: string) {
+    const cfg = store.holidayConfig.value;
+    await store.saveHolidayConfig({ ...cfg, holidayDates: cfg.holidayDates.filter(d => d !== date) });
+  }
+
+  async function removeMakeup(date: string) {
+    const cfg = store.holidayConfig.value;
+    await store.saveHolidayConfig({ ...cfg, makeupWorkdays: cfg.makeupWorkdays.filter(d => d !== date) });
+  }
+
+  async function clearAll() {
+    await store.saveHolidayConfig({ ...store.holidayConfig.value, holidayDates: [], makeupWorkdays: [] });
+  }
+
+  const holidayCount = hc.holidayDates.length;
+  const makeupCount = hc.makeupWorkdays.length;
+  const totalCount = holidayCount + makeupCount;
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        zIndex: 100,
+        background: 'var(--background-primary, #fff)',
+        border: '1px solid var(--background-modifier-border, #ccc)',
+        borderRadius: '8px',
+        padding: '20px',
+        width: '360px',
+        maxHeight: '80vh',
+        overflowY: 'auto',
+        boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>Non-working Days</h3>
+        <button
+          onClick={onClose}
+          style={{
+            background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px',
+            color: 'var(--text-muted, #999)', padding: '0 4px', lineHeight: 1,
+          }}
+        >
+          x
+        </button>
+      </div>
+
+      {/* Weekend toggle */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', cursor: 'pointer', fontSize: '13px' }}>
+        <input
+          type="checkbox"
+          checked={hc.weekendsEnabled}
+          onChange={(e) => {
+            store.saveHolidayConfig({ ...store.holidayConfig.value, weekendsEnabled: (e.target as HTMLInputElement).checked });
+          }}
+        />
+        Show weekends as non-working
+      </label>
+
+      {/* Holiday toggle */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', cursor: 'pointer', fontSize: '13px' }}>
+        <input
+          type="checkbox"
+          checked={hc.holidaysEnabled}
+          onChange={(e) => {
+            store.saveHolidayConfig({ ...store.holidayConfig.value, holidaysEnabled: (e.target as HTMLInputElement).checked });
+          }}
+        />
+        Show imported holidays as non-working
+      </label>
+
+      {/* Import section */}
+      <div style={{ borderTop: '1px solid var(--background-modifier-border, #ddd)', paddingTop: '12px', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+          <button
+            onClick={handleImportFile}
+            disabled={importing.value}
+            style={{
+              padding: '6px 14px',
+              border: '1px solid var(--interactive-accent, #4A90D9)',
+              borderRadius: '4px',
+              background: 'var(--interactive-accent, #4A90D9)',
+              color: '#fff',
+              cursor: 'pointer',
+              fontSize: '12px',
+              fontWeight: 500,
+              opacity: importing.value ? 0.6 : 1,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {importing.value ? 'Importing...' : 'Import .ics file'}
+          </button>
+          <span style={{ fontSize: '11px', color: 'var(--text-muted, #999)', alignSelf: 'center' }}>or</span>
+        </div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          <input
+            type="url"
+            placeholder="https://...ics URL"
+            value={urlInput.value}
+            onInput={(e) => { urlInput.value = (e.target as HTMLInputElement).value; }}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleFetchUrl(); }}
+            style={{
+              flex: 1,
+              padding: '5px 8px',
+              fontSize: '11px',
+              borderRadius: '3px',
+              border: '1px solid var(--background-modifier-border, #ccc)',
+              background: 'var(--background-primary, #fff)',
+              color: 'var(--text-normal, #333)',
+            }}
+          />
+          <button
+            onClick={handleFetchUrl}
+            disabled={importing.value || !urlInput.value.trim()}
+            style={{
+              padding: '5px 12px',
+              border: '1px solid var(--background-modifier-border, #ccc)',
+              borderRadius: '3px',
+              background: 'var(--background-secondary, #f5f5f5)',
+              cursor: importing.value || !urlInput.value.trim() ? 'default' : 'pointer',
+              fontSize: '11px',
+              opacity: importing.value || !urlInput.value.trim() ? 0.5 : 1,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Fetch
+          </button>
+        </div>
+        {importError.value && (
+          <div style={{ color: 'var(--text-error, #e53935)', fontSize: '11px', marginTop: '6px' }}>{importError.value}</div>
+        )}
+      </div>
+
+      {/* Holiday date list */}
+      {totalCount > 0 && (
+        <div style={{ borderTop: '1px solid var(--background-modifier-border, #ddd)', paddingTop: '12px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ fontSize: '12px', fontWeight: 500 }}>{totalCount} date{totalCount !== 1 ? 's' : ''}</span>
+            <button
+              onClick={clearAll}
+              style={{
+                padding: '2px 8px', border: '1px solid var(--text-error, #e53935)',
+                borderRadius: '3px', background: 'transparent',
+                color: 'var(--text-error, #e53935)', cursor: 'pointer', fontSize: '11px',
+              }}
+            >
+              Clear all
+            </button>
+          </div>
+
+          {/* Holidays 休 */}
+          {holidayCount > 0 && (
+            <div style={{ marginBottom: makeupCount > 0 ? '12px' : '0' }}>
+              <div style={{ fontSize: '11px', fontWeight: 500, color: 'var(--gantt-holiday-text, #c62828)', marginBottom: '4px' }}>
+                Holidays 休 ({holidayCount})
+              </div>
+              <div style={{ maxHeight: '140px', overflowY: 'auto', fontSize: '12px' }}>
+                {store.holidayConfig.value.holidayDates.map(date => (
+                  <div
+                    key={date}
+                    style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      padding: '3px 0', borderBottom: '1px solid var(--background-modifier-border, #eee)',
+                    }}
+                  >
+                    <span>{date}</span>
+                    <button
+                      onClick={() => removeHoliday(date)}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: 'var(--text-muted, #999)', fontSize: '14px', padding: '0 4px',
+                      }}
+                      title="Remove"
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Makeup workdays 班 */}
+          {makeupCount > 0 && (
+            <div>
+              <div style={{ fontSize: '11px', fontWeight: 500, color: 'var(--gantt-makeup-text, #1565c0)', marginBottom: '4px' }}>
+                Makeup workdays 班 ({makeupCount})
+              </div>
+              <div style={{ maxHeight: '140px', overflowY: 'auto', fontSize: '12px' }}>
+                {store.holidayConfig.value.makeupWorkdays.map(date => (
+                  <div
+                    key={date}
+                    style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      padding: '3px 0', borderBottom: '1px solid var(--background-modifier-border, #eee)',
+                    }}
+                  >
+                    <span>{date}</span>
+                    <button
+                      onClick={() => removeMakeup(date)}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: 'var(--text-muted, #999)', fontSize: '14px', padding: '0 4px',
+                      }}
+                      title="Remove"
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {totalCount === 0 && (
+        <div style={{ color: 'var(--text-muted, #999)', fontSize: '12px', textAlign: 'center', padding: '8px 0' }}>
+          No imported dates. Import an .ics calendar file or fetch from URL.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // FilterMultiSelect — dropdown multi-select for filter controls
 // ============================================================
 
@@ -2874,6 +3216,7 @@ export function GanttChart(props: {
   const confirmState = useSignal<{ message: string; onConfirm: () => void } | null>(null);
   const showPendingPanel = useSignal(false);
   const showTagPanel = useSignal(false);
+  const showHolidayPanel = useSignal(false);
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   function scheduleSave() {
@@ -2916,6 +3259,10 @@ export function GanttChart(props: {
         }
         if (showTagPanel.value) {
           showTagPanel.value = false;
+          return;
+        }
+        if (showHolidayPanel.value) {
+          showHolidayPanel.value = false;
           return;
         }
         store.selectEntity(null);
@@ -3050,6 +3397,21 @@ export function GanttChart(props: {
         >
           Tags
         </button>
+        <button
+          class="gantt-btn"
+          title="Non-working day settings"
+          style={{
+            padding: '4px 12px',
+            border: '1px solid var(--background-modifier-border, #ccc)',
+            borderRadius: '4px',
+            background: 'var(--background-secondary, #f5f5f5)',
+            cursor: 'pointer',
+            fontSize: '12px',
+          }}
+          onClick={() => { showHolidayPanel.value = true; }}
+        >
+          Calendar
+        </button>
         <span style={{ color: 'var(--text-muted, #999)', fontSize: '12px' }}>
           {store.mergedTasks.value.length} tasks · {store.personGroups.value.length} people · {store.projectGroups.value.length} projects
         </span>
@@ -3132,6 +3494,12 @@ export function GanttChart(props: {
         <TagManagementPanel
           store={store}
           onClose={() => { showTagPanel.value = false; }}
+        />
+      )}
+      {showHolidayPanel.value && (
+        <HolidaySettingsPanel
+          store={store}
+          onClose={() => { showHolidayPanel.value = false; }}
         />
       )}
     </div>

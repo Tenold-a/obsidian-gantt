@@ -17,14 +17,23 @@ export {
   snapToDay,
   isToday,
   todayString,
+  getDayOfWeek,
+  isWeekend,
+  isNonWorkingDay,
+  getDateLabelType,
+  getNonWorkingBlocks,
   getMonthRanges,
   computeTimelineRange,
 } from './date-utils';
-export type { MonthRange } from './date-utils';
+export type { MonthRange, HolidayConfig, NonWorkingBlock, DateLabelType } from './date-utils';
 
 // Re-export CSV parser
 export { parseCSV } from './csv-parser';
 export type { CsvParseOptions } from './csv-parser';
+
+// Re-export ICS parser
+export { parseICS, parseICSDates, classifyICSEvents } from './ics-parser';
+export type { ICSEvent } from './ics-parser';
 
 /** Lifecycle status for tasks and projects. */
 export type TaskStatus = 'pending' | 'in-progress' | 'cancelled' | 'pending-online' | 'online' | 'completed';
@@ -124,6 +133,8 @@ export interface TagDefinition {
   name: string;
   color: string;
 }
+
+export type { HolidayConfig } from './date-utils';
 
 /** Standardised output from a connector's transform() function. */
 export interface CanonicalData {
@@ -331,6 +342,10 @@ export interface GanttPlatform {
   createConnectorContext: (config: Record<string, unknown>) => ConnectorContext;
   watcher: IWatcher | null;
   theme: Theme;
+  /** Render a Lucide SVG icon inside the given element. Obsidian delegates to Obsidian.setIcon. */
+  setIcon(el: HTMLElement, name: string): void;
+  /** Open a file picker dialog. Returns the file name and content, or null if cancelled. */
+  pickFile?: (accept: string) => Promise<{ name: string; content: string } | null>;
 }
 
 // ============================================================

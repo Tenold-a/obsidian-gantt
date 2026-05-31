@@ -83,6 +83,35 @@ const platform: GanttPlatform = {
   createConnectorContext: (config: Record<string, unknown>) => createWebConnectorContext(config),
   watcher: null,
   theme: browserTheme,
+  setIcon(el: HTMLElement, name: string) {
+    el.textContent = name;
+  },
+  pickFile: (accept: string) => {
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = accept;
+      input.style.display = 'none';
+      let resolved = false;
+      input.onchange = async () => {
+        resolved = true;
+        const file = input.files?.[0];
+        if (!file) { resolve(null); return; }
+        const content = await file.text();
+        resolve({ name: file.name, content });
+      };
+      const onFocus = () => {
+        setTimeout(() => {
+          if (!resolved) { resolved = true; resolve(null); }
+          window.removeEventListener('focus', onFocus);
+        }, 300);
+      };
+      window.addEventListener('focus', onFocus);
+      document.body.appendChild(input);
+      input.click();
+      setTimeout(() => { input.remove(); }, 1000);
+    });
+  },
 };
 
 // ── Seed sample data (runs once) ───────────────────────────────────

@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => GanttPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // ../../node_modules/preact/dist/preact.module.js
 var n;
@@ -1278,6 +1278,53 @@ function daysBetween(a4, b3) {
   const db = parseDate(b3);
   return Math.round((db.getTime() - da.getTime()) / 864e5);
 }
+function getDayOfWeek(date) {
+  return parseDate(date).getUTCDay();
+}
+function isWeekend(date) {
+  const dow = getDayOfWeek(date);
+  return dow === 0 || dow === 6;
+}
+function getDateLabelType(date, config) {
+  if (config.holidaysEnabled && config.holidayDates?.includes(date))
+    return "holiday";
+  if (config.weekendsEnabled && isWeekend(date)) {
+    if (config.holidaysEnabled && config.makeupWorkdays?.includes(date))
+      return "makeup";
+    return "weekend";
+  }
+  return "normal";
+}
+function isNonWorkingDay(date, config) {
+  const type = getDateLabelType(date, config);
+  return type === "weekend" || type === "holiday";
+}
+function getNonWorkingBlocks(startDate, endDate, config) {
+  if (!config.weekendsEnabled && !config.holidaysEnabled)
+    return [];
+  if (!startDate || !endDate)
+    return [];
+  const blocks = [];
+  let blockStart = null;
+  const totalDays = daysBetween(startDate, endDate) + 1;
+  for (let i5 = 0; i5 < totalDays; i5++) {
+    const date = addDays(startDate, i5);
+    if (isNonWorkingDay(date, config)) {
+      if (blockStart === null) {
+        blockStart = date;
+      }
+    } else {
+      if (blockStart !== null) {
+        blocks.push({ start: blockStart, end: addDays(date, -1) });
+        blockStart = null;
+      }
+    }
+  }
+  if (blockStart !== null) {
+    blocks.push({ start: blockStart, end: endDate });
+  }
+  return blocks;
+}
 function addDays(date, days) {
   const d4 = parseDate(date);
   const result = new Date(d4.getTime() + days * 864e5);
@@ -1373,6 +1420,86 @@ function parseRow(row, delimiter) {
   fields.push(current);
   return fields;
 }
+function parseDateStr(raw) {
+  const y4 = raw.slice(0, 4);
+  const m4 = raw.slice(4, 6);
+  const d4 = raw.slice(6, 8);
+  return `${y4}-${m4}-${d4}`;
+}
+function matchDateProp(line) {
+  const m4 = line.match(/^(?:DTSTART|DTEND)(?:;[^:]*)?:(\d{8})(?:T\d{6}Z?)?$/i);
+  return m4 ? parseDateStr(m4[1]) : null;
+}
+function parseICS(text) {
+  const eventMap = /* @__PURE__ */ new Map();
+  const normalized = text.replace(/\r\n?/g, "\n").replace(/\n[ \t]/g, "");
+  const lines = normalized.split("\n");
+  let inEvent = false;
+  let dtStart = null;
+  let dtEnd = null;
+  let summary = "";
+  function flushEvent() {
+    if (!dtStart)
+      return;
+    const endDate = dtEnd ?? addDays(dtStart, 1);
+    const totalDays = daysBetween(dtStart, endDate);
+    for (let i5 = 0; i5 < totalDays; i5++) {
+      const date = addDays(dtStart, i5);
+      const existing = eventMap.get(date);
+      if (!existing || summary.length > existing.length) {
+        eventMap.set(date, summary);
+      }
+    }
+  }
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "BEGIN:VEVENT") {
+      inEvent = true;
+      dtStart = null;
+      dtEnd = null;
+      summary = "";
+      continue;
+    }
+    if (trimmed === "END:VEVENT") {
+      flushEvent();
+      inEvent = false;
+      continue;
+    }
+    if (!inEvent)
+      continue;
+    if (trimmed.toUpperCase().startsWith("DTSTART")) {
+      dtStart = matchDateProp(trimmed);
+      continue;
+    }
+    if (trimmed.toUpperCase().startsWith("DTEND")) {
+      dtEnd = matchDateProp(trimmed);
+      continue;
+    }
+    const summaryMatch = trimmed.match(/^SUMMARY(?:;[^:]*)?:(.+)$/i);
+    if (summaryMatch) {
+      summary = summaryMatch[1].trim();
+    }
+  }
+  const events = [];
+  for (const [date, s5] of eventMap) {
+    events.push({ date, summary: s5 });
+  }
+  events.sort((a4, b3) => a4.date.localeCompare(b3.date));
+  return events;
+}
+function classifyICSEvents(events) {
+  const holidayDates = [];
+  const makeupWorkdays = [];
+  const makeupPattern = /补班|(?<![调休])班|调休上班|makeup|workday|working/i;
+  for (const ev of events) {
+    if (makeupPattern.test(ev.summary)) {
+      makeupWorkdays.push(ev.date);
+    } else {
+      holidayDates.push(ev.date);
+    }
+  }
+  return { holidayDates, makeupWorkdays };
+}
 var PlatformError = class extends Error {
   constructor(message, code, cause) {
     super(message);
@@ -1399,11 +1526,67 @@ function u4(e4, t4, n3, o4, i5, u5) {
 }
 
 // ../gantt-ui/dist/index.js
+var _setIcon = null;
+function configureIconRenderer(fn) {
+  _setIcon = fn;
+}
+var CURATED_ICONS = [
+  "check",
+  "triangle",
+  "diamond",
+  "target",
+  "circle",
+  "play",
+  "star",
+  "flag",
+  "clock",
+  "calendar",
+  "alert-triangle",
+  "zap",
+  "pin",
+  "bookmark",
+  "heart",
+  "thumbs-up"
+];
+function isLucideIcon(name) {
+  return CURATED_ICONS.includes(name);
+}
+function Icon(props) {
+  const ref = A2(null);
+  const { name, size = 16 } = props;
+  y2(() => {
+    if (ref.current) {
+      if (_setIcon) {
+        _setIcon(ref.current, name);
+      } else {
+        ref.current.textContent = name;
+      }
+    }
+  }, [name]);
+  return /* @__PURE__ */ u4(
+    "span",
+    {
+      ref,
+      class: props.class ?? "gantt-icon",
+      title: props.title,
+      style: {
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: `${size}px`,
+        height: `${size}px`,
+        flexShrink: 0,
+        ...props.style
+      }
+    }
+  );
+}
 var SCROLL_GUARD_DURATION = 100;
 function safeName(name) {
   return name.replace(/[\\/:*?"<>|]/g, "_");
 }
 function createGanttStore(platform) {
+  configureIconRenderer((el, name) => platform.setIcon(el, name));
   const caches = y3([]);
   const edits = y3(null);
   const views = y3([]);
@@ -1420,6 +1603,12 @@ function createGanttStore(platform) {
   const filterStatuses = y3(/* @__PURE__ */ new Set());
   const filterTags = y3(/* @__PURE__ */ new Set());
   const tagDefinitions = y3([]);
+  const holidayConfig = y3({
+    weekendsEnabled: true,
+    holidaysEnabled: true,
+    holidayDates: [],
+    makeupWorkdays: []
+  });
   const isLoading = y3(false);
   const error = y3(null);
   let scrollGuardActive = false;
@@ -1504,6 +1693,11 @@ function createGanttStore(platform) {
       if (!map.has(key))
         map.set(key, []);
       map.get(key).push(t4);
+    }
+    for (const p5 of persons.value) {
+      if (!map.has(p5.id)) {
+        map.set(p5.id, []);
+      }
     }
     const groups = [];
     for (const [personId, tasks] of map) {
@@ -2273,6 +2467,14 @@ function createGanttStore(platform) {
         projectSortMode.value = data.projectSortMode;
       if (data.projectSortKeyDates)
         projectSortKeyDates.value = data.projectSortKeyDates;
+      if (data.holidayConfig) {
+        holidayConfig.value = {
+          weekendsEnabled: data.holidayConfig.weekendsEnabled ?? true,
+          holidaysEnabled: data.holidayConfig.holidaysEnabled ?? true,
+          holidayDates: data.holidayConfig.holidayDates ?? [],
+          makeupWorkdays: data.holidayConfig.makeupWorkdays ?? []
+        };
+      }
     } catch {
     }
   }
@@ -2287,9 +2489,14 @@ function createGanttStore(platform) {
       filterTags: [...filterTags.value],
       personSortMode: personSortMode.value,
       projectSortMode: projectSortMode.value,
-      projectSortKeyDates: projectSortKeyDates.value
+      projectSortKeyDates: projectSortKeyDates.value,
+      holidayConfig: holidayConfig.value
     };
     await platform.storage.write(`settings/${safeName(viewId)}.json`, JSON.stringify(data, null, 2));
+  }
+  async function saveHolidayConfig(config) {
+    holidayConfig.value = config;
+    await saveSettings();
   }
   const pendingChanges = g2(() => {
     const currentEdits = edits.value;
@@ -2519,6 +2726,7 @@ function createGanttStore(platform) {
     conflicts,
     pendingChanges,
     tagDefinitions,
+    holidayConfig,
     isLoading,
     error,
     loadView,
@@ -2539,17 +2747,65 @@ function createGanttStore(platform) {
     updateTag,
     deleteTag,
     saveSettings,
-    loadSettings
+    saveHolidayConfig,
+    loadSettings,
+    _platform: platform
   };
 }
 function TimelineGrid(props) {
-  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx } = props;
+  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx, holidayConfig } = props;
   const dayPx = dayWidth;
   const weekPx = dayWidth * 7;
   const absLeft = bodyOriginPx + scrollLeft;
   const absAlignedLeft = Math.floor((absLeft - bufferPx) / dayPx) * dayPx;
   const left = absAlignedLeft - bodyOriginPx;
   const width = viewportWidth + 2 * bufferPx;
+  const layers = [
+    // Day lines
+    `repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent ${dayPx - 1}px,
+      var(--gantt-grid-line-day, #e0e0e0) ${dayPx - 1}px,
+      var(--gantt-grid-line-day, #e0e0e0) ${dayPx}px
+    )`,
+    // Week lines
+    `repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent ${weekPx - 1}px,
+      var(--gantt-grid-line-week, #c0c0c0) ${weekPx - 1}px,
+      var(--gantt-grid-line-week, #c0c0c0) ${weekPx}px
+    )`
+  ];
+  if (holidayConfig && (holidayConfig.weekendsEnabled || holidayConfig.holidaysEnabled)) {
+    const gridStartDate = absolutePixelToDate(absAlignedLeft, dayWidth);
+    const totalDays = Math.ceil(width / dayPx) + 2;
+    const stops = [];
+    let inNWD = false;
+    for (let i5 = 0; i5 <= totalDays; i5++) {
+      const date = addDaysToDate(gridStartDate, i5);
+      const isNWD = isNonWorkingDay(date, holidayConfig);
+      const px = i5 * dayPx;
+      if (isNWD && !inNWD) {
+        stops.push(`transparent ${px}px`);
+        stops.push(`var(--gantt-weekend-bg, rgba(0,0,0,0.06)) ${px}px`);
+        inNWD = true;
+      } else if (!isNWD && inNWD) {
+        stops.push(`var(--gantt-weekend-bg, rgba(0,0,0,0.06)) ${px}px`);
+        stops.push(`transparent ${px}px`);
+        inNWD = false;
+      }
+    }
+    if (inNWD) {
+      const endPx = (totalDays + 1) * dayPx;
+      stops.push(`var(--gantt-weekend-bg, rgba(0,0,0,0.06)) ${endPx}px`);
+      stops.push(`transparent ${endPx}px`);
+    }
+    if (stops.length > 0) {
+      layers.push(`linear-gradient(to right, ${stops.join(", ")})`);
+    }
+  }
   return /* @__PURE__ */ u4(
     "div",
     {
@@ -2560,19 +2816,7 @@ function TimelineGrid(props) {
         left: `${left}px`,
         width: `${width}px`,
         height: "100%",
-        background: `repeating-linear-gradient(
-          to right,
-          transparent 0,
-          transparent ${dayPx - 1}px,
-          var(--gantt-grid-line-day, #e0e0e0) ${dayPx - 1}px,
-          var(--gantt-grid-line-day, #e0e0e0) ${dayPx}px
-        ), repeating-linear-gradient(
-          to right,
-          transparent 0,
-          transparent ${weekPx - 1}px,
-          var(--gantt-grid-line-week, #c0c0c0) ${weekPx - 1}px,
-          var(--gantt-grid-line-week, #c0c0c0) ${weekPx}px
-        )`,
+        background: layers.join(", "),
         pointerEvents: "none"
       }
     }
@@ -2588,7 +2832,7 @@ function absolutePixelToDate(absPx, dayWidth) {
   return addDaysToDate(TIMELINE_ORIGIN, days);
 }
 function TimeHeader(props) {
-  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx } = props;
+  const { dayWidth, scrollLeft, viewportWidth, bufferPx, bodyOriginPx, holidayConfig } = props;
   const visibleStartAbsPx = bodyOriginPx + scrollLeft;
   const absAlignedLeft = Math.floor((visibleStartAbsPx - bufferPx) / dayWidth) * dayWidth;
   const rangeStart = absolutePixelToDate(absAlignedLeft, dayWidth);
@@ -2651,6 +2895,23 @@ function TimeHeader(props) {
             },
             children: Array.from({ length: rangeTotalDays }, (_3, i5) => {
               const date = addDaysToDate(rangeStart, i5);
+              let labelColor = "var(--text-muted, #999)";
+              let indicator = "";
+              let indicatorColor = "";
+              if (holidayConfig) {
+                const labelType = getDateLabelType(date, holidayConfig);
+                if (labelType === "holiday") {
+                  labelColor = "var(--gantt-holiday-text, #c62828)";
+                  indicator = "\u4F11";
+                  indicatorColor = "var(--gantt-holiday-text, #c62828)";
+                } else if (labelType === "makeup") {
+                  labelColor = "var(--text-normal, #333)";
+                  indicator = "\u73ED";
+                  indicatorColor = "var(--gantt-makeup-text, #1565c0)";
+                } else if (labelType === "weekend") {
+                  labelColor = "var(--gantt-weekend-text, var(--text-faint))";
+                }
+              }
               return /* @__PURE__ */ u4(
                 "div",
                 {
@@ -2661,9 +2922,18 @@ function TimeHeader(props) {
                     textAlign: "center",
                     fontSize: "10px",
                     lineHeight: "20px",
-                    color: "var(--text-muted, #999)"
+                    color: labelColor
                   },
-                  children: getDayLabel(date)
+                  children: [
+                    getDayLabel(date),
+                    indicator && /* @__PURE__ */ u4("span", { style: {
+                      fontSize: "7px",
+                      color: indicatorColor,
+                      marginLeft: "1px",
+                      verticalAlign: "super",
+                      lineHeight: 1
+                    }, children: indicator })
+                  ]
                 },
                 i5
               );
@@ -2695,11 +2965,35 @@ function TodayLine(props) {
   );
 }
 function TaskBar(props) {
-  const { data, groupStartY, laneIndex, rowHeight, laneOffset, paneType } = props;
+  const {
+    data,
+    groupStartY,
+    laneIndex,
+    rowHeight,
+    laneOffset,
+    paneType,
+    startDate,
+    endDate,
+    bodyOriginPx,
+    dayWidth,
+    holidayConfig
+  } = props;
   const barHeight = rowHeight * 0.6;
   const barTop = groupStartY + (rowHeight - barHeight) / 2 + laneIndex * laneOffset;
   const barWidth = Math.max(data.width, 4);
   const showHandles = barWidth >= 12;
+  let overlays = [];
+  if (startDate && endDate && bodyOriginPx !== void 0 && dayWidth && holidayConfig) {
+    const blocks = getNonWorkingBlocks(startDate, endDate, holidayConfig);
+    overlays = blocks.map((block) => {
+      const blockLeft = dateToAbsolutePixel(block.start, dayWidth) - bodyOriginPx;
+      const blockRight = dateToAbsolutePixel(block.end, dayWidth) - bodyOriginPx + dayWidth;
+      return {
+        left: blockLeft - data.left,
+        width: blockRight - blockLeft
+      };
+    });
+  }
   return /* @__PURE__ */ u4(
     "div",
     {
@@ -2738,6 +3032,29 @@ function TaskBar(props) {
       },
       title: `${data.title}`,
       children: [
+        overlays.map((ol, i5) => /* @__PURE__ */ u4(
+          "div",
+          {
+            style: {
+              position: "absolute",
+              left: `${ol.left}px`,
+              top: 0,
+              width: `${Math.max(ol.width, 0)}px`,
+              height: "100%",
+              background: `repeating-linear-gradient(
+              -45deg,
+              transparent 0,
+              transparent 3px,
+              var(--gantt-bar-holiday-stripe, rgba(255,255,255,0.35)) 3px,
+              var(--gantt-bar-holiday-stripe, rgba(255,255,255,0.35)) 6px
+            )`,
+              pointerEvents: "none",
+              zIndex: 1,
+              borderRadius: "inherit"
+            }
+          },
+          `nw-${i5}`
+        )),
         showHandles && /* @__PURE__ */ u4("span", { class: "gantt-bar-handle gantt-bar-handle-left" }),
         data.width > 40 ? data.title : "",
         showHandles && /* @__PURE__ */ u4("span", { class: "gantt-bar-handle gantt-bar-handle-right" })
@@ -2799,7 +3116,7 @@ function getDayLabel(date) {
   return String(d4.getUTCDate());
 }
 function KeyDateMarker(props) {
-  const size = 10;
+  const size = 16;
   const bg = props.color ?? "var(--gantt-key-date-color, #E5C07B)";
   return /* @__PURE__ */ u4(
     "div",
@@ -2810,7 +3127,7 @@ function KeyDateMarker(props) {
       style: {
         position: "absolute",
         left: `${props.leftPx - size / 2}px`,
-        top: `${props.groupTopY + 3}px`,
+        top: `${props.groupTopY + 1}px`,
         width: `${size}px`,
         height: `${size}px`,
         background: bg,
@@ -2822,14 +3139,21 @@ function KeyDateMarker(props) {
         alignItems: "center",
         justifyContent: "center"
       },
-      children: props.icon && /* @__PURE__ */ u4("span", { style: {
+      children: props.icon && isLucideIcon(props.icon) ? /* @__PURE__ */ u4("span", { style: {
         transform: "rotate(-45deg)",
-        fontSize: "7px",
+        color: "#fff",
+        pointerEvents: "none",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center"
+      }, children: /* @__PURE__ */ u4(Icon, { name: props.icon, size: 10 }) }) : props.icon ? /* @__PURE__ */ u4("span", { style: {
+        transform: "rotate(-45deg)",
+        fontSize: "10px",
         color: "#fff",
         lineHeight: 1,
         fontWeight: "bold",
         pointerEvents: "none"
-      }, children: props.icon })
+      }, children: props.icon }) : null
     }
   );
 }
@@ -3167,7 +3491,7 @@ function TaskList(props) {
         borderRight: "1px solid var(--gantt-grid-line-week, #c0c0c0)"
       },
       children: [
-        /* @__PURE__ */ u4("div", { style: { height: "44px", borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)", display: "flex", alignItems: "center", paddingLeft: "8px", paddingRight: "8px" }, children: props.headerContent }),
+        /* @__PURE__ */ u4("div", { style: { height: "44px", borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)", display: "flex", alignItems: "center", paddingLeft: "8px", paddingRight: "8px", background: "var(--background-primary, #ffffff)", position: "relative", zIndex: 1 }, children: props.headerContent }),
         /* @__PURE__ */ u4(
           "div",
           {
@@ -3438,7 +3762,8 @@ function Timeline(props) {
         scrollLeft,
         viewportWidth: viewportWidth.value,
         bufferPx: GRID_BUFFER_PX,
-        bodyOriginPx
+        bodyOriginPx,
+        holidayConfig: store.holidayConfig.value
       }
     ) }),
     /* @__PURE__ */ u4(
@@ -3479,7 +3804,7 @@ function Timeline(props) {
               height: `${totalHeight}px`
             },
             children: [
-              /* @__PURE__ */ u4(TimelineGrid, { dayWidth: DAY_WIDTH2, scrollLeft, viewportWidth: viewportWidth.value, bufferPx: GRID_BUFFER_PX, bodyOriginPx }),
+              /* @__PURE__ */ u4(TimelineGrid, { dayWidth: DAY_WIDTH2, scrollLeft, viewportWidth: viewportWidth.value, bufferPx: GRID_BUFFER_PX, bodyOriginPx, holidayConfig: store.holidayConfig.value }),
               /* @__PURE__ */ u4(
                 TodayLine,
                 {
@@ -3535,7 +3860,12 @@ function Timeline(props) {
                   rowHeight: ROW_HEIGHT2,
                   laneOffset: LANE_OFFSET2,
                   onPointerDown: props.onTaskPointerDown,
-                  onClick: props.onTaskClick
+                  onClick: props.onTaskClick,
+                  startDate: task.startDate.value,
+                  endDate: task.endDate.value,
+                  bodyOriginPx,
+                  dayWidth: DAY_WIDTH2,
+                  holidayConfig: store.holidayConfig.value
                 },
                 task.id
               )),
@@ -3833,12 +4163,12 @@ function GanttPane(props) {
 }
 var PRESET_COLORS = ["#E06C75", "#61AFEF", "#98C379", "#E5C07B", "#C678DD", "#56B6C2", "#D19A66", "#4A90D9"];
 var KEY_DATE_PRESETS = [
-  { name: "\u9A8C\u6536\u65F6\u95F4", color: "#98C379", icon: "\u2713" },
-  { name: "\u4E0A\u7EBF\u65F6\u95F4", color: "#61AFEF", icon: "\u25B2" },
-  { name: "\u63D0\u6D4B\u65F6\u95F4", color: "#C678DD", icon: "\u25C6" },
-  { name: "\u8BC4\u5BA1\u65F6\u95F4", color: "#E5C07B", icon: "\u25CE" },
-  { name: "\u4EA4\u4ED8\u65F6\u95F4", color: "#56B6C2", icon: "\u25CF" },
-  { name: "\u542F\u52A8\u65F6\u95F4", color: "#4A90D9", icon: "\u25B6" }
+  { name: "\u9A8C\u6536\u65F6\u95F4", color: "#98C379", icon: "check" },
+  { name: "\u4E0A\u7EBF\u65F6\u95F4", color: "#61AFEF", icon: "triangle" },
+  { name: "\u63D0\u6D4B\u65F6\u95F4", color: "#C678DD", icon: "diamond" },
+  { name: "\u8BC4\u5BA1\u65F6\u95F4", color: "#E5C07B", icon: "target" },
+  { name: "\u4EA4\u4ED8\u65F6\u95F4", color: "#56B6C2", icon: "circle" },
+  { name: "\u542F\u52A8\u65F6\u95F4", color: "#4A90D9", icon: "play" }
 ];
 function UnassignedPanel(props) {
   const projects = props.store.unassignedProjects.value;
@@ -3992,6 +4322,7 @@ function ProjectDetail(props) {
   const editTags = useSignal([...projectTags]);
   const editTagInput = useSignal("");
   const editTagInputRef = A2(null);
+  const iconPickerOpen = useSignal(null);
   const knownTags = T2(() => {
     const set = /* @__PURE__ */ new Set();
     for (const p5 of store.mergedProjects.value) {
@@ -4165,7 +4496,7 @@ function ProjectDetail(props) {
                   color: "var(--text-muted, #999)",
                   lineHeight: 1
                 },
-                children: "\u270E"
+                children: /* @__PURE__ */ u4(Icon, { name: "pencil", size: 13 })
               }
             ),
             /* @__PURE__ */ u4(
@@ -4183,7 +4514,7 @@ function ProjectDetail(props) {
                   color: "var(--text-error, #e00)",
                   lineHeight: 1
                 },
-                children: "\u{1F5D1}"
+                children: /* @__PURE__ */ u4(Icon, { name: "trash-2", size: 13 })
               }
             ),
             /* @__PURE__ */ u4(
@@ -4201,7 +4532,7 @@ function ProjectDetail(props) {
                   color: "var(--text-muted, #999)",
                   lineHeight: 1
                 },
-                children: "\u2715"
+                children: /* @__PURE__ */ u4(Icon, { name: "x", size: 14 })
               }
             )
           ] }) })
@@ -4428,14 +4759,12 @@ function ProjectDetail(props) {
                     display: "inline-block",
                     width: "12px",
                     height: "12px",
-                    lineHeight: "12px",
                     textAlign: "center",
-                    fontSize: "9px",
                     borderRadius: "2px",
                     background: preset.color,
                     color: "#fff",
                     marginRight: "3px"
-                  }, children: preset.icon }),
+                  }, children: /* @__PURE__ */ u4(Icon, { name: preset.icon, size: 9 }) }),
                   preset.name
                 ]
               },
@@ -4456,32 +4785,92 @@ function ProjectDetail(props) {
                   style: { width: "22px", height: "22px", padding: "0", border: "none", borderRadius: "3px", cursor: "pointer", flexShrink: 0 }
                 }
               ),
-              /* @__PURE__ */ u4(
-                "input",
-                {
-                  type: "text",
-                  value: kd.icon ?? "",
-                  onInput: (e4) => {
-                    const next = [...editKeyDates.value];
-                    next[i5] = { ...next[i5], icon: e4.target.value || void 0 };
-                    editKeyDates.value = next;
-                  },
-                  placeholder: "\u25C6",
-                  maxLength: 2,
-                  title: "Icon (1-2 chars shown in marker)",
-                  style: {
-                    width: "22px",
-                    fontSize: "11px",
-                    padding: "3px",
-                    textAlign: "center",
-                    borderRadius: "3px",
-                    flexShrink: 0,
-                    border: "1px solid var(--background-modifier-border, #ccc)",
-                    background: "var(--background-primary, #fff)",
-                    color: "var(--text-normal, #333)"
+              /* @__PURE__ */ u4("div", { style: { position: "relative", flexShrink: 0 }, children: [
+                /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: () => {
+                      iconPickerOpen.value = iconPickerOpen.value === i5 ? null : i5;
+                    },
+                    title: kd.icon || "Select icon",
+                    style: {
+                      width: "28px",
+                      height: "22px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      border: "1px solid var(--background-modifier-border, #ccc)",
+                      borderRadius: "3px",
+                      background: "var(--background-primary, #fff)",
+                      cursor: "pointer",
+                      padding: 0
+                    },
+                    children: kd.icon ? /* @__PURE__ */ u4(Icon, { name: kd.icon, size: 12 }) : /* @__PURE__ */ u4("span", { style: { fontSize: "8px", color: "var(--text-muted, #999)" }, children: "\u25C6" })
                   }
-                }
-              ),
+                ),
+                iconPickerOpen.value === i5 && /* @__PURE__ */ u4("div", { style: {
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  zIndex: 100,
+                  background: "var(--background-primary, #fff)",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  padding: "4px",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                  minWidth: "140px"
+                }, children: [
+                  /* @__PURE__ */ u4("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "2px" }, children: CURATED_ICONS.map((iconName) => /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: () => {
+                        const next = [...editKeyDates.value];
+                        next[i5] = { ...next[i5], icon: iconName };
+                        editKeyDates.value = next;
+                        iconPickerOpen.value = null;
+                      },
+                      title: iconName,
+                      style: {
+                        width: "28px",
+                        height: "24px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        border: kd.icon === iconName ? "1px solid var(--interactive-accent, #7B61F8)" : "1px solid transparent",
+                        borderRadius: "3px",
+                        background: "transparent",
+                        cursor: "pointer",
+                        padding: 0
+                      },
+                      children: /* @__PURE__ */ u4(Icon, { name: iconName, size: 14 })
+                    },
+                    iconName
+                  )) }),
+                  kd.icon && /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: () => {
+                        const next = [...editKeyDates.value];
+                        next[i5] = { ...next[i5], icon: void 0 };
+                        editKeyDates.value = next;
+                        iconPickerOpen.value = null;
+                      },
+                      style: {
+                        width: "100%",
+                        marginTop: "4px",
+                        padding: "2px",
+                        fontSize: "10px",
+                        border: "1px solid var(--background-modifier-border, #ccc)",
+                        borderRadius: "3px",
+                        background: "var(--background-primary, #fff)",
+                        cursor: "pointer",
+                        color: "var(--text-muted, #999)"
+                      },
+                      children: "Clear icon"
+                    }
+                  )
+                ] })
+              ] }),
               /* @__PURE__ */ u4(
                 "input",
                 {
@@ -4575,7 +4964,7 @@ function ProjectDetail(props) {
               flexShrink: 0,
               transform: "rotate(45deg)"
             } }),
-            kd.icon && /* @__PURE__ */ u4("span", { style: { fontSize: "9px", fontWeight: "bold", color: kd.color ?? "var(--text-muted, #999)", flexShrink: 0 }, children: kd.icon }),
+            kd.icon && /* @__PURE__ */ u4("span", { style: { color: kd.color ?? "var(--text-muted, #999)", flexShrink: 0 }, children: /* @__PURE__ */ u4(Icon, { name: kd.icon, size: 11 }) }),
             /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", minWidth: "80px" }, children: kd.date }),
             /* @__PURE__ */ u4("span", { children: kd.name })
           ] }, i5)) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" }) })
@@ -4856,7 +5245,7 @@ function DetailPanel(props) {
                   color: "var(--text-error, #e00)"
                 },
                 title: "Delete task",
-                children: "\u{1F5D1}"
+                children: /* @__PURE__ */ u4(Icon, { name: "trash-2", size: 14 })
               }
             ),
             /* @__PURE__ */ u4(
@@ -4873,7 +5262,7 @@ function DetailPanel(props) {
                   color: "var(--text-muted, #999)"
                 },
                 title: "Close detail panel",
-                children: "x"
+                children: /* @__PURE__ */ u4(Icon, { name: "x", size: 16 })
               }
             )
           ] })
@@ -5378,7 +5767,7 @@ function TagManagementPanel(props) {
                         onClick: () => startEdit(tag),
                         title: "Edit tag",
                         style: { background: "none", border: "none", cursor: "pointer", fontSize: "13px", color: "var(--text-muted, #999)", padding: "0 2px" },
-                        children: "\u270E"
+                        children: /* @__PURE__ */ u4(Icon, { name: "pencil", size: 13 })
                       }
                     ),
                     deleteConfirmName.value === tag.name ? /* @__PURE__ */ u4(S, { children: [
@@ -5399,7 +5788,7 @@ function TagManagementPanel(props) {
                           },
                           title: "Cancel delete",
                           style: { background: "none", border: "1px solid var(--background-modifier-border, #ccc)", borderRadius: "3px", cursor: "pointer", fontSize: "10px", color: "var(--text-muted, #999)", padding: "2px 4px" },
-                          children: "x"
+                          children: /* @__PURE__ */ u4(Icon, { name: "x", size: 10 })
                         }
                       )
                     ] }) : /* @__PURE__ */ u4(
@@ -5408,7 +5797,7 @@ function TagManagementPanel(props) {
                         onClick: () => confirmDelete(tag.name),
                         title: "Delete tag",
                         style: { background: "none", border: "none", cursor: "pointer", fontSize: "13px", color: "var(--text-error, #e00)", padding: "0 2px" },
-                        children: "\u{1F5D1}"
+                        children: /* @__PURE__ */ u4(Icon, { name: "trash-2", size: 13 })
                       }
                     )
                   ] })
@@ -5846,6 +6235,335 @@ function DualPane(props) {
     showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store, onDelete: props.onDeleteProject })
   ] }) });
 }
+function HolidaySettingsPanel(props) {
+  const { store, onClose } = props;
+  const hc = store.holidayConfig.value;
+  const importing = useSignal(false);
+  const importError = useSignal(null);
+  const urlInput = useSignal("");
+  async function mergeClassified(holidays, makeup) {
+    if (holidays.length === 0 && makeup.length === 0) {
+      importError.value = "No events found in the .ics data";
+      return;
+    }
+    const existingHolidays = new Set(store.holidayConfig.value.holidayDates);
+    const existingMakeup = new Set(store.holidayConfig.value.makeupWorkdays);
+    for (const d4 of holidays)
+      existingHolidays.add(d4);
+    for (const d4 of makeup) {
+      existingMakeup.add(d4);
+      existingHolidays.delete(d4);
+    }
+    await store.saveHolidayConfig({
+      ...store.holidayConfig.value,
+      holidayDates: [...existingHolidays].sort(),
+      makeupWorkdays: [...existingMakeup].sort()
+    });
+    urlInput.value = "";
+    importError.value = null;
+  }
+  async function handleImportFile() {
+    const platform = store._platform;
+    if (!platform?.pickFile) {
+      importError.value = "File picker not available";
+      return;
+    }
+    importing.value = true;
+    importError.value = null;
+    try {
+      const file = await platform.pickFile(".ics");
+      if (!file) {
+        importing.value = false;
+        return;
+      }
+      const events = parseICS(file.content);
+      const { holidayDates, makeupWorkdays } = classifyICSEvents(events);
+      await mergeClassified(holidayDates, makeupWorkdays);
+    } catch (e4) {
+      importError.value = e4 instanceof Error ? e4.message : String(e4);
+    } finally {
+      importing.value = false;
+    }
+  }
+  async function handleFetchUrl() {
+    const url = urlInput.value.trim();
+    if (!url)
+      return;
+    importing.value = true;
+    importError.value = null;
+    try {
+      const platform = store._platform;
+      const response = await (platform?.fetch ?? globalThis.fetch)(url);
+      if (!response.ok) {
+        importError.value = `Failed to fetch: ${response.status} ${response.statusText}`;
+        return;
+      }
+      const text = await response.text();
+      const events = parseICS(text);
+      const { holidayDates, makeupWorkdays } = classifyICSEvents(events);
+      await mergeClassified(holidayDates, makeupWorkdays);
+    } catch (e4) {
+      importError.value = e4 instanceof Error ? e4.message : String(e4);
+    } finally {
+      importing.value = false;
+    }
+  }
+  async function removeHoliday(date) {
+    const cfg = store.holidayConfig.value;
+    await store.saveHolidayConfig({ ...cfg, holidayDates: cfg.holidayDates.filter((d4) => d4 !== date) });
+  }
+  async function removeMakeup(date) {
+    const cfg = store.holidayConfig.value;
+    await store.saveHolidayConfig({ ...cfg, makeupWorkdays: cfg.makeupWorkdays.filter((d4) => d4 !== date) });
+  }
+  async function clearAll() {
+    await store.saveHolidayConfig({ ...store.holidayConfig.value, holidayDates: [], makeupWorkdays: [] });
+  }
+  const holidayCount = hc.holidayDates.length;
+  const makeupCount = hc.makeupWorkdays.length;
+  const totalCount = holidayCount + makeupCount;
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        top: "50%",
+        left: "50%",
+        transform: "translate(-50%, -50%)",
+        zIndex: 100,
+        background: "var(--background-primary, #fff)",
+        border: "1px solid var(--background-modifier-border, #ccc)",
+        borderRadius: "8px",
+        padding: "20px",
+        width: "360px",
+        maxHeight: "80vh",
+        overflowY: "auto",
+        boxShadow: "0 4px 20px rgba(0,0,0,0.15)"
+      },
+      children: [
+        /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }, children: [
+          /* @__PURE__ */ u4("h3", { style: { margin: 0, fontSize: "16px", fontWeight: 600 }, children: "Non-working Days" }),
+          /* @__PURE__ */ u4(
+            "button",
+            {
+              onClick: onClose,
+              style: {
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: "18px",
+                color: "var(--text-muted, #999)",
+                padding: "0 4px",
+                lineHeight: 1
+              },
+              children: "x"
+            }
+          )
+        ] }),
+        /* @__PURE__ */ u4("label", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", cursor: "pointer", fontSize: "13px" }, children: [
+          /* @__PURE__ */ u4(
+            "input",
+            {
+              type: "checkbox",
+              checked: hc.weekendsEnabled,
+              onChange: (e4) => {
+                store.saveHolidayConfig({ ...store.holidayConfig.value, weekendsEnabled: e4.target.checked });
+              }
+            }
+          ),
+          "Show weekends as non-working"
+        ] }),
+        /* @__PURE__ */ u4("label", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px", cursor: "pointer", fontSize: "13px" }, children: [
+          /* @__PURE__ */ u4(
+            "input",
+            {
+              type: "checkbox",
+              checked: hc.holidaysEnabled,
+              onChange: (e4) => {
+                store.saveHolidayConfig({ ...store.holidayConfig.value, holidaysEnabled: e4.target.checked });
+              }
+            }
+          ),
+          "Show imported holidays as non-working"
+        ] }),
+        /* @__PURE__ */ u4("div", { style: { borderTop: "1px solid var(--background-modifier-border, #ddd)", paddingTop: "12px", marginBottom: "12px" }, children: [
+          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "8px", marginBottom: "8px" }, children: [
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: handleImportFile,
+                disabled: importing.value,
+                style: {
+                  padding: "6px 14px",
+                  border: "1px solid var(--interactive-accent, #4A90D9)",
+                  borderRadius: "4px",
+                  background: "var(--interactive-accent, #4A90D9)",
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: 500,
+                  opacity: importing.value ? 0.6 : 1,
+                  whiteSpace: "nowrap"
+                },
+                children: importing.value ? "Importing..." : "Import .ics file"
+              }
+            ),
+            /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--text-muted, #999)", alignSelf: "center" }, children: "or" })
+          ] }),
+          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "6px" }, children: [
+            /* @__PURE__ */ u4(
+              "input",
+              {
+                type: "url",
+                placeholder: "https://...ics URL",
+                value: urlInput.value,
+                onInput: (e4) => {
+                  urlInput.value = e4.target.value;
+                },
+                onKeyDown: (e4) => {
+                  if (e4.key === "Enter")
+                    handleFetchUrl();
+                },
+                style: {
+                  flex: 1,
+                  padding: "5px 8px",
+                  fontSize: "11px",
+                  borderRadius: "3px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  background: "var(--background-primary, #fff)",
+                  color: "var(--text-normal, #333)"
+                }
+              }
+            ),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: handleFetchUrl,
+                disabled: importing.value || !urlInput.value.trim(),
+                style: {
+                  padding: "5px 12px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "3px",
+                  background: "var(--background-secondary, #f5f5f5)",
+                  cursor: importing.value || !urlInput.value.trim() ? "default" : "pointer",
+                  fontSize: "11px",
+                  opacity: importing.value || !urlInput.value.trim() ? 0.5 : 1,
+                  whiteSpace: "nowrap"
+                },
+                children: "Fetch"
+              }
+            )
+          ] }),
+          importError.value && /* @__PURE__ */ u4("div", { style: { color: "var(--text-error, #e53935)", fontSize: "11px", marginTop: "6px" }, children: importError.value })
+        ] }),
+        totalCount > 0 && /* @__PURE__ */ u4("div", { style: { borderTop: "1px solid var(--background-modifier-border, #ddd)", paddingTop: "12px" }, children: [
+          /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }, children: [
+            /* @__PURE__ */ u4("span", { style: { fontSize: "12px", fontWeight: 500 }, children: [
+              totalCount,
+              " date",
+              totalCount !== 1 ? "s" : ""
+            ] }),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: clearAll,
+                style: {
+                  padding: "2px 8px",
+                  border: "1px solid var(--text-error, #e53935)",
+                  borderRadius: "3px",
+                  background: "transparent",
+                  color: "var(--text-error, #e53935)",
+                  cursor: "pointer",
+                  fontSize: "11px"
+                },
+                children: "Clear all"
+              }
+            )
+          ] }),
+          holidayCount > 0 && /* @__PURE__ */ u4("div", { style: { marginBottom: makeupCount > 0 ? "12px" : "0" }, children: [
+            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", fontWeight: 500, color: "var(--gantt-holiday-text, #c62828)", marginBottom: "4px" }, children: [
+              "Holidays \u4F11 (",
+              holidayCount,
+              ")"
+            ] }),
+            /* @__PURE__ */ u4("div", { style: { maxHeight: "140px", overflowY: "auto", fontSize: "12px" }, children: store.holidayConfig.value.holidayDates.map((date) => /* @__PURE__ */ u4(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "3px 0",
+                  borderBottom: "1px solid var(--background-modifier-border, #eee)"
+                },
+                children: [
+                  /* @__PURE__ */ u4("span", { children: date }),
+                  /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: () => removeHoliday(date),
+                      style: {
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        color: "var(--text-muted, #999)",
+                        fontSize: "14px",
+                        padding: "0 4px"
+                      },
+                      title: "Remove",
+                      children: "x"
+                    }
+                  )
+                ]
+              },
+              date
+            )) })
+          ] }),
+          makeupCount > 0 && /* @__PURE__ */ u4("div", { children: [
+            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", fontWeight: 500, color: "var(--gantt-makeup-text, #1565c0)", marginBottom: "4px" }, children: [
+              "Makeup workdays \u73ED (",
+              makeupCount,
+              ")"
+            ] }),
+            /* @__PURE__ */ u4("div", { style: { maxHeight: "140px", overflowY: "auto", fontSize: "12px" }, children: store.holidayConfig.value.makeupWorkdays.map((date) => /* @__PURE__ */ u4(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "3px 0",
+                  borderBottom: "1px solid var(--background-modifier-border, #eee)"
+                },
+                children: [
+                  /* @__PURE__ */ u4("span", { children: date }),
+                  /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: () => removeMakeup(date),
+                      style: {
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        color: "var(--text-muted, #999)",
+                        fontSize: "14px",
+                        padding: "0 4px"
+                      },
+                      title: "Remove",
+                      children: "x"
+                    }
+                  )
+                ]
+              },
+              date
+            )) })
+          ] })
+        ] }),
+        totalCount === 0 && /* @__PURE__ */ u4("div", { style: { color: "var(--text-muted, #999)", fontSize: "12px", textAlign: "center", padding: "8px 0" }, children: "No imported dates. Import an .ics calendar file or fetch from URL." })
+      ]
+    }
+  );
+}
 function FilterMultiSelect(props) {
   const open = useSignal(false);
   const containerRef = A2(null);
@@ -5937,6 +6655,7 @@ function GanttChart(props) {
   const confirmState = useSignal(null);
   const showPendingPanel = useSignal(false);
   const showTagPanel = useSignal(false);
+  const showHolidayPanel = useSignal(false);
   let saveTimer = null;
   function scheduleSave() {
     if (saveTimer)
@@ -5975,6 +6694,10 @@ function GanttChart(props) {
         }
         if (showTagPanel.value) {
           showTagPanel.value = false;
+          return;
+        }
+        if (showHolidayPanel.value) {
+          showHolidayPanel.value = false;
           return;
         }
         store.selectEntity(null);
@@ -6109,6 +6832,25 @@ function GanttChart(props) {
               children: "Tags"
             }
           ),
+          /* @__PURE__ */ u4(
+            "button",
+            {
+              class: "gantt-btn",
+              title: "Non-working day settings",
+              style: {
+                padding: "4px 12px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "4px",
+                background: "var(--background-secondary, #f5f5f5)",
+                cursor: "pointer",
+                fontSize: "12px"
+              },
+              onClick: () => {
+                showHolidayPanel.value = true;
+              },
+              children: "Calendar"
+            }
+          ),
           /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", fontSize: "12px" }, children: [
             store.mergedTasks.value.length,
             " tasks \xB7 ",
@@ -6232,12 +6974,21 @@ function GanttChart(props) {
           showTagPanel.value = false;
         }
       }
+    ),
+    showHolidayPanel.value && /* @__PURE__ */ u4(
+      HolidaySettingsPanel,
+      {
+        store,
+        onClose: () => {
+          showHolidayPanel.value = false;
+        }
+      }
     )
   ] });
 }
 
 // src/view.tsx
-var import_obsidian = require("obsidian");
+var import_obsidian2 = require("obsidian");
 
 // src/storage.ts
 var BASE = "obsidian-gantt-data";
@@ -6386,6 +7137,7 @@ function createObsidianConnectorContext(config, vaultAdapter, requestUrl) {
 }
 
 // src/platform.ts
+var import_obsidian = require("obsidian");
 function createObsidianPlatform(app) {
   const adapter = app.vault.adapter;
   const storage = createObsidianStorage(adapter);
@@ -6419,7 +7171,42 @@ function createObsidianPlatform(app) {
     createConnectorContext,
     watcher: null,
     // File watching handled by Obsidian's vault events
-    theme
+    theme,
+    setIcon: import_obsidian.setIcon,
+    pickFile: (accept) => {
+      return new Promise((resolve) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = accept;
+        input.style.display = "none";
+        let resolved = false;
+        input.onchange = async () => {
+          resolved = true;
+          const file = input.files?.[0];
+          if (!file) {
+            resolve(null);
+            return;
+          }
+          const content = await file.text();
+          resolve({ name: file.name, content });
+        };
+        const onFocus = () => {
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              resolve(null);
+            }
+            window.removeEventListener("focus", onFocus);
+          }, 300);
+        };
+        window.addEventListener("focus", onFocus);
+        document.body.appendChild(input);
+        input.click();
+        setTimeout(() => {
+          input.remove();
+        }, 1e3);
+      });
+    }
   };
   platform._fetchRef = fetchRef;
   return platform;
@@ -6427,7 +7214,7 @@ function createObsidianPlatform(app) {
 
 // src/view.tsx
 var VIEW_TYPE = "obsidian-gantt-view";
-var GanttView = class extends import_obsidian.ItemView {
+var GanttView = class extends import_obsidian2.ItemView {
   constructor(leaf) {
     super(leaf);
     this.store = null;
@@ -6534,7 +7321,7 @@ var GanttView = class extends import_obsidian.ItemView {
 };
 
 // src/main.ts
-var GanttPlugin = class extends import_obsidian2.Plugin {
+var GanttPlugin = class extends import_obsidian3.Plugin {
   async onload() {
     this.registerView(
       VIEW_TYPE,

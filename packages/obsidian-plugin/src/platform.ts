@@ -1,6 +1,7 @@
 import type { GanttPlatform, Theme } from '@obsidian-gantt/core';
 import { createObsidianStorage } from './storage';
 import { createObsidianConnectorLoader, createObsidianConnectorContext } from './connector-loader';
+import { setIcon } from 'obsidian';
 
 interface ObsidianAppLike {
   vault: {
@@ -56,6 +57,34 @@ export function createObsidianPlatform(app: ObsidianAppLike): GanttPlatform {
     createConnectorContext,
     watcher: null, // File watching handled by Obsidian's vault events
     theme,
+    setIcon,
+    pickFile: (accept: string) => {
+      return new Promise((resolve) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = accept;
+        input.style.display = 'none';
+        let resolved = false;
+        input.onchange = async () => {
+          resolved = true;
+          const file = input.files?.[0];
+          if (!file) { resolve(null); return; }
+          const content = await file.text();
+          resolve({ name: file.name, content });
+        };
+        // Detect dialog cancel via window refocus
+        const onFocus = () => {
+          setTimeout(() => {
+            if (!resolved) { resolved = true; resolve(null); }
+            window.removeEventListener('focus', onFocus);
+          }, 300);
+        };
+        window.addEventListener('focus', onFocus);
+        document.body.appendChild(input);
+        input.click();
+        setTimeout(() => { input.remove(); }, 1000);
+      });
+    },
   } as GanttPlatform;
 
   // Expose fetchRef so bindObsidianFetch can inject the real requestUrl

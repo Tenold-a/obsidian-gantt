@@ -25,6 +25,95 @@ export function daysBetween(a: string, b: string): number {
   return Math.round((db.getTime() - da.getTime()) / 86400000);
 }
 
+/** Get day of week for a date string. Returns 0-6 (Sunday=0, Monday=1, ..., Saturday=6). */
+export function getDayOfWeek(date: string): number {
+  return parseDate(date).getUTCDay();
+}
+
+/** Check if a date is a weekend day (Saturday or Sunday). */
+export function isWeekend(date: string): boolean {
+  const dow = getDayOfWeek(date);
+  return dow === 0 || dow === 6;
+}
+
+// ============================================================
+// Holiday / non-working day helpers
+// ============================================================
+
+/** Holiday / non-working day configuration for a view. */
+export interface HolidayConfig {
+  /** Whether to treat weekends (Sat/Sun) as non-working days. */
+  weekendsEnabled: boolean;
+  /** Whether to highlight imported holiday dates. */
+  holidaysEnabled: boolean;
+  /** ISO date strings (YYYY-MM-DD) that are holidays (non-working, including weekdays off). */
+  holidayDates: string[];
+  /** ISO date strings that are weekend makeup workdays (班). These override weekend treatment. */
+  makeupWorkdays: string[];
+}
+
+/** Classification of a date for display styling. */
+export type DateLabelType = 'normal' | 'weekend' | 'holiday' | 'makeup';
+
+/** Get the display label type for a date based on config. */
+export function getDateLabelType(date: string, config: HolidayConfig): DateLabelType {
+  if (config.holidaysEnabled && config.holidayDates?.includes(date)) return 'holiday';
+  if (config.weekendsEnabled && isWeekend(date)) {
+    if (config.holidaysEnabled && config.makeupWorkdays?.includes(date)) return 'makeup';
+    return 'weekend';
+  }
+  return 'normal';
+}
+
+/** Check whether a date is a non-working day based on config. */
+export function isNonWorkingDay(date: string, config: HolidayConfig): boolean {
+  const type = getDateLabelType(date, config);
+  return type === 'weekend' || type === 'holiday';
+}
+
+/** A contiguous block of non-working days. */
+export interface NonWorkingBlock {
+  start: string;
+  end: string;
+}
+
+/**
+ * Find contiguous blocks of non-working days within a date range.
+ * Used to render overlay elements on task bars.
+ */
+export function getNonWorkingBlocks(
+  startDate: string,
+  endDate: string,
+  config: HolidayConfig,
+): NonWorkingBlock[] {
+  if (!config.weekendsEnabled && !config.holidaysEnabled) return [];
+  if (!startDate || !endDate) return [];
+
+  const blocks: NonWorkingBlock[] = [];
+  let blockStart: string | null = null;
+
+  const totalDays = daysBetween(startDate, endDate) + 1;
+  for (let i = 0; i < totalDays; i++) {
+    const date = addDays(startDate, i);
+    if (isNonWorkingDay(date, config)) {
+      if (blockStart === null) {
+        blockStart = date;
+      }
+    } else {
+      if (blockStart !== null) {
+        blocks.push({ start: blockStart, end: addDays(date, -1) });
+        blockStart = null;
+      }
+    }
+  }
+
+  if (blockStart !== null) {
+    blocks.push({ start: blockStart, end: endDate });
+  }
+
+  return blocks;
+}
+
 /** Add N days to a date string. */
 export function addDays(date: string, days: number): string {
   const d = parseDate(date);

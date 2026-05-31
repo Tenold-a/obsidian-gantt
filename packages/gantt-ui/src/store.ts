@@ -19,7 +19,11 @@ import {
   computeTimelineRange,
   daysBetween,
   addDays,
+  isNonWorkingDay,
+  getNonWorkingBlocks,
 } from '@obsidian-gantt/core';
+import type { HolidayConfig } from '@obsidian-gantt/core';
+import { configureIconRenderer } from './icon';
 
 export interface PersonGroup {
   personId: string;
@@ -113,6 +117,9 @@ export interface GanttStore {
   // Tag definitions
   tagDefinitions: ReturnType<typeof signal<TagDefinition[]>>;
 
+  // Holiday config
+  holidayConfig: ReturnType<typeof signal<HolidayConfig>>;
+
   // Loading state
   isLoading: ReturnType<typeof signal<boolean>>;
   error: ReturnType<typeof signal<string | null>>;
@@ -138,6 +145,7 @@ export interface GanttStore {
   updateTag(oldName: string, newName: string, color?: string): Promise<void>;
   deleteTag(name: string): Promise<void>;
   saveSettings(): Promise<void>;
+  saveHolidayConfig(config: HolidayConfig): Promise<void>;
 }
 
 const DAY_WIDTH = 30;
@@ -149,6 +157,8 @@ function safeName(name: string): string {
 }
 
 export function createGanttStore(platform: GanttPlatform): GanttStore {
+  configureIconRenderer((el, name) => platform.setIcon(el, name));
+
   // ── State signals ──
   const caches = signal<CacheFile[]>([]);
   const edits = signal<EditsOverlay | null>(null);
@@ -166,6 +176,12 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
   const filterStatuses = signal<Set<string>>(new Set());
   const filterTags = signal<Set<string>>(new Set());
   const tagDefinitions = signal<TagDefinition[]>([]);
+  const holidayConfig = signal<HolidayConfig>({
+    weekendsEnabled: true,
+    holidaysEnabled: true,
+    holidayDates: [],
+    makeupWorkdays: [],
+  });
   const isLoading = signal<boolean>(false);
   const error = signal<string | null>(null);
 
@@ -260,6 +276,13 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       const key = t.personId.value || '__unassigned__';
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(t);
+    }
+
+    // Include people with no assigned tasks
+    for (const p of persons.value) {
+      if (!map.has(p.id)) {
+        map.set(p.id, []);
+      }
     }
 
     const groups: PersonGroup[] = [];
@@ -1168,6 +1191,14 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       if (data.personSortMode) personSortMode.value = data.personSortMode;
       if (data.projectSortMode) projectSortMode.value = data.projectSortMode;
       if (data.projectSortKeyDates) projectSortKeyDates.value = data.projectSortKeyDates;
+      if (data.holidayConfig) {
+          holidayConfig.value = {
+            weekendsEnabled: data.holidayConfig.weekendsEnabled ?? true,
+            holidaysEnabled: data.holidayConfig.holidaysEnabled ?? true,
+            holidayDates: data.holidayConfig.holidayDates ?? [],
+            makeupWorkdays: data.holidayConfig.makeupWorkdays ?? [],
+          };
+        }
     } catch { /* ignore */ }
   }
 
@@ -1182,8 +1213,14 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       personSortMode: personSortMode.value,
       projectSortMode: projectSortMode.value,
       projectSortKeyDates: projectSortKeyDates.value,
+      holidayConfig: holidayConfig.value,
     };
     await platform.storage.write(`settings/${safeName(viewId)}.json`, JSON.stringify(data, null, 2));
+  }
+
+  async function saveHolidayConfig(config: HolidayConfig): Promise<void> {
+    holidayConfig.value = config;
+    await saveSettings();
   }
 
   // ── Pending changes computed ──
@@ -1441,6 +1478,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     conflicts,
     pendingChanges,
     tagDefinitions,
+    holidayConfig,
     isLoading,
     error,
     loadView,
@@ -1461,7 +1499,9 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     updateTag,
     deleteTag,
     saveSettings,
+    saveHolidayConfig,
     loadSettings,
+    _platform: platform,
   };
 }
 
