@@ -73,7 +73,7 @@ function readCSV(ctx) {
 }
 
 /**
- * Read all configured CSV files.
+ * Read all configured CSV files and their .custom.json companions.
  */
 async function fetch(ctx) {
   var paths = ctx.config.paths;
@@ -103,6 +103,18 @@ async function fetch(ctx) {
   } catch (e) {
     throw new Error('Failed to read tasks CSV (' + paths.tasks + '): ' + e.message);
   }
+
+  // Read custom data files (non-CSV fields persisted across push/refresh cycles)
+  result._custom = {};
+  try {
+    result._custom.persons = await readCustomData(ctx, paths.persons);
+  } catch (e) { result._custom.persons = {}; }
+  try {
+    result._custom.projects = await readCustomData(ctx, paths.projects);
+  } catch (e) { result._custom.projects = {}; }
+  try {
+    result._custom.tasks = await readCustomData(ctx, paths.tasks);
+  } catch (e) { result._custom.tasks = {}; }
 
   return result;
 }
@@ -204,6 +216,12 @@ function transform(rawData, ctx) {
     tasks.push(task);
   }
 
+  // ── Merge custom data (non-CSV fields persisted in .custom.json) ──
+  var customData = rawData._custom || {};
+  mergeCustom(persons, customData.persons || {});
+  mergeCustom(projects, customData.projects || {});
+  mergeCustom(tasks, customData.tasks || {});
+
   return {
     tasks: tasks,
     persons: persons,
@@ -230,10 +248,11 @@ function toCSVRow(fields, delimiter) {
 }
 
 /**
- * Push local changes back to CSV files.
+ * Push local changes back to CSV files and .custom.json files.
  *
- * Reads the current CSV, updates matching rows by ID, appends new rows,
- * and removes deleted rows. Then writes the updated CSV back.
+ * CSV-mapped fields go to the CSV file. Any other canonical fields
+ * (description, keyDates, status, tags, dependencies, etc.) are saved
+ * to a <csvpath>.custom.json file so they survive refresh cycles.
  */
 async function push(payload, ctx) {
   if (!ctx.writeFile) {
@@ -247,6 +266,11 @@ async function push(payload, ctx) {
 
   var mapping = getMapping(ctx.config);
   var delimiter = ctx.config.delimiter || ',';
+
+  // Define which canonical fields are represented as CSV columns
+  var taskCsvFields = ['id', 'title', 'startDate', 'endDate', 'progress', 'personId', 'projectId'];
+  var projectCsvFields = ['id', 'name', 'requesterId', 'color'];
+  var personCsvFields = ['id', 'name', 'position'];
 
   try {
     // ── Push tasks ──
@@ -269,6 +293,8 @@ async function push(payload, ctx) {
           return row;
         }
       );
+      // Save custom (non-CSV) task fields
+      await saveCustomData(ctx, paths.tasks, payload.tasks, payload.deletedTaskIds, taskCsvFields);
     }
 
     // ── Push persons ──
@@ -287,6 +313,7 @@ async function push(payload, ctx) {
           return row;
         }
       );
+      await saveCustomData(ctx, paths.persons, payload.persons, [], personCsvFields);
     }
 
     // ── Push projects ──
@@ -306,6 +333,7 @@ async function push(payload, ctx) {
           return row;
         }
       );
+      await saveCustomData(ctx, paths.projects, payload.projects, payload.deletedProjectIds, projectCsvFields);
     }
 
     return { success: true };
@@ -462,6 +490,90 @@ function parseCSVLine(line, delimiter) {
   }
   fields.push(current);
   return fields;
+}
+
+/**
+ * Read custom data from <csvPath>.custom.json.
+ * Returns an object keyed by entity ID → field values.
+ */
+async function readCustomData(ctx, csvPath) {
+  var customPath = csvPath + '.custom.json';
+  try {
+    var raw = await ctx.readFile(customPath);
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch (e) {
+    return {};
+  }
+}
+
+/**
+ * Merge custom data (non-CSV fields) into entity arrays by ID.
+ * Custom values override CSV-derived values.
+ */
+function mergeCustom(entities, customById) {
+  for (var i = 0; i < entities.length; i++) {
+    var entity = entities[i];
+    var custom = customById[entity.id];
+    if (custom) {
+      var keys = Object.keys(custom);
+      for (var k = 0; k < keys.length; k++) {
+        entity[keys[k]] = custom[keys[k]];
+      }
+    }
+  }
+}
+
+/**
+ * Save custom (non-CSV) fields to <csvPath>.custom.json.
+ * Reads existing custom data, updates for pushed entities,
+ * removes deleted IDs, and writes back.
+ */
+async function saveCustomData(ctx, csvPath, entities, deletedIds, csvFieldNames) {
+  var customPath = csvPath + '.custom.json';
+
+  // Read existing custom data
+  var store = {};
+  try {
+    var raw = await ctx.readFile(customPath);
+    if (raw) store = JSON.parse(raw);
+  } catch (e) {}
+
+  var csvSet = {};
+  for (var cf = 0; cf < csvFieldNames.length; cf++) {
+    csvSet[csvFieldNames[cf]] = true;
+  }
+
+  // Update custom fields for each entity
+  for (var ei = 0; ei < entities.length; ei++) {
+    var entity = entities[ei];
+    var entityId = entity.id;
+    var keys = Object.keys(entity);
+    var customFields = {};
+
+    // Find fields NOT in the CSV column set
+    for (var k = 0; k < keys.length; k++) {
+      var key = keys[k];
+      if (key === 'id') continue;
+      if (!csvSet[key]) {
+        customFields[key] = entity[key];
+      }
+    }
+
+    if (Object.keys(customFields).length > 0) {
+      store[entityId] = customFields;
+    }
+  }
+
+  // Remove deleted entities
+  if (deletedIds) {
+    for (var di = 0; di < deletedIds.length; di++) {
+      delete store[deletedIds[di]];
+    }
+  }
+
+  // Write back
+  await ctx.writeFile(customPath, JSON.stringify(store, null, 2));
 }
 
 module.exports = { fetch: fetch, transform: transform, push: push };

@@ -55,3 +55,27 @@ When writing CSV rows, fields containing commas, quotes, or newlines SHALL be pr
 #### Scenario: Field with quote is escaped
 - **WHEN** a field value contains a double quote
 - **THEN** the written CSV SHALL escape it by doubling the quote character
+
+### Requirement: CSV connector persists non-CSV fields to custom data files
+The CSV connector SHALL persist canonical fields that are NOT mapped to CSV columns to a `.custom.json` file alongside each CSV file. On fetch, custom data SHALL be read and merged back into the canonical entities.
+
+#### Scenario: Custom fields saved on push
+- **WHEN** push receives a project with `description` and `keyDates` fields that are not CSV columns
+- **THEN** those fields SHALL be saved to `<csvpath>.custom.json` keyed by entity ID
+
+#### Scenario: Custom fields restored on fetch
+- **WHEN** fetch reads tasks.csv and its companion `.custom.json` contains `{ "t1": { "status": "in-progress" } }`
+- **THEN** after transform, task "t1" SHALL have `status: "in-progress"` merged in
+
+#### Scenario: Custom data overrides CSV values
+- **WHEN** both CSV and `.custom.json` provide a value for the same field and entity ID
+- **THEN** the `.custom.json` value SHALL take precedence
+
+#### Scenario: Deleted entity removed from custom data
+- **WHEN** push receives `deletedTaskIds` containing "t1"
+- **THEN** the "t1" entry SHALL be removed from `<csvpath>.custom.json`
+
+#### Scenario: Missing custom data file is non-fatal
+- **WHEN** fetch runs and no `.custom.json` file exists for a CSV
+- **THEN** the connector SHALL proceed with an empty custom data store
+- **AND** no error SHALL be thrown
