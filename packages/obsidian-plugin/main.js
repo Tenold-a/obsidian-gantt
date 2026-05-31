@@ -1598,6 +1598,8 @@ function createGanttStore(platform) {
   const personSortMode = y3("name");
   const projectSortMode = y3("name");
   const projectSortKeyDates = y3(["\u4E0A\u7EBF\u65F6\u95F4"]);
+  const positionOrder = y3([]);
+  const detailPanelWidth = y3(220);
   const filterTimeStart = y3("");
   const filterTimeEnd = y3("");
   const filterStatuses = y3(/* @__PURE__ */ new Set());
@@ -1710,6 +1712,13 @@ function createGanttStore(platform) {
       });
     }
     const mode = personSortMode.value;
+    const orderList = positionOrder.value;
+    const rankMap = /* @__PURE__ */ new Map();
+    if (orderList.length > 0) {
+      for (let i5 = 0; i5 < orderList.length; i5++) {
+        rankMap.set(orderList[i5].trim(), i5);
+      }
+    }
     groups.sort((a4, b3) => {
       if (a4.personId === "__unassigned__")
         return 1;
@@ -1718,8 +1727,17 @@ function createGanttStore(platform) {
       if (mode === "position") {
         const pa = a4.position;
         const pb = b3.position;
-        if (pa && pb)
+        if (pa && pb) {
+          const ra = rankMap.get(pa);
+          const rb = rankMap.get(pb);
+          if (ra !== void 0 && rb !== void 0)
+            return ra - rb;
+          if (ra !== void 0)
+            return -1;
+          if (rb !== void 0)
+            return 1;
           return pa.localeCompare(pb);
+        }
         if (pa && !pb)
           return -1;
         if (!pa && pb)
@@ -2190,6 +2208,41 @@ function createGanttStore(platform) {
   }
   async function setTaskStatus(taskId, status) {
     await persistEdit(taskId, "status", status);
+    await cascadeTaskToProject(taskId, status);
+  }
+  async function cascadeTaskToProject(taskId, newStatus) {
+    const allTasks = mergedTasks.value;
+    const task = allTasks.find((t4) => t4.id === taskId);
+    if (!task)
+      return;
+    const projectId = task.projectId.value;
+    if (!projectId)
+      return;
+    const projectTasks = allTasks.filter((t4) => t4.projectId.value === projectId);
+    if (projectTasks.length === 0)
+      return;
+    const nonCancelled = projectTasks.filter((t4) => t4.status.value !== "cancelled");
+    if (nonCancelled.length === 0)
+      return;
+    const completed = nonCancelled.filter((t4) => t4.status.value === "completed");
+    const projectOverride = edits.value?.projectOverrides?.[projectId]?.status;
+    let upstreamStatus = "pending";
+    for (const cache of caches.value) {
+      const p5 = cache.projects.find((pr) => pr.id === projectId);
+      if (p5) {
+        upstreamStatus = p5.status ?? "pending";
+        break;
+      }
+    }
+    if (completed.length >= nonCancelled.length) {
+      if (projectOverride !== "completed" && upstreamStatus !== "completed") {
+        await persistProjectEdit(projectId, "status", "completed");
+      }
+    } else if (newStatus !== "completed") {
+      if (projectOverride === "completed") {
+        await persistProjectEdit(projectId, "status", "pending");
+      }
+    }
   }
   async function setProjectStatus(projectId, status) {
     await persistProjectEdit(projectId, "status", status);
@@ -2467,6 +2520,10 @@ function createGanttStore(platform) {
         projectSortMode.value = data.projectSortMode;
       if (data.projectSortKeyDates)
         projectSortKeyDates.value = data.projectSortKeyDates;
+      if (data.positionOrder)
+        positionOrder.value = data.positionOrder;
+      if (data.detailPanelWidth !== void 0)
+        detailPanelWidth.value = data.detailPanelWidth;
       if (data.holidayConfig) {
         holidayConfig.value = {
           weekendsEnabled: data.holidayConfig.weekendsEnabled ?? true,
@@ -2490,6 +2547,8 @@ function createGanttStore(platform) {
       personSortMode: personSortMode.value,
       projectSortMode: projectSortMode.value,
       projectSortKeyDates: projectSortKeyDates.value,
+      positionOrder: positionOrder.value,
+      detailPanelWidth: detailPanelWidth.value,
       holidayConfig: holidayConfig.value
     };
     await platform.storage.write(`settings/${safeName(viewId)}.json`, JSON.stringify(data, null, 2));
@@ -2715,6 +2774,8 @@ function createGanttStore(platform) {
     personSortMode,
     projectSortMode,
     projectSortKeyDates,
+    positionOrder,
+    detailPanelWidth,
     filterTimeStart,
     filterTimeEnd,
     filterStatuses,
@@ -3025,6 +3086,17 @@ function TaskBar(props) {
         const relX = e4.clientX - rect.left;
         const edge = relX < 8 ? "left" : relX > rect.width - 8 ? "right" : "body";
         props.onPointerDown(e4, data.id, edge, paneType);
+      },
+      onPointerMove: (e4) => {
+        if (showHandles) {
+          const rect = e4.currentTarget.getBoundingClientRect();
+          const relX = e4.clientX - rect.left;
+          const isNearEdge = relX < 8 || relX > rect.width - 8;
+          e4.currentTarget.style.cursor = isNearEdge ? "ew-resize" : "grab";
+        }
+      },
+      onPointerLeave: (e4) => {
+        e4.currentTarget.style.cursor = "";
       },
       onClick: (e4) => {
         e4.stopPropagation();
@@ -3464,7 +3536,6 @@ var DAY_WIDTH2 = 30;
 var ROW_HEIGHT2 = 40;
 var LANE_OFFSET2 = 12;
 var LEFT_PANEL_WIDTH = 180;
-var RIGHT_PANEL_WIDTH = 220;
 var GRID_BUFFER_PX = 600;
 function dateToPx2(date) {
   return dateToAbsolutePixel(date, DAY_WIDTH2);
@@ -3963,6 +4034,8 @@ function Timeline(props) {
 function GanttPane(props) {
   const { store, type } = props;
   const rawGroups = type === "person" ? store.personGroups.value : store.projectGroups.value;
+  const showPosEditor = useSignal(false);
+  const posEditorText = useSignal("");
   const filterMatches = store.filteredProjectGroupKeys.value;
   const filterActive = filterMatches !== null;
   const filterDimmedIds = store.filterDimmedTaskIds.value;
@@ -4064,30 +4137,154 @@ function GanttPane(props) {
         highlightedRowKeys,
         dimmedRowKeys,
         onRowClick: handleRowClick,
-        headerContent: type === "person" ? /* @__PURE__ */ u4(
-          "button",
-          {
-            class: "gantt-sort-toggle",
-            onClick: () => {
-              store.personSortMode.value = store.personSortMode.value === "name" ? "position" : "name";
-              store.saveSettings();
-            },
-            title: `Sort: ${store.personSortMode.value === "name" ? "by name" : "by position"}`,
-            style: {
-              padding: "2px 8px",
+        headerContent: type === "person" ? /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ u4(
+            "button",
+            {
+              class: "gantt-sort-toggle",
+              onClick: () => {
+                store.personSortMode.value = store.personSortMode.value === "name" ? "position" : "name";
+                store.saveSettings();
+              },
+              title: `Sort: ${store.personSortMode.value === "name" ? "by name" : "by position"}`,
+              style: {
+                padding: "2px 8px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "4px",
+                background: "var(--background-secondary, #f5f5f5)",
+                cursor: "pointer",
+                fontSize: "11px",
+                whiteSpace: "nowrap"
+              },
+              children: [
+                "Sort: ",
+                store.personSortMode.value === "name" ? "Name" : "Position"
+              ]
+            }
+          ),
+          store.personSortMode.value === "position" && /* @__PURE__ */ u4("div", { style: { position: "relative" }, children: [
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => {
+                  showPosEditor.value = !showPosEditor.value;
+                  if (showPosEditor.value) {
+                    posEditorText.value = store.positionOrder.value.join("\n");
+                  }
+                },
+                title: "Edit position order",
+                style: {
+                  padding: "2px 6px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  background: showPosEditor.value ? "var(--interactive-accent, #4A90D9)" : "var(--background-secondary, #f5f5f5)",
+                  color: showPosEditor.value ? "#fff" : "var(--text-normal, #333)",
+                  cursor: "pointer",
+                  fontSize: "11px"
+                },
+                children: "\u2699"
+              }
+            ),
+            showPosEditor.value && /* @__PURE__ */ u4("div", { style: {
+              position: "absolute",
+              top: "100%",
+              right: 0,
+              marginTop: "4px",
+              zIndex: 100,
+              background: "var(--background-primary, #fff)",
               border: "1px solid var(--background-modifier-border, #ccc)",
-              borderRadius: "4px",
-              background: "var(--background-secondary, #f5f5f5)",
-              cursor: "pointer",
-              fontSize: "11px",
-              whiteSpace: "nowrap"
-            },
-            children: [
-              "Sort: ",
-              store.personSortMode.value === "name" ? "Name" : "Position"
-            ]
-          }
-        ) : /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }, children: [
+              borderRadius: "6px",
+              padding: "8px",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+              minWidth: "180px"
+            }, children: [
+              /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "4px" }, children: "Position order (one per line):" }),
+              /* @__PURE__ */ u4(
+                "textarea",
+                {
+                  value: posEditorText.value,
+                  onInput: (e4) => {
+                    posEditorText.value = e4.target.value;
+                  },
+                  rows: 4,
+                  style: {
+                    width: "100%",
+                    fontSize: "11px",
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    borderRadius: "4px",
+                    padding: "4px",
+                    background: "var(--background-primary, #fff)",
+                    color: "var(--text-normal, #333)",
+                    resize: "vertical",
+                    boxSizing: "border-box"
+                  }
+                }
+              ),
+              /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px", marginTop: "6px" }, children: [
+                /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: () => {
+                      const lines = posEditorText.value.split("\n").map((s5) => s5.trim()).filter(Boolean);
+                      store.positionOrder.value = lines;
+                      store.saveSettings();
+                      showPosEditor.value = false;
+                    },
+                    style: {
+                      padding: "2px 10px",
+                      border: "none",
+                      borderRadius: "4px",
+                      background: "var(--interactive-accent, #4A90D9)",
+                      color: "#fff",
+                      cursor: "pointer",
+                      fontSize: "11px"
+                    },
+                    children: "Save"
+                  }
+                ),
+                /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: () => {
+                      showPosEditor.value = false;
+                    },
+                    style: {
+                      padding: "2px 10px",
+                      border: "1px solid var(--background-modifier-border, #ccc)",
+                      borderRadius: "4px",
+                      background: "transparent",
+                      color: "var(--text-muted, #999)",
+                      cursor: "pointer",
+                      fontSize: "11px"
+                    },
+                    children: "Cancel"
+                  }
+                ),
+                store.positionOrder.value.length > 0 && /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: () => {
+                      store.positionOrder.value = [];
+                      store.saveSettings();
+                      showPosEditor.value = false;
+                    },
+                    style: {
+                      padding: "2px 10px",
+                      border: "1px solid #E06C75",
+                      borderRadius: "4px",
+                      background: "transparent",
+                      color: "#E06C75",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      marginLeft: "auto"
+                    },
+                    children: "Clear"
+                  }
+                )
+              ] })
+            ] })
+          ] })
+        ] }) : /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }, children: [
           /* @__PURE__ */ u4(
             "button",
             {
@@ -4178,8 +4375,8 @@ function UnassignedPanel(props) {
       {
         class: "gantt-unassigned-panel",
         style: {
-          width: `${RIGHT_PANEL_WIDTH}px`,
-          minWidth: `${RIGHT_PANEL_WIDTH}px`,
+          width: `${props.store.detailPanelWidth.value}px`,
+          minWidth: "180px",
           borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
           padding: "12px",
           fontSize: "13px",
@@ -4198,8 +4395,8 @@ function UnassignedPanel(props) {
     {
       class: "gantt-unassigned-panel",
       style: {
-        width: `${RIGHT_PANEL_WIDTH}px`,
-        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        width: `${props.store.detailPanelWidth.value}px`,
+        minWidth: "180px",
         borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
         padding: "12px",
         overflowY: "auto"
@@ -4268,6 +4465,7 @@ function ProjectDetail(props) {
   const { store } = props;
   const sel = store.selectedEntity.value;
   const editing = useSignal(false);
+  const copiedKey = useSignal(null);
   if (!sel || sel.type !== "project")
     return null;
   const project = store.mergedProjects.value.find((p5) => p5.id === sel.id);
@@ -4389,8 +4587,8 @@ function ProjectDetail(props) {
     {
       class: "gantt-detail-panel",
       style: {
-        width: `${RIGHT_PANEL_WIDTH}px`,
-        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        width: `${store.detailPanelWidth.value}px`,
+        minWidth: "180px",
         borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
         padding: "12px",
         fontSize: "13px",
@@ -5057,25 +5255,78 @@ function ProjectDetail(props) {
                 children: "+ Add Link"
               }
             )
-          ] }) : /* @__PURE__ */ u4("div", { children: keyLinks.length > 0 ? keyLinks.map((kl, i5) => /* @__PURE__ */ u4("div", { style: { fontSize: "12px", padding: "2px 0" }, children: /* @__PURE__ */ u4(
-            "a",
-            {
-              href: kl.url,
-              target: "_blank",
-              rel: "noopener noreferrer",
-              style: {
-                color: "var(--interactive-accent, #4A90D9)",
-                textDecoration: "none",
-                display: "flex",
-                alignItems: "center",
-                gap: "4px"
-              },
-              children: [
-                /* @__PURE__ */ u4("span", { style: { fontSize: "10px" }, children: "\u2197" }),
-                kl.name || kl.url
-              ]
-            }
-          ) }, i5)) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" }) })
+          ] }) : /* @__PURE__ */ u4("div", { children: keyLinks.length > 0 ? keyLinks.map((kl, i5) => /* @__PURE__ */ u4("div", { style: { fontSize: "12px", padding: "2px 0", display: "flex", alignItems: "center", gap: "4px" }, children: [
+            /* @__PURE__ */ u4(
+              "a",
+              {
+                href: kl.url,
+                target: "_blank",
+                rel: "noopener noreferrer",
+                onClick: (e4) => {
+                  e4.preventDefault();
+                  const platform = store._platform;
+                  if (platform?.openExternal) {
+                    platform.openExternal(kl.url);
+                  } else {
+                    window.open(kl.url, "_blank");
+                  }
+                },
+                style: {
+                  color: "var(--interactive-accent, #4A90D9)",
+                  textDecoration: "none",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "4px",
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap"
+                },
+                title: kl.url,
+                children: [
+                  /* @__PURE__ */ u4("span", { style: { fontSize: "10px", flexShrink: 0 }, children: "\u2197" }),
+                  /* @__PURE__ */ u4("span", { style: { overflow: "hidden", textOverflow: "ellipsis" }, children: kl.name || kl.url })
+                ]
+              }
+            ),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: async (e4) => {
+                  e4.preventDefault();
+                  e4.stopPropagation();
+                  try {
+                    await navigator.clipboard.writeText(kl.url);
+                    copiedKey.value = kl.url;
+                    setTimeout(() => {
+                      copiedKey.value = null;
+                    }, 1500);
+                  } catch {
+                    const ta = document.createElement("textarea");
+                    ta.value = kl.url;
+                    ta.style.position = "fixed";
+                    ta.style.opacity = "0";
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand("copy");
+                    document.body.removeChild(ta);
+                  }
+                },
+                title: "Copy link",
+                style: {
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  padding: "0 2px",
+                  color: "var(--text-muted, #999)",
+                  flexShrink: 0
+                },
+                children: copiedKey.value === kl.url ? /* @__PURE__ */ u4(Icon, { name: "check", size: 14, title: "Copied!" }) : /* @__PURE__ */ u4(Icon, { name: "copy", size: 14, title: "Copy link" })
+              }
+            )
+          ] }, i5)) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" }) })
         ] }),
         /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
           /* @__PURE__ */ u4("div", { style: labelStyle, children: [
@@ -5146,6 +5397,7 @@ function DetailPanel(props) {
   const projectOverrides = project ? store.edits.value?.projectOverrides?.[project.id] ?? null : null;
   const editTitle = useSignal(false);
   const editTitleValue = useSignal(task.title.value);
+  const copiedTask = useSignal(false);
   let titleInputRef = null;
   function startEditTitle() {
     editTitleValue.value = task.title.value;
@@ -5182,8 +5434,8 @@ function DetailPanel(props) {
     {
       class: "gantt-detail-panel",
       style: {
-        width: `${RIGHT_PANEL_WIDTH}px`,
-        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        width: `${store.detailPanelWidth.value}px`,
+        minWidth: "180px",
         borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
         padding: "12px",
         fontSize: "13px",
@@ -5315,26 +5567,79 @@ function DetailPanel(props) {
           /* @__PURE__ */ u4(FieldRow, { label: "Person", value: personName ?? "-" }),
           /* @__PURE__ */ u4("div", { children: [
             /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Link" }),
-            task.url.value ? /* @__PURE__ */ u4(
-              "a",
-              {
-                href: task.url.value,
-                target: "_blank",
-                rel: "noopener noreferrer",
-                style: {
-                  color: "var(--interactive-accent, #4A90D9)",
-                  textDecoration: "none",
-                  fontSize: "12px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "4px"
-                },
-                children: [
-                  /* @__PURE__ */ u4("span", { style: { fontSize: "10px" }, children: "\u2197" }),
-                  task.url.value
-                ]
-              }
-            ) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: "\u2014" })
+            task.url.value ? /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px" }, children: [
+              /* @__PURE__ */ u4(
+                "a",
+                {
+                  href: task.url.value,
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                  onClick: (e4) => {
+                    e4.preventDefault();
+                    const platform = store._platform;
+                    if (platform?.openExternal) {
+                      platform.openExternal(task.url.value);
+                    } else {
+                      window.open(task.url.value, "_blank");
+                    }
+                  },
+                  style: {
+                    color: "var(--interactive-accent, #4A90D9)",
+                    textDecoration: "none",
+                    fontSize: "12px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap"
+                  },
+                  title: task.url.value,
+                  children: [
+                    /* @__PURE__ */ u4("span", { style: { fontSize: "10px", flexShrink: 0 }, children: "\u2197" }),
+                    /* @__PURE__ */ u4("span", { style: { overflow: "hidden", textOverflow: "ellipsis" }, children: task.url.value })
+                  ]
+                }
+              ),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: async (e4) => {
+                    e4.preventDefault();
+                    e4.stopPropagation();
+                    try {
+                      await navigator.clipboard.writeText(task.url.value);
+                      copiedTask.value = true;
+                      setTimeout(() => {
+                        copiedTask.value = false;
+                      }, 1500);
+                    } catch {
+                      const ta = document.createElement("textarea");
+                      ta.value = task.url.value;
+                      ta.style.position = "fixed";
+                      ta.style.opacity = "0";
+                      document.body.appendChild(ta);
+                      ta.select();
+                      document.execCommand("copy");
+                      document.body.removeChild(ta);
+                    }
+                  },
+                  title: "Copy link",
+                  style: {
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                    padding: "0 2px",
+                    color: "var(--text-muted, #999)",
+                    flexShrink: 0
+                  },
+                  children: copiedTask.value ? /* @__PURE__ */ u4(Icon, { name: "check", size: 14, title: "Copied!" }) : /* @__PURE__ */ u4(Icon, { name: "copy", size: 14, title: "Copy link" })
+                }
+              )
+            ] }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: "\u2014" })
           ] }),
           /* @__PURE__ */ u4("div", { children: [
             /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Dependencies" }),
@@ -6138,6 +6443,7 @@ function DualPane(props) {
   let projectVGuardTimer = null;
   const paneRatio = useSignal(0.5);
   const isResizing = useSignal(false);
+  const isResizingPanel = useSignal(false);
   function handleResizePointerDown(e4) {
     e4.preventDefault();
     isResizing.value = true;
@@ -6152,6 +6458,25 @@ function DualPane(props) {
     }
     function onUp() {
       isResizing.value = false;
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    }
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  }
+  function handlePanelResizePointerDown(e4) {
+    e4.preventDefault();
+    isResizingPanel.value = true;
+    const startX = e4.clientX;
+    const startWidth = store.detailPanelWidth.value;
+    function onMove(ev) {
+      const dx = startX - ev.clientX;
+      const newWidth = Math.min(500, Math.max(180, startWidth + dx));
+      store.detailPanelWidth.value = newWidth;
+    }
+    function onUp() {
+      isResizingPanel.value = false;
+      store.saveSettings();
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
     }
@@ -6231,8 +6556,24 @@ function DualPane(props) {
         }
       ) })
     ] }),
-    showTaskDetail && /* @__PURE__ */ u4(DetailPanel, { store, onDelete: props.onDeleteTask }),
-    showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store, onDelete: props.onDeleteProject })
+    /* @__PURE__ */ u4("div", { style: { display: "flex", flexShrink: 0 }, children: [
+      /* @__PURE__ */ u4(
+        "div",
+        {
+          class: "gantt-panel-resize-handle",
+          style: {
+            width: "4px",
+            cursor: "col-resize",
+            background: isResizingPanel.value ? "var(--interactive-accent, #4A90D9)" : "var(--background-modifier-border, #ccc)",
+            flexShrink: 0,
+            transition: isResizingPanel.value ? "none" : "background 0.15s"
+          },
+          onPointerDown: handlePanelResizePointerDown
+        }
+      ),
+      showTaskDetail && /* @__PURE__ */ u4(DetailPanel, { store, onDelete: props.onDeleteTask }),
+      showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store, onDelete: props.onDeleteProject })
+    ] })
   ] }) });
 }
 function HolidaySettingsPanel(props) {
@@ -7173,6 +7514,23 @@ function createObsidianPlatform(app) {
     // File watching handled by Obsidian's vault events
     theme,
     setIcon: import_obsidian.setIcon,
+    openExternal: (url) => {
+      let normalizedUrl = url.trim();
+      if (!/^https?:\/\//i.test(normalizedUrl)) {
+        normalizedUrl = "https://" + normalizedUrl;
+      }
+      try {
+        const electronRequire = window.require;
+        if (electronRequire) {
+          const { shell } = electronRequire("electron");
+          shell.openExternal(normalizedUrl);
+        } else {
+          window.open(normalizedUrl, "_blank");
+        }
+      } catch {
+        window.open(normalizedUrl, "_blank");
+      }
+    },
     pickFile: (accept) => {
       return new Promise((resolve) => {
         const input = document.createElement("input");
