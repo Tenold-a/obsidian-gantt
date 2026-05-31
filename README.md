@@ -153,16 +153,17 @@ npm run dev:web
 5. 可使用内置 CSV 连接器和示例数据快速上手，或编写自定义连接器
 
 ### 数据目录结构
-数据存储在 vault 的 `.obsidian-gantt/` 目录下：
+插件在 vault 根目录下使用以下路径：
 ```
-.obsidian-gantt/
+obsidian-gantt-data/             # 数据存储（可见，用户可手动备份 edits）
 ├── cache/<connector-id>.json    # 上游数据快照
 ├── edits/<view-id>.json         # 用户覆盖数据（重要，请备份）
 ├── views/<view-id>.json         # 视图配置
 ├── tags/<view-id>.json          # 每个视图的标签定义
-├── settings/<view-id>.json      # 每个视图的筛选/排序设置
-└── connectors/                  # 连接器脚本
-    └── csv-connector.js
+└── settings/<view-id>.json      # 每个视图的筛选/排序设置
+
+connectors/                      # 连接器脚本（vault 根目录，独立于数据目录）
+└── csv-connector.js
 ```
 
 ## 许可证
