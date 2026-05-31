@@ -1,170 +1,170 @@
 # obsidian-gantt
 
-Dual-pane Gantt chart plugin for [Obsidian](https://obsidian.md). Visualize tasks grouped by person and project side by side, with drag-and-drop editing, connector-based data integration, and local-first change tracking.
+[Obsidian](https://obsidian.md) 双窗格甘特图插件。按人员和项目并排展示任务，支持拖拽编辑、连接器数据集成、本地优先的变更追踪。
 
-## Features
+## 功能
 
-### Dual-Pane Gantt View
-- **Person Gantt** (top) — tasks grouped by assignee
-- **Project Gantt** (bottom) — tasks grouped by project
-- **Resizable split** — drag the divider to adjust pane heights
-- **Shared horizontal scroll** — both panes stay synchronized
-- **Independent vertical scroll** — each pane scrolls separately
+### 双窗格甘特图
+- **人员甘特图**（上）—— 按负责人分组展示任务
+- **项目甘特图**（下）—— 按项目分组展示任务
+- **可调节分割** —— 拖动分隔条调整上下窗格高度
+- **水平滚动同步** —— 两个窗格共享同一水平滚动位置
+- **垂直滚动独立** —— 每个窗格各自独立垂直滚动
 
-### Drag & Drop
-- **Move tasks** — drag bars horizontally to shift dates (duration preserved)
-- **Resize tasks** — drag left/right edges to change start or end date
-- **Create from project** — drag project cards from the unassigned panel onto a person row to create a new task
-- **Snap to grid** — all drags snap to day boundaries
-- **Undo** — Ctrl+Z / Cmd+Z to revert the last drag operation
+### 拖拽交互
+- **移动任务** —— 水平拖拽任务条整体平移日期（保持时长不变）
+- **调整任务** —— 拖拽左/右边缘分别修改开始或结束日期
+- **从项目创建任务** —— 将右侧未分配面板中的项目卡片拖到人员行上即创建新任务
+- **吸附到日边界** —— 所有拖拽操作自动吸附到最近的日期刻度
+- **撤销** —— Ctrl+Z / Cmd+Z 撤销最近一次拖拽
 
-### Task & Project Management
-- **Inline name editing** — click a task title or project name to rename
-- **Status management** — six lifecycle states: Pending, In Progress, Cancelled, Pending Online, Online, Completed
-- **Status cascade** — completing a project auto-completes its tasks; completing all tasks auto-completes the project
-- **Delete with confirmation** — soft-delete tasks and projects with confirmation dialogs
-- **Detail panels** — click any task or project to see full details including dates, status, description, and links
+### 任务与项目管理
+- **行内名称编辑** —— 点击任务标题或项目名称即可重命名
+- **状态管理** —— 六种生命周期状态：待开始、进行中、已取消、待上线、已上线、已完成
+- **状态级联** —— 项目完成则其下未取消的任务自动完成；项目下所有未取消的任务都完成则项目自动完成
+- **删除确认** —— 任务和项目均需确认后才删除（软删除机制）
+- **详情面板** —— 点击任意任务或项目查看完整信息，包括日期、状态、描述和链接
 
-### Project Detail Fields
-- **Description** — rich text notes for each project
-- **Requester** — stakeholder or department name
-- **Key Dates** — named milestones with date, color, and icon marker
-- **Key Links** — named URLs associated with the project
-- **Tags** — add, remove, and manage tags with autocomplete suggestions
+### 项目详情字段
+- **描述** —— 项目的富文本备注
+- **需求方** —— 干系人或部门名称
+- **关键日期** —— 带名称、日期、颜色和图标的里程碑标记
+- **关键链接** —— 项目关联的命名 URL
+- **标签** —— 支持添加、移除标签，输入时自动补全
 
-### Tag Management
-- **Tag definitions** — create, rename, recolor, and delete tags per view
-- **Auto-create** — new tags added to projects are automatically registered
-- **Color-coded badges** — tags display with assigned colors in project detail and sidebar
-- **Tag filtering** — filter projects by one or more tags (OR logic)
+### 标签管理
+- **标签定义** —— 每个视图独立创建、重命名、改色、删除标签
+- **自动创建** —— 项目中新添加的标签自动注册到标签定义
+- **彩色徽章** —— 标签在项目详情和侧栏中以定义的颜色显示
+- **标签筛选** —— 按一个或多个标签筛选项目（OR 逻辑）
 
-### Filtering
-- **Time range filter** — show only projects whose key dates or tasks intersect a date range
-- **Status filter** — multi-select filter by project status
-- **Tag filter** — multi-select filter by project tags
-- **Combined filters** — AND logic across dimensions, OR logic within each dimension
-- **Dimmed out-of-filter tasks** — person pane dims task bars belonging to filtered-out projects
+### 筛选系统
+- **时间范围筛选** —— 仅显示关键日期或任务日期与指定范围有交集的项目
+- **状态筛选** —— 多选项目状态进行筛选
+- **标签筛选** —— 多选标签进行筛选
+- **组合筛选** —— 跨维度 AND 逻辑，同一维度内 OR 逻辑
+- **淡化非匹配任务** —— 人员窗格中被筛选掉的项目对应任务条以降低的透明度显示
 
-### Cross-View Highlight
-- **Click to select** — click a project, task, or person to highlight related items
-- **Cross-view sync** — selecting an entity highlights matching bars in both panes
-- **Row dimming** — rows without highlighted tasks fade to de-emphasize
+### 跨视图高亮
+- **点击选中** —— 点击项目、任务或人员以高亮相关条目
+- **跨视图同步** —— 选中实体后两个窗格中匹配的任务条同时高亮
+- **行淡化** —— 无高亮任务的行降低透明度以弱化
 
-### Pending Changes & Push
-- **Local-first edits** — all modifications saved locally before pushing upstream
-- **Pending changes panel** — review all un-pushed changes grouped by type (added/modified/deleted)
-- **Multi-select** — select which changes to push or dismiss
-- **Push to upstream** — connectors can implement `push()` for bidirectional sync
-- **Dismiss** — discard unwanted local changes without pushing
+### 待推送变更
+- **本地优先编辑** —— 所有修改先保存在本地，再推送到上游
+- **变更面板** —— 查看所有未推送变更，按类型分组（新增/修改/删除）
+- **多选支持** —— 可选择性地推送或丢弃部分变更
+- **推送到上游** —— 连接器可实现 `push()` 方法支持双向同步
+- **丢弃变更** —— 放弃不需要的本地修改而不影响上游
 
-### Data Connectors
-- **Connector scripts** — JavaScript modules that fetch, transform, and optionally push data
-- **CSV connector** — built-in connector reads persons.csv, projects.csv, tasks.csv with configurable column mapping, custom data persistence, and push support
-- **Multi-connector views** — combine data from multiple connectors in one view
-- **Platform abstraction** — connectors run in Obsidian (Vault files) or standalone web app (localStorage)
+### 数据连接器
+- **连接器脚本** —— JavaScript 模块，负责拉取、转换并可选推送数据
+- **CSV 连接器** —— 内置连接器，读取 persons.csv、projects.csv、tasks.csv，支持自定义列映射、自定义数据持久化和推送
+- **多连接器视图** —— 一个视图可合并多个连接器的数据
+- **平台抽象** —— 连接器在 Obsidian（Vault 文件）或独立 Web 应用（localStorage）中均可运行
 
-### Local Data Store
-- **Three-file separation** — cache (machine-written snapshots), edits (user overrides), views (display config)
-- **Field-level source tracking** — each field knows whether it came from upstream or was manually edited
-- **Merge engine** — combines upstream data with local edits; manual edits survive refreshes
-- **Incremental cache** — time-range-aware caching for efficient data loading
+### 本地数据存储
+- **三类文件分离** —— cache（快照，机器写入，可丢弃）、edits（用户覆盖，人工修改，需备份）、views（显示配置）
+- **字段级来源追踪** —— 每个字段记录其来源是上游数据还是手动编辑
+- **合并引擎** —— 将上游数据与本地编辑合并；手动编辑在刷新后保留
+- **增量缓存** —— 按时间范围缓存，高效加载数据
 
-### Standalone Web App
-- **Browser-based** — full Gantt chart runs without Obsidian
-- **localStorage backend** — all data and configuration stored in the browser
-- **Connector upload** — paste or upload connector scripts
-- **Static deployment** — deployable to any static hosting
+### 独立 Web 应用
+- **浏览器中运行** —— 无需 Obsidian 即可使用完整甘特图
+- **localStorage 后端** —— 所有数据和配置存储在浏览器中
+- **连接器上传** —— 粘贴或上传连接器脚本文件
+- **静态部署** —— 可部署到任意静态托管服务
 
-## Architecture
+## 架构
 
 ```
 obsidian-gantt/
 ├── packages/
-│   ├── gantt-core/          # Zero-dependency core: types, merge engine, date utils, CSV parser
-│   ├── gantt-ui/            # Preact + @preact/signals UI: components, store, drag interactions
-│   ├── obsidian-plugin/     # Obsidian plugin: view, platform adapters (Vault storage, requestUrl)
-│   └── web-app/             # Standalone Vite app: browser platform adapters (localStorage, fetch)
+│   ├── gantt-core/          # 零依赖核心：类型定义、合并引擎、日期工具、CSV 解析器
+│   ├── gantt-ui/            # Preact + @preact/signals UI：组件、数据仓库、拖拽交互
+│   ├── obsidian-plugin/     # Obsidian 插件：视图、平台适配器（Vault 存储、requestUrl）
+│   └── web-app/             # 独立 Vite 应用：浏览器平台适配器（localStorage、fetch）
 └── openspec/
-    ├── specs/               # Authoritative specs (14 capability areas)
-    └── changes/             # Active and archived change proposals
+    ├── specs/               # 规范文档（14 个功能领域）
+    └── changes/             # 活跃和已归档的变更提案
 ```
 
-### Design Principles
-- **`gantt-core`** has zero runtime dependencies — pure TypeScript types and logic
-- **`gantt-ui`** depends only on `gantt-core`, Preact, and `@preact/signals`
-- Platform packages (`obsidian-plugin`, `web-app`) implement `GanttPlatform` interfaces and never import each other
-- UI state is managed via signals for fine-grained DOM updates without full re-renders
-- The timeline uses CSS `repeating-linear-gradient` for grid lines (no per-line DOM elements) and horizontal virtualization for performance
+### 设计原则
+- **`gantt-core`** 零运行时依赖 —— 纯 TypeScript 类型和逻辑
+- **`gantt-ui`** 仅依赖 `gantt-core`、Preact 和 `@preact/signals`
+- 平台包（`obsidian-plugin`、`web-app`）实现 `GanttPlatform` 接口，互不引用
+- UI 状态通过 signals 管理，实现细粒度 DOM 更新，无需完整组件树重新渲染
+- 时间线使用 CSS `repeating-linear-gradient` 渲染网格线（不创建每根线的 DOM 元素），并采用水平虚拟化提升性能
 
-### Data Flow
+### 数据流
 ```
-Connector.fetch() → raw data → Connector.transform() → CanonicalData
+Connector.fetch() → 原始数据 → Connector.transform() → CanonicalData
                                                               ↓
-                                              cache/<connector>.json (snapshot)
+                                              cache/<connector>.json（快照）
                                                               ↓
-                        edits/<view>.json ← → Merge Engine → Gantt UI (runtime tasks)
-                        (user overrides)         ↓
-                                           Source-tracked fields
-                                           (upstream vs manual)
+                        edits/<view>.json ← → 合并引擎 → 甘特图 UI（运行时任务）
+                        （用户覆盖）              ↓
+                                           字段来源追踪
+                                           （upstream vs manual）
                                                               ↓
-                        Connector.push() ← Pending Changes Panel
+                        Connector.push() ← 待推送变更面板
 ```
 
-## Development
+## 开发
 
-### Prerequisites
+### 前置要求
 - Node.js 18+
 - npm 9+
 
-### Commands
+### 常用命令
 ```bash
-npm install            # Install all dependencies
-npm run build          # Build all packages
-npm run build:core     # Build core only
-npm run build:ui       # Build UI only
-npm run build:plugin   # Build Obsidian plugin only
-npm run build:web      # Build web app only
-npm run dev:web        # Start web app dev server (Vite HMR)
-npm test               # Run tests (gantt-core)
-npm run clean          # Clean all build outputs
+npm install            # 安装所有依赖
+npm run build          # 构建所有包
+npm run build:core     # 仅构建核心包
+npm run build:ui       # 仅构建 UI 包
+npm run build:plugin   # 仅构建 Obsidian 插件
+npm run build:web      # 仅构建 Web 应用
+npm run dev:web        # 启动 Web 开发服务器（Vite 热更新）
+npm test               # 运行测试（gantt-core）
+npm run clean          # 清理所有构建产物
 ```
 
-### Building the Obsidian Plugin
-The built plugin is output to `packages/obsidian-plugin/`:
-- `main.js` — bundled plugin (esbuild)
-- `main.js.map` — source map
-- `manifest.json` — plugin metadata
-- Sample CSV files and the CSV connector are also copied
+### 构建 Obsidian 插件
+构建产物输出到 `packages/obsidian-plugin/`：
+- `main.js` — 打包后的插件（esbuild）
+- `main.js.map` — 源码映射
+- `manifest.json` — 插件元信息
+- 示例 CSV 文件和 CSV 连接器也会一并复制
 
-Copy or symlink this directory into your vault's `.obsidian/plugins/obsidian-gantt/` to install.
+将此目录复制或软链接到 vault 的 `.obsidian/plugins/obsidian-gantt/` 即可安装。
 
-### Running the Web App
+### 运行 Web 应用
 ```bash
 npm run dev:web
 ```
-Opens a local dev server with hot reload. Useful for rapid UI development without Obsidian.
+启动带热更新的本地开发服务器，适合快速 UI 开发，无需 Obsidian 环境。
 
-## Obsidian Plugin Usage
+## Obsidian 插件使用
 
-1. Install the plugin in your vault
-2. Click the Gantt ribbon icon or run "Open Gantt Chart" command
-3. The view opens in the center tab area by default
-4. Configure connectors in your view settings to load data
-5. Use the built-in CSV connector with sample data to get started, or write custom connectors
+1. 在 vault 中安装插件
+2. 点击甘特图功能图标或执行 "Open Gantt Chart" 命令
+3. 视图默认在中央标签页区域打开
+4. 在视图设置中配置连接器以加载数据
+5. 可使用内置 CSV 连接器和示例数据快速上手，或编写自定义连接器
 
-### Data Directory Structure
-Within your vault, data is stored under `.obsidian-gantt/`:
+### 数据目录结构
+数据存储在 vault 的 `.obsidian-gantt/` 目录下：
 ```
 .obsidian-gantt/
-├── cache/<connector-id>.json    # Upstream data snapshots
-├── edits/<view-id>.json         # User overrides (precious — back up)
-├── views/<view-id>.json         # View configurations
-├── tags/<view-id>.json          # Tag definitions per view
-├── settings/<view-id>.json      # Filter/sort settings per view
-└── connectors/                  # Connector scripts
+├── cache/<connector-id>.json    # 上游数据快照
+├── edits/<view-id>.json         # 用户覆盖数据（重要，请备份）
+├── views/<view-id>.json         # 视图配置
+├── tags/<view-id>.json          # 每个视图的标签定义
+├── settings/<view-id>.json      # 每个视图的筛选/排序设置
+└── connectors/                  # 连接器脚本
     └── csv-connector.js
 ```
 
-## License
+## 许可证
 
 MIT
