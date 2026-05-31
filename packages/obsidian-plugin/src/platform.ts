@@ -58,6 +58,24 @@ export function createObsidianPlatform(app: ObsidianAppLike): GanttPlatform {
     watcher: null, // File watching handled by Obsidian's vault events
     theme,
     setIcon,
+    openExternal: (url: string) => {
+      // Ensure URL has a protocol prefix, otherwise shell.openExternal may open file manager
+      let normalizedUrl = url.trim();
+      if (!/^https?:\/\//i.test(normalizedUrl)) {
+        normalizedUrl = 'https://' + normalizedUrl;
+      }
+      try {
+        const electronRequire = (window as any).require;
+        if (electronRequire) {
+          const { shell } = electronRequire('electron');
+          shell.openExternal(normalizedUrl);
+        } else {
+          window.open(normalizedUrl, '_blank');
+        }
+      } catch {
+        window.open(normalizedUrl, '_blank');
+      }
+    },
     pickFile: (accept: string) => {
       return new Promise((resolve) => {
         const input = document.createElement('input');

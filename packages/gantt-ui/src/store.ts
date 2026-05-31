@@ -83,6 +83,8 @@ export interface GanttStore {
   personSortMode: ReturnType<typeof signal<'name' | 'position'>>;
   projectSortMode: ReturnType<typeof signal<'name' | 'time'>>;
   projectSortKeyDates: ReturnType<typeof signal<string[]>>;
+  positionOrder: ReturnType<typeof signal<string[]>>;
+  detailPanelWidth: ReturnType<typeof signal<number>>;
 
   // Filtering
   filterTimeStart: ReturnType<typeof signal<string>>;
@@ -171,6 +173,8 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
   const personSortMode = signal<'name' | 'position'>('name');
   const projectSortMode = signal<'name' | 'time'>('name');
   const projectSortKeyDates = signal<string[]>(['上线时间']);
+  const positionOrder = signal<string[]>([]);
+  const detailPanelWidth = signal<number>(220);
   const filterTimeStart = signal<string>('');
   const filterTimeEnd = signal<string>('');
   const filterStatuses = signal<Set<string>>(new Set());
@@ -298,6 +302,15 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
     const mode = personSortMode.value;
 
+    // Build position rank map for custom ordering
+    const orderList = positionOrder.value;
+    const rankMap = new Map<string, number>();
+    if (orderList.length > 0) {
+      for (let i = 0; i < orderList.length; i++) {
+        rankMap.set(orderList[i].trim(), i);
+      }
+    }
+
     groups.sort((a, b) => {
       if (a.personId === '__unassigned__') return 1;
       if (b.personId === '__unassigned__') return -1;
@@ -305,7 +318,17 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       if (mode === 'position') {
         const pa = a.position;
         const pb = b.position;
-        if (pa && pb) return pa.localeCompare(pb);
+        if (pa && pb) {
+          const ra = rankMap.get(pa);
+          const rb = rankMap.get(pb);
+          // Both in custom order → sort by rank
+          if (ra !== undefined && rb !== undefined) return ra - rb;
+          // One in custom order → it comes first
+          if (ra !== undefined) return -1;
+          if (rb !== undefined) return 1;
+          // Neither in custom order → alphabetical
+          return pa.localeCompare(pb);
+        }
         if (pa && !pb) return -1;
         if (!pa && pb) return 1;
       }
@@ -866,6 +889,44 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
   async function setTaskStatus(taskId: string, status: string): Promise<void> {
     await persistEdit(taskId, 'status', status);
+    // Cascade: if all non-cancelled tasks in the project are completed, auto-complete the project
+    await cascadeTaskToProject(taskId, status);
+  }
+
+  async function cascadeTaskToProject(taskId: string, newStatus: string): Promise<void> {
+    // Find the task and its project
+    const allTasks = mergedTasks.value;
+    const task = allTasks.find(t => t.id === taskId);
+    if (!task) return;
+    const projectId = task.projectId.value;
+    if (!projectId) return;
+
+    // Count non-cancelled and completed tasks in this project
+    const projectTasks = allTasks.filter(t => t.projectId.value === projectId);
+    if (projectTasks.length === 0) return;
+    const nonCancelled = projectTasks.filter(t => t.status.value !== 'cancelled');
+    if (nonCancelled.length === 0) return;
+    const completed = nonCancelled.filter(t => t.status.value === 'completed');
+
+    const projectOverride = edits.value?.projectOverrides?.[projectId]?.status;
+    // Get the upstream project status
+    let upstreamStatus = 'pending';
+    for (const cache of caches.value) {
+      const p = cache.projects.find(pr => pr.id === projectId);
+      if (p) { upstreamStatus = p.status ?? 'pending'; break; }
+    }
+
+    if (completed.length >= nonCancelled.length) {
+      // All non-cancelled tasks are completed — auto-complete the project
+      if (projectOverride !== 'completed' && upstreamStatus !== 'completed') {
+        await persistProjectEdit(projectId, 'status', 'completed');
+      }
+    } else if (newStatus !== 'completed') {
+      // Task was un-completed — if project was auto-completed, revert to pending
+      if (projectOverride === 'completed') {
+        await persistProjectEdit(projectId, 'status', 'pending');
+      }
+    }
   }
 
   async function setProjectStatus(projectId: string, status: string): Promise<void> {
@@ -1191,6 +1252,8 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       if (data.personSortMode) personSortMode.value = data.personSortMode;
       if (data.projectSortMode) projectSortMode.value = data.projectSortMode;
       if (data.projectSortKeyDates) projectSortKeyDates.value = data.projectSortKeyDates;
+      if (data.positionOrder) positionOrder.value = data.positionOrder;
+      if (data.detailPanelWidth !== undefined) detailPanelWidth.value = data.detailPanelWidth;
       if (data.holidayConfig) {
           holidayConfig.value = {
             weekendsEnabled: data.holidayConfig.weekendsEnabled ?? true,
@@ -1213,6 +1276,8 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       personSortMode: personSortMode.value,
       projectSortMode: projectSortMode.value,
       projectSortKeyDates: projectSortKeyDates.value,
+      positionOrder: positionOrder.value,
+      detailPanelWidth: detailPanelWidth.value,
       holidayConfig: holidayConfig.value,
     };
     await platform.storage.write(`settings/${safeName(viewId)}.json`, JSON.stringify(data, null, 2));
@@ -1467,6 +1532,8 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     personSortMode,
     projectSortMode,
     projectSortKeyDates,
+    positionOrder,
+    detailPanelWidth,
     filterTimeStart,
     filterTimeEnd,
     filterStatuses,

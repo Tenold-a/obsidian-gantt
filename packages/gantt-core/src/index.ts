@@ -346,6 +346,8 @@ export interface GanttPlatform {
   setIcon(el: HTMLElement, name: string): void;
   /** Open a file picker dialog. Returns the file name and content, or null if cancelled. */
   pickFile?: (accept: string) => Promise<{ name: string; content: string } | null>;
+  /** Open a URL in the system default browser. */
+  openExternal: (url: string) => void;
 }
 
 // ============================================================

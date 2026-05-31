@@ -383,6 +383,17 @@ export function TaskBar(props: {
         const edge = relX < 8 ? 'left' : relX > rect.width - 8 ? 'right' : 'body';
         props.onPointerDown(e, data.id, edge, paneType);
       }}
+      onPointerMove={(e) => {
+        if (showHandles) {
+          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          const relX = e.clientX - rect.left;
+          const isNearEdge = relX < 8 || relX > rect.width - 8;
+          (e.currentTarget as HTMLElement).style.cursor = isNearEdge ? 'ew-resize' : 'grab';
+        }
+      }}
+      onPointerLeave={(e) => {
+        (e.currentTarget as HTMLElement).style.cursor = '';
+      }}
       onClick={(e) => {
         e.stopPropagation();
         props.onClick(data.id);

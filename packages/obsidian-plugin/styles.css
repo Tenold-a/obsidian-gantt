@@ -52,7 +52,6 @@
   top: 0;
   bottom: 0;
   width: 4px;
-  cursor: ew-resize;
   opacity: 0.3;
   transition: opacity 0.15s;
   z-index: 1;
@@ -118,6 +117,11 @@
 
 /* Resize handle */
 .gantt-resize-handle:hover {
+  background: var(--interactive-accent) !important;
+}
+
+/* Panel resize handle (detail sidebar) */
+.gantt-panel-resize-handle:hover {
   background: var(--interactive-accent) !important;
 }
 

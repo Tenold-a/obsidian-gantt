@@ -643,6 +643,10 @@ function GanttPane(props: {
   const { store, type } = props;
   const rawGroups = type === 'person' ? store.personGroups.value : store.projectGroups.value;
 
+  // Position editor state
+  const showPosEditor = useSignal(false);
+  const posEditorText = useSignal('');
+
   // Apply project filtering — null = no filter active, Set = active filter
   const filterMatches = store.filteredProjectGroupKeys.value;
   const filterActive = filterMatches !== null;
@@ -759,25 +763,142 @@ function GanttPane(props: {
         dimmedRowKeys={dimmedRowKeys}
         onRowClick={handleRowClick}
         headerContent={type === 'person' ? (
-          <button
-            class="gantt-sort-toggle"
-            onClick={() => {
-              store.personSortMode.value = store.personSortMode.value === 'name' ? 'position' : 'name';
-              store.saveSettings();
-            }}
-            title={`Sort: ${store.personSortMode.value === 'name' ? 'by name' : 'by position'}`}
-            style={{
-              padding: '2px 8px',
-              border: '1px solid var(--background-modifier-border, #ccc)',
-              borderRadius: '4px',
-              background: 'var(--background-secondary, #f5f5f5)',
-              cursor: 'pointer',
-              fontSize: '11px',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            Sort: {store.personSortMode.value === 'name' ? 'Name' : 'Position'}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+            <button
+              class="gantt-sort-toggle"
+              onClick={() => {
+                store.personSortMode.value = store.personSortMode.value === 'name' ? 'position' : 'name';
+                store.saveSettings();
+              }}
+              title={`Sort: ${store.personSortMode.value === 'name' ? 'by name' : 'by position'}`}
+              style={{
+                padding: '2px 8px',
+                border: '1px solid var(--background-modifier-border, #ccc)',
+                borderRadius: '4px',
+                background: 'var(--background-secondary, #f5f5f5)',
+                cursor: 'pointer',
+                fontSize: '11px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Sort: {store.personSortMode.value === 'name' ? 'Name' : 'Position'}
+            </button>
+            {store.personSortMode.value === 'position' && (
+              <div style={{ position: 'relative' }}>
+                <button
+                  onClick={() => {
+                    showPosEditor.value = !showPosEditor.value;
+                    if (showPosEditor.value) {
+                      posEditorText.value = store.positionOrder.value.join('\n');
+                    }
+                  }}
+                  title="Edit position order"
+                  style={{
+                    padding: '2px 6px',
+                    border: '1px solid var(--background-modifier-border, #ccc)',
+                    borderRadius: '4px',
+                    background: showPosEditor.value ? 'var(--interactive-accent, #4A90D9)' : 'var(--background-secondary, #f5f5f5)',
+                    color: showPosEditor.value ? '#fff' : 'var(--text-normal, #333)',
+                    cursor: 'pointer',
+                    fontSize: '11px',
+                  }}
+                >
+                  ⚙
+                </button>
+                {showPosEditor.value && (
+                  <div style={{
+                    position: 'absolute',
+                    top: '100%',
+                    right: 0,
+                    marginTop: '4px',
+                    zIndex: 100,
+                    background: 'var(--background-primary, #fff)',
+                    border: '1px solid var(--background-modifier-border, #ccc)',
+                    borderRadius: '6px',
+                    padding: '8px',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                    minWidth: '180px',
+                  }}>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '4px' }}>
+                      Position order (one per line):
+                    </div>
+                    <textarea
+                      value={posEditorText.value}
+                      onInput={(e) => { posEditorText.value = (e.target as HTMLTextAreaElement).value; }}
+                      rows={4}
+                      style={{
+                        width: '100%',
+                        fontSize: '11px',
+                        border: '1px solid var(--background-modifier-border, #ccc)',
+                        borderRadius: '4px',
+                        padding: '4px',
+                        background: 'var(--background-primary, #fff)',
+                        color: 'var(--text-normal, #333)',
+                        resize: 'vertical',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
+                      <button
+                        onClick={() => {
+                          const lines = posEditorText.value.split('\n').map(s => s.trim()).filter(Boolean);
+                          store.positionOrder.value = lines;
+                          store.saveSettings();
+                          showPosEditor.value = false;
+                        }}
+                        style={{
+                          padding: '2px 10px',
+                          border: 'none',
+                          borderRadius: '4px',
+                          background: 'var(--interactive-accent, #4A90D9)',
+                          color: '#fff',
+                          cursor: 'pointer',
+                          fontSize: '11px',
+                        }}
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={() => { showPosEditor.value = false; }}
+                        style={{
+                          padding: '2px 10px',
+                          border: '1px solid var(--background-modifier-border, #ccc)',
+                          borderRadius: '4px',
+                          background: 'transparent',
+                          color: 'var(--text-muted, #999)',
+                          cursor: 'pointer',
+                          fontSize: '11px',
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      {store.positionOrder.value.length > 0 && (
+                        <button
+                          onClick={() => {
+                            store.positionOrder.value = [];
+                            store.saveSettings();
+                            showPosEditor.value = false;
+                          }}
+                          style={{
+                            padding: '2px 10px',
+                            border: '1px solid #E06C75',
+                            borderRadius: '4px',
+                            background: 'transparent',
+                            color: '#E06C75',
+                            cursor: 'pointer',
+                            fontSize: '11px',
+                            marginLeft: 'auto',
+                          }}
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         ) : (
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
             <button
@@ -872,8 +993,8 @@ function UnassignedPanel(props: {
       <div
         class="gantt-unassigned-panel"
         style={{
-          width: `${RIGHT_PANEL_WIDTH}px`,
-          minWidth: `${RIGHT_PANEL_WIDTH}px`,
+          width: `${props.store.detailPanelWidth.value}px`,
+          minWidth: '180px',
           borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
           padding: '12px',
           fontSize: '13px',
@@ -895,8 +1016,8 @@ function UnassignedPanel(props: {
     <div
       class="gantt-unassigned-panel"
       style={{
-        width: `${RIGHT_PANEL_WIDTH}px`,
-        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        width: `${props.store.detailPanelWidth.value}px`,
+        minWidth: '180px',
         borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
         padding: '12px',
         overflowY: 'auto',
@@ -962,6 +1083,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
   const { store } = props;
   const sel = store.selectedEntity.value;
   const editing = useSignal(false);
+  const copiedKey = useSignal<string | null>(null);
 
   if (!sel || sel.type !== 'project') return null;
 
@@ -1099,8 +1221,8 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
     <div
       class="gantt-detail-panel"
       style={{
-        width: `${RIGHT_PANEL_WIDTH}px`,
-        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        width: `${store.detailPanelWidth.value}px`,
+        minWidth: '180px',
         borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
         padding: '12px',
         fontSize: '13px',
@@ -1634,22 +1756,68 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
           <div>
             {keyLinks.length > 0 ? (
               keyLinks.map((kl, i) => (
-                <div key={i} style={{ fontSize: '12px', padding: '2px 0' }}>
+                <div key={i} style={{ fontSize: '12px', padding: '2px 0', display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <a
                     href={kl.url}
                     target="_blank"
                     rel="noopener noreferrer"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      const platform = (store as any)._platform;
+                      if (platform?.openExternal) {
+                        platform.openExternal(kl.url);
+                      } else {
+                        window.open(kl.url, '_blank');
+                      }
+                    }}
                     style={{
                       color: 'var(--interactive-accent, #4A90D9)',
                       textDecoration: 'none',
                       display: 'flex',
                       alignItems: 'center',
                       gap: '4px',
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
                     }}
+                    title={kl.url}
                   >
-                    <span style={{ fontSize: '10px' }}>↗</span>
-                    {kl.name || kl.url}
+                    <span style={{ fontSize: '10px', flexShrink: 0 }}>↗</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{kl.name || kl.url}</span>
                   </a>
+                  <button
+                    onClick={async (e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      try {
+                        await navigator.clipboard.writeText(kl.url);
+                        copiedKey.value = kl.url;
+                        setTimeout(() => { copiedKey.value = null; }, 1500);
+                      } catch {
+                        // fallback for older browsers
+                        const ta = document.createElement('textarea');
+                        ta.value = kl.url;
+                        ta.style.position = 'fixed';
+                        ta.style.opacity = '0';
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(ta);
+                      }
+                    }}
+                    title="Copy link"
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      padding: '0 2px',
+                      color: 'var(--text-muted, #999)',
+                      flexShrink: 0,
+                    }}
+                  >{copiedKey.value === kl.url ? <Icon name="check" size={14} title="Copied!" /> : <Icon name="copy" size={14} title="Copy link" />}</button>
                 </div>
               ))
             ) : (
@@ -1746,6 +1914,7 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
   // Inline title editing
   const editTitle = useSignal(false);
   const editTitleValue = useSignal(task.title.value);
+  const copiedTask = useSignal(false);
   let titleInputRef: HTMLInputElement | null = null;
 
   function startEditTitle() {
@@ -1784,8 +1953,8 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
     <div
       class="gantt-detail-panel"
       style={{
-        width: `${RIGHT_PANEL_WIDTH}px`,
-        minWidth: `${RIGHT_PANEL_WIDTH}px`,
+        width: `${store.detailPanelWidth.value}px`,
+        minWidth: '180px',
         borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
         padding: '12px',
         fontSize: '13px',
@@ -1898,22 +2067,69 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
         <div>
           <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Link</div>
           {task.url.value ? (
-            <a
-              href={task.url.value}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                color: 'var(--interactive-accent, #4A90D9)',
-                textDecoration: 'none',
-                fontSize: '12px',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-              }}
-            >
-              <span style={{ fontSize: '10px' }}>↗</span>
-              {task.url.value}
-            </a>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <a
+                href={task.url.value}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => {
+                  e.preventDefault();
+                  const platform = (store as any)._platform;
+                  if (platform?.openExternal) {
+                    platform.openExternal(task.url.value!);
+                  } else {
+                    window.open(task.url.value!, '_blank');
+                  }
+                }}
+                style={{
+                  color: 'var(--interactive-accent, #4A90D9)',
+                  textDecoration: 'none',
+                  fontSize: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={task.url.value}
+              >
+                <span style={{ fontSize: '10px', flexShrink: 0 }}>↗</span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{task.url.value}</span>
+              </a>
+              <button
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  try {
+                    await navigator.clipboard.writeText(task.url.value!);
+                    copiedTask.value = true;
+                    setTimeout(() => { copiedTask.value = false; }, 1500);
+                  } catch {
+                    const ta = document.createElement('textarea');
+                    ta.value = task.url.value!;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                  }
+                }}
+                title="Copy link"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                  padding: '0 2px',
+                  color: 'var(--text-muted, #999)',
+                  flexShrink: 0,
+                }}
+              >{copiedTask.value ? <Icon name="check" size={14} title="Copied!" /> : <Icon name="copy" size={14} title="Copy link" />}</button>
+            </div>
           ) : (
             <div style={{ fontSize: '12px' }}>—</div>
           )}
@@ -2723,6 +2939,9 @@ export function DualPane(props: {
   // Drag resize state
   const isResizing = useSignal(false);
 
+  // Panel resize state
+  const isResizingPanel = useSignal(false);
+
   function handleResizePointerDown(e: PointerEvent) {
     e.preventDefault();
     isResizing.value = true;
@@ -2740,6 +2959,30 @@ export function DualPane(props: {
 
     function onUp() {
       isResizing.value = false;
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    }
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  }
+
+  function handlePanelResizePointerDown(e: PointerEvent) {
+    e.preventDefault();
+    isResizingPanel.value = true;
+
+    const startX = e.clientX;
+    const startWidth = store.detailPanelWidth.value;
+
+    function onMove(ev: PointerEvent) {
+      const dx = startX - ev.clientX;
+      const newWidth = Math.min(500, Math.max(180, startWidth + dx));
+      store.detailPanelWidth.value = newWidth;
+    }
+
+    function onUp() {
+      isResizingPanel.value = false;
+      store.saveSettings();
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
     }
@@ -2824,9 +3067,25 @@ export function DualPane(props: {
           </div>
         </div>
 
-        {/* Detail sidebar — appears when task or project is selected */}
-        {showTaskDetail && <DetailPanel store={store} onDelete={props.onDeleteTask} />}
-        {showProjectDetail && <ProjectDetail store={store} onDelete={props.onDeleteProject} />}
+        {/* Detail sidebar — resizable, appears when task or project is selected */}
+        <div style={{ display: 'flex', flexShrink: 0 }}>
+          {/* Panel resize handle */}
+          <div
+            class="gantt-panel-resize-handle"
+            style={{
+              width: '4px',
+              cursor: 'col-resize',
+              background: isResizingPanel.value
+                ? 'var(--interactive-accent, #4A90D9)'
+                : 'var(--background-modifier-border, #ccc)',
+              flexShrink: 0,
+              transition: isResizingPanel.value ? 'none' : 'background 0.15s',
+            }}
+            onPointerDown={handlePanelResizePointerDown}
+          />
+          {showTaskDetail && <DetailPanel store={store} onDelete={props.onDeleteTask} />}
+          {showProjectDetail && <ProjectDetail store={store} onDelete={props.onDeleteProject} />}
+        </div>
       </div>
     </div>
   );

@@ -86,6 +86,13 @@ const platform: GanttPlatform = {
   setIcon(el: HTMLElement, name: string) {
     el.textContent = name;
   },
+  openExternal: (url: string) => {
+    let normalizedUrl = url.trim();
+    if (!/^https?:\/\//i.test(normalizedUrl)) {
+      normalizedUrl = 'https://' + normalizedUrl;
+    }
+    window.open(normalizedUrl, '_blank');
+  },
   pickFile: (accept: string) => {
     return new Promise((resolve) => {
       const input = document.createElement('input');
