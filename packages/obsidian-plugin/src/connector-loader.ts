@@ -55,9 +55,11 @@ export function createObsidianConnectorContext(
   config: Record<string, unknown>,
   vaultAdapter: VaultAdapter,
   requestUrl: (opts: { url: string; method?: string; headers?: Record<string, string>; body?: string }) => Promise<{ json: unknown; status: number }>,
+  viewState?: ConnectorContext['viewState'],
 ): ConnectorContext {
   return {
     config,
+    viewState,
     log: (...args: unknown[]) => console.log('[Gantt Connector]', ...args),
     request: async (url: string, opts?: RequestInit): Promise<Response> => {
       const result = await requestUrl({

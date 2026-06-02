@@ -53,9 +53,10 @@ const dummyConnectorLoader: IConnectorLoader = {
 
 // ── Web connector context factory ──────────────────────────────────
 
-function createWebConnectorContext(config: Record<string, unknown>): ConnectorContext {
+function createWebConnectorContext(config: Record<string, unknown>, viewState?: any): ConnectorContext {
   return {
     config,
+    viewState,
     log: (...args: unknown[]) => console.log('[Gantt Connector]', ...args),
     request: (url: string, opts?: RequestInit) => window.fetch(url, opts),
     readFile: async (path: string): Promise<string> => {
@@ -80,11 +81,25 @@ const platform: GanttPlatform = {
   storage: browserStorage,
   fetch: window.fetch.bind(window),
   connectorLoader: dummyConnectorLoader,
-  createConnectorContext: (config: Record<string, unknown>) => createWebConnectorContext(config),
+  createConnectorContext: (config: Record<string, unknown>, viewState?: any) => createWebConnectorContext(config, viewState),
   watcher: null,
   theme: browserTheme,
   setIcon(el: HTMLElement, name: string) {
     el.textContent = name;
+  },
+  renderMarkdown(el: HTMLElement, markdown: string) {
+    // Simple markdown-to-HTML: bold, italic, code, links, line breaks
+    let html = markdown
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    html = html
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/`(.+?)`/g, '<code>$1</code>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/\n/g, '<br>');
+    el.innerHTML = html;
   },
   openExternal: (url: string) => {
     let normalizedUrl = url.trim();

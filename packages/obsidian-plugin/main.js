@@ -1848,6 +1848,15 @@ function createGanttStore(platform) {
     }
     return /* @__PURE__ */ new Set();
   });
+  const selectedTaskId = g2(() => {
+    const sel = selectedEntity.value;
+    return sel?.type === "task" ? sel.id : null;
+  });
+  const selectedProjectId = g2(() => {
+    const sel = selectedEntity.value;
+    return sel?.type === "project" ? sel.id : null;
+  });
+  const locateTarget = y3(null);
   const timelineRange = g2(() => {
     const allDates = [];
     for (const t4 of mergedTasks.value) {
@@ -1857,48 +1866,6 @@ function createGanttStore(platform) {
         allDates.push(t4.endDate.value);
     }
     return computeTimelineRange(allDates, 7);
-  });
-  const scrollTargetDate = g2(() => {
-    const sel = selectedEntity.value;
-    if (!sel)
-      return null;
-    if (sel.type === "task") {
-      const task = mergedTasks.value.find((t4) => t4.id === sel.id);
-      const s5 = task?.startDate.value;
-      const e4 = task?.endDate.value;
-      if (!s5)
-        return null;
-      if (!e4 || s5 === e4)
-        return s5;
-      return addDays(s5, Math.floor(daysBetween(s5, e4) / 2));
-    }
-    if (sel.type === "project") {
-      const project = mergedProjects.value.find((p5) => p5.id === sel.id);
-      for (const kdName of projectSortKeyDates.value) {
-        const kd = project?.keyDates?.find((k3) => k3.name === kdName);
-        if (kd?.date)
-          return kd.date;
-      }
-      const projectTasks = mergedTasks.value.filter((t4) => t4.projectId.value === sel.id);
-      let earliest = null;
-      let latest = null;
-      for (const t4 of projectTasks) {
-        const s5 = t4.startDate.value;
-        const e4 = t4.endDate.value ?? s5;
-        if (s5) {
-          if (!earliest || s5 < earliest)
-            earliest = s5;
-          if (!latest || e4 > latest)
-            latest = e4;
-        }
-      }
-      if (!earliest)
-        return null;
-      if (!latest || earliest === latest)
-        return earliest;
-      return addDays(earliest, Math.floor(daysBetween(earliest, latest) / 2));
-    }
-    return null;
   });
   const filteredProjectGroupKeys = g2(() => {
     const timeStart = filterTimeStart.value;
@@ -2030,6 +1997,18 @@ function createGanttStore(platform) {
       isLoading.value = false;
     }
   }
+  function buildViewState() {
+    return {
+      filterTimeStart: filterTimeStart.value || void 0,
+      filterTimeEnd: filterTimeEnd.value || void 0,
+      filterStatuses: filterStatuses.value.size > 0 ? [...filterStatuses.value] : void 0,
+      filterTags: filterTags.value.size > 0 ? [...filterTags.value] : void 0,
+      personSortMode: personSortMode.value,
+      projectSortMode: projectSortMode.value,
+      projectSortKeyDates: projectSortKeyDates.value,
+      positionOrder: positionOrder.value.length > 0 ? positionOrder.value : void 0
+    };
+  }
   async function refreshConnector(connectorId) {
     isLoading.value = true;
     error.value = null;
@@ -2046,7 +2025,8 @@ function createGanttStore(platform) {
       }
       const scriptPath = connConfig.script || `connectors/${safeName(connectorId)}.js`;
       const mod = await platform.connectorLoader.load(scriptPath);
-      const ctx = platform.createConnectorContext(connConfig);
+      const viewState = buildViewState();
+      const ctx = platform.createConnectorContext(connConfig, viewState);
       const rawData = await mod.fetch(ctx);
       const canonical = mod.transform(rawData, ctx);
       const cache = {
@@ -2324,7 +2304,7 @@ function createGanttStore(platform) {
           results.push({ connectorId: cache.connectorId, success: false, error: "Connector does not support push" });
           continue;
         }
-        const ctx = platform.createConnectorContext(connConfig);
+        const ctx = platform.createConnectorContext(connConfig, buildViewState());
         const result = await mod.push(payload, ctx);
         results.push({ connectorId: cache.connectorId, success: result.success, error: result.error });
       } catch (e4) {
@@ -2767,7 +2747,9 @@ function createGanttStore(platform) {
     unassignedProjects,
     selectedEntity,
     highlightedTaskIds,
-    scrollTargetDate,
+    selectedTaskId,
+    selectedProjectId,
+    locateTarget,
     sharedScrollLeft,
     personScrollTop,
     projectScrollTop,
@@ -3043,6 +3025,20 @@ function TaskBar(props) {
   const barTop = groupStartY + (rowHeight - barHeight) / 2 + laneIndex * laneOffset;
   const barWidth = Math.max(data.width, 4);
   const showHandles = barWidth >= 12;
+  const injectedRef = A2(false);
+  y2(() => {
+    if (injectedRef.current)
+      return;
+    injectedRef.current = true;
+    const style = document.createElement("style");
+    style.textContent = `
+      @keyframes gantt-selected-pulse {
+        0%, 100% { box-shadow: 0 0 0 3px var(--gantt-selected-border, #FF6B35), 0 0 10px rgba(255, 107, 53, 0.3); }
+        50% { box-shadow: 0 0 0 4px var(--gantt-selected-border, #FF6B35), 0 0 24px rgba(255, 107, 53, 0.6); }
+      }
+    `;
+    document.head.appendChild(style);
+  }, []);
   let overlays = [];
   if (startDate && endDate && bodyOriginPx !== void 0 && dayWidth && holidayConfig) {
     const blocks = getNonWorkingBlocks(startDate, endDate, holidayConfig);
@@ -3058,7 +3054,7 @@ function TaskBar(props) {
   return /* @__PURE__ */ u4(
     "div",
     {
-      class: `gantt-task-bar ${data.isHighlighted ? "highlighted" : ""} ${data.isDimmed ? "dimmed" : ""}`,
+      class: `gantt-task-bar ${data.isSelected ? "selected" : ""} ${data.isHighlighted ? "highlighted" : ""} ${data.isDimmed ? "dimmed" : ""}`,
       style: {
         position: "absolute",
         left: `${data.left}px`,
@@ -3077,9 +3073,10 @@ function TaskBar(props) {
         overflow: "hidden",
         textOverflow: "ellipsis",
         color: "var(--text-on-accent, #fff)",
-        zIndex: 2 + props.laneIndex,
-        boxShadow: data.isHighlighted ? "0 0 0 2px var(--gantt-highlight-border, #4A90D9)" : "none",
-        transition: "opacity 0.15s, box-shadow 0.15s"
+        zIndex: data.isSelected ? 1e3 : 2 + props.laneIndex,
+        animation: data.isSelected ? "gantt-selected-pulse 1.4s ease-in-out infinite" : "none",
+        boxShadow: data.isSelected ? "none" : data.isHighlighted ? "0 0 0 2px var(--gantt-highlight-border, #4A90D9)" : "none",
+        transition: data.isSelected ? "none" : "opacity 0.15s, box-shadow 0.15s"
       },
       onPointerDown: (e4) => {
         const rect = e4.currentTarget.getBoundingClientRect();
@@ -3549,6 +3546,28 @@ function hashColor(str) {
   const hue = Math.abs(hash) % 360;
   return `hsl(${hue}, 55%, 35%)`;
 }
+function MarkdownView(props) {
+  const ref = A2(null);
+  const platform = props.store._platform;
+  y2(() => {
+    if (ref.current) {
+      ref.current.innerHTML = "";
+      if (platform?.renderMarkdown) {
+        platform.renderMarkdown(ref.current, props.markdown);
+      } else {
+        ref.current.textContent = props.markdown;
+      }
+    }
+  }, [props.markdown]);
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      ref,
+      class: "gantt-markdown-view",
+      style: { fontSize: "12px", lineHeight: 1.5, wordBreak: "break-word" }
+    }
+  );
+}
 function TaskList(props) {
   const totalRowsHeight = props.rowHeights.reduce((a4, b3) => a4 + b3, 0);
   return /* @__PURE__ */ u4(
@@ -3573,16 +3592,19 @@ function TaskList(props) {
             children: props.labels.map((label, i5) => {
               const isHighlighted = props.highlightedRowKeys?.has(label.key) ?? false;
               const isDimmed = props.dimmedRowKeys?.has(label.key) ?? false;
+              const isSelected = props.selectedRowKey === label.key;
               const h4 = props.rowHeights[i5] ?? ROW_HEIGHT2;
               return /* @__PURE__ */ u4(
                 "div",
                 {
-                  class: `gantt-task-list-row ${isHighlighted ? "highlighted" : ""} ${isDimmed ? "dimmed" : ""}`,
+                  class: `gantt-task-list-row ${isSelected ? "selected" : ""} ${isHighlighted ? "highlighted" : ""} ${isDimmed ? "dimmed" : ""}`,
                   style: {
                     height: `${h4}px`,
                     borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)",
                     opacity: isDimmed ? 0.4 : 1,
-                    background: isHighlighted ? "var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))" : "transparent",
+                    background: isSelected ? "var(--gantt-selected-row-bg, rgba(255, 107, 53, 0.12))" : isHighlighted ? "var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))" : "transparent",
+                    outline: isSelected ? "2px solid var(--gantt-selected-border, #FF6B35)" : "none",
+                    outlineOffset: "-2px",
                     paddingLeft: "8px",
                     paddingRight: "8px",
                     fontSize: "13px",
@@ -3650,7 +3672,6 @@ function Timeline(props) {
   const { store, groups, scrollLeft, scrollTop } = props;
   const paneType = props.groupKeyField === "personId" ? "person" : "project";
   const viewportWidth = useSignal(800);
-  const didInitialScroll = A2(false);
   y2(() => {
     const el = containerRef.current;
     if (!el)
@@ -3660,15 +3681,6 @@ function Timeline(props) {
       viewportWidth.value = el.clientWidth;
     });
     ro.observe(el);
-    if (!didInitialScroll.current) {
-      didInitialScroll.current = true;
-      const todayBodyPx = originToBody(dateToPx2(todayString()));
-      const targetScroll = todayBodyPx - el.clientWidth / 2;
-      requestAnimationFrame(() => {
-        el.scrollLeft = targetScroll;
-        props.onScroll(targetScroll, 0);
-      });
-    }
     return () => ro.disconnect();
   }, []);
   const TWO_YEARS_PX = 730 * DAY_WIDTH2;
@@ -3737,22 +3749,11 @@ function Timeline(props) {
       containerRef.current.scrollLeft = scrollLeft;
     }
   }, [scrollLeft]);
-  const lastHandledDate = A2(null);
   y2(() => {
-    const targetDate = store.scrollTargetDate.value;
-    if (!targetDate || targetDate === lastHandledDate.current)
-      return;
-    lastHandledDate.current = targetDate;
-    const el = containerRef.current;
-    if (!el)
-      return;
-    const targetPx = originToBody(dateToPx2(targetDate));
-    const targetScroll = targetPx - el.clientWidth / 2;
-    requestAnimationFrame(() => {
-      el.scrollLeft = Math.max(0, targetScroll);
-      props.onScroll(el.scrollLeft, el.scrollTop);
-    });
-  }, [store.scrollTargetDate.value]);
+    if (containerRef.current) {
+      containerRef.current.scrollTop = scrollTop;
+    }
+  }, [scrollTop]);
   const taskBars = [];
   const groupLayout = [];
   const projectColorMap = /* @__PURE__ */ new Map();
@@ -3775,7 +3776,7 @@ function Timeline(props) {
       const endVal = task.endDate.value ?? startVal;
       const left = originToBody(dateToPx2(startVal));
       const right = originToBody(dateToPx2(endVal));
-      const width = Math.max(right - left, 4);
+      const width = Math.max(right - left, 12);
       const projectColor = task.projectId.value ? projectColorMap.get(task.projectId.value) ?? getDefaultColor(task.projectId.value) : getDefaultColor(task.id);
       groupTasks.push({ task, left, width, color: projectColor });
     }
@@ -3889,6 +3890,7 @@ function Timeline(props) {
                   return null;
                 const isHighlighted = props.highlightedRowKeys.has(group.key);
                 const isDimmed = props.dimmedRowKeys.has(group.key);
+                const isSelectedRow = paneType === "project" && group.key === store.selectedProjectId.value;
                 const dragHovering = dragState.value?.currentPersonId != null && (dragState.value.currentPersonId === group.key || dragState.value.currentPersonId === null && group.key === "__unassigned__");
                 return /* @__PURE__ */ u4(
                   "div",
@@ -3901,8 +3903,8 @@ function Timeline(props) {
                       height: `${layout.height}px`,
                       borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)",
                       opacity: isDimmed ? 0.4 : 1,
-                      background: dragHovering ? "var(--gantt-drag-hover-bg, rgba(74, 144, 217, 0.2))" : isHighlighted ? "var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))" : "transparent",
-                      outline: dragHovering ? "2px dashed var(--gantt-drag-hover-border, #4A90D9)" : "none",
+                      background: dragHovering ? "var(--gantt-drag-hover-bg, rgba(74, 144, 217, 0.2))" : isSelectedRow ? "var(--gantt-selected-row-bg, rgba(255, 107, 53, 0.12))" : isHighlighted ? "var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))" : "transparent",
+                      outline: isSelectedRow ? "2px solid var(--gantt-selected-border, #FF6B35)" : dragHovering ? "2px dashed var(--gantt-drag-hover-border, #4A90D9)" : "none",
                       outlineOffset: "-2px",
                       transition: "opacity 0.15s, background 0.15s",
                       pointerEvents: "none"
@@ -3925,6 +3927,7 @@ function Timeline(props) {
                     width,
                     color,
                     isHighlighted: highlightedIds.has(task.id),
+                    isSelected: task.id === store.selectedTaskId.value,
                     isDimmed: hasSelection && !highlightedIds.has(task.id) || paneType === "person" && props.filterDimmedTaskIds.has(task.id),
                     progress: task.progress.value
                   },
@@ -4035,7 +4038,10 @@ function GanttPane(props) {
   const { store, type } = props;
   const rawGroups = type === "person" ? store.personGroups.value : store.projectGroups.value;
   const showPosEditor = useSignal(false);
-  const posEditorText = useSignal("");
+  const posEditorItems = useSignal([]);
+  const posEditorButtonRef = A2(null);
+  const posDragIndex = useSignal(null);
+  const posDragOverIndex = useSignal(null);
   const filterMatches = store.filteredProjectGroupKeys.value;
   const filterActive = filterMatches !== null;
   const filterDimmedIds = store.filterDimmedTaskIds.value;
@@ -4070,24 +4076,28 @@ function GanttPane(props) {
     return groups.map((group) => {
       const ranges = [];
       for (const task of group.tasks) {
-        const s5 = task.startDate.value;
-        if (!s5)
+        const startVal = task.startDate.value;
+        if (!startVal)
           continue;
-        ranges.push({ start: s5, end: task.endDate.value ?? s5 });
+        const endVal = task.endDate.value ?? startVal;
+        const left = dateToPx2(startVal);
+        const right = dateToPx2(endVal);
+        const width = Math.max(right - left, 12);
+        ranges.push({ left, right: left + width });
       }
-      ranges.sort((a4, b3) => a4.start.localeCompare(b3.start));
+      ranges.sort((a4, b3) => a4.left - b3.left);
       const lanes = [];
       for (const dr of ranges) {
         let assigned = false;
         for (let li = 0; li < lanes.length; li++) {
-          if (dr.start >= lanes[li]) {
-            lanes[li] = dr.end;
+          if (dr.left >= lanes[li]) {
+            lanes[li] = dr.right;
             assigned = true;
             break;
           }
         }
         if (!assigned)
-          lanes.push(dr.end);
+          lanes.push(dr.right);
       }
       return ROW_HEIGHT2 + (Math.max(1, lanes.length) - 1) * LANE_OFFSET2;
     });
@@ -4136,6 +4146,7 @@ function GanttPane(props) {
         scrollTop: props.scrollTop,
         highlightedRowKeys,
         dimmedRowKeys,
+        selectedRowKey: type === "project" ? store.selectedProjectId.value : null,
         onRowClick: handleRowClick,
         headerContent: type === "person" ? /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }, children: [
           /* @__PURE__ */ u4(
@@ -4162,128 +4173,37 @@ function GanttPane(props) {
               ]
             }
           ),
-          store.personSortMode.value === "position" && /* @__PURE__ */ u4("div", { style: { position: "relative" }, children: [
-            /* @__PURE__ */ u4(
-              "button",
-              {
-                onClick: () => {
-                  showPosEditor.value = !showPosEditor.value;
-                  if (showPosEditor.value) {
-                    posEditorText.value = store.positionOrder.value.join("\n");
-                  }
-                },
-                title: "Edit position order",
-                style: {
-                  padding: "2px 6px",
-                  border: "1px solid var(--background-modifier-border, #ccc)",
-                  borderRadius: "4px",
-                  background: showPosEditor.value ? "var(--interactive-accent, #4A90D9)" : "var(--background-secondary, #f5f5f5)",
-                  color: showPosEditor.value ? "#fff" : "var(--text-normal, #333)",
-                  cursor: "pointer",
-                  fontSize: "11px"
-                },
-                children: "\u2699"
-              }
-            ),
-            showPosEditor.value && /* @__PURE__ */ u4("div", { style: {
-              position: "absolute",
-              top: "100%",
-              right: 0,
-              marginTop: "4px",
-              zIndex: 100,
-              background: "var(--background-primary, #fff)",
-              border: "1px solid var(--background-modifier-border, #ccc)",
-              borderRadius: "6px",
-              padding: "8px",
-              boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-              minWidth: "180px"
-            }, children: [
-              /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "4px" }, children: "Position order (one per line):" }),
-              /* @__PURE__ */ u4(
-                "textarea",
-                {
-                  value: posEditorText.value,
-                  onInput: (e4) => {
-                    posEditorText.value = e4.target.value;
-                  },
-                  rows: 4,
-                  style: {
-                    width: "100%",
-                    fontSize: "11px",
-                    border: "1px solid var(--background-modifier-border, #ccc)",
-                    borderRadius: "4px",
-                    padding: "4px",
-                    background: "var(--background-primary, #fff)",
-                    color: "var(--text-normal, #333)",
-                    resize: "vertical",
-                    boxSizing: "border-box"
-                  }
+          store.personSortMode.value === "position" && /* @__PURE__ */ u4("div", { style: { position: "relative" }, children: /* @__PURE__ */ u4(
+            "button",
+            {
+              ref: posEditorButtonRef,
+              onClick: () => {
+                if (showPosEditor.value) {
+                  showPosEditor.value = false;
+                  return;
                 }
-              ),
-              /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px", marginTop: "6px" }, children: [
-                /* @__PURE__ */ u4(
-                  "button",
-                  {
-                    onClick: () => {
-                      const lines = posEditorText.value.split("\n").map((s5) => s5.trim()).filter(Boolean);
-                      store.positionOrder.value = lines;
-                      store.saveSettings();
-                      showPosEditor.value = false;
-                    },
-                    style: {
-                      padding: "2px 10px",
-                      border: "none",
-                      borderRadius: "4px",
-                      background: "var(--interactive-accent, #4A90D9)",
-                      color: "#fff",
-                      cursor: "pointer",
-                      fontSize: "11px"
-                    },
-                    children: "Save"
-                  }
-                ),
-                /* @__PURE__ */ u4(
-                  "button",
-                  {
-                    onClick: () => {
-                      showPosEditor.value = false;
-                    },
-                    style: {
-                      padding: "2px 10px",
-                      border: "1px solid var(--background-modifier-border, #ccc)",
-                      borderRadius: "4px",
-                      background: "transparent",
-                      color: "var(--text-muted, #999)",
-                      cursor: "pointer",
-                      fontSize: "11px"
-                    },
-                    children: "Cancel"
-                  }
-                ),
-                store.positionOrder.value.length > 0 && /* @__PURE__ */ u4(
-                  "button",
-                  {
-                    onClick: () => {
-                      store.positionOrder.value = [];
-                      store.saveSettings();
-                      showPosEditor.value = false;
-                    },
-                    style: {
-                      padding: "2px 10px",
-                      border: "1px solid #E06C75",
-                      borderRadius: "4px",
-                      background: "transparent",
-                      color: "#E06C75",
-                      cursor: "pointer",
-                      fontSize: "11px",
-                      marginLeft: "auto"
-                    },
-                    children: "Clear"
-                  }
-                )
-              ] })
-            ] })
-          ] })
+                const existing = new Set(store.positionOrder.value);
+                for (const g3 of rawGroups) {
+                  const pg = g3;
+                  if (pg.position)
+                    existing.add(pg.position);
+                }
+                posEditorItems.value = [...existing];
+                showPosEditor.value = true;
+              },
+              title: "Edit position order",
+              style: {
+                padding: "2px 6px",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "4px",
+                background: showPosEditor.value ? "var(--interactive-accent, #4A90D9)" : "var(--background-secondary, #f5f5f5)",
+                color: showPosEditor.value ? "#fff" : "var(--text-normal, #333)",
+                cursor: "pointer",
+                fontSize: "11px"
+              },
+              children: /* @__PURE__ */ u4(Icon, { name: "settings", size: 13 })
+            }
+          ) })
         ] }) : /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }, children: [
           /* @__PURE__ */ u4(
             "button",
@@ -4354,6 +4274,159 @@ function GanttPane(props) {
         onKeyDatePointerDown: props.onKeyDatePointerDown,
         onDrop: props.onDrop,
         onDragOver: props.onDragOver
+      }
+    ),
+    showPosEditor.value && /* @__PURE__ */ u4(
+      "div",
+      {
+        ref: (el) => {
+          if (el && el.parentElement !== document.body) {
+            document.body.appendChild(el);
+          }
+        },
+        children: [
+          /* @__PURE__ */ u4(
+            "div",
+            {
+              style: { position: "fixed", inset: 0, zIndex: 9998 },
+              onClick: () => {
+                showPosEditor.value = false;
+              }
+            }
+          ),
+          /* @__PURE__ */ u4(
+            "div",
+            {
+              class: "gantt-pos-editor-overlay",
+              style: {
+                position: "fixed",
+                top: (posEditorButtonRef.current?.getBoundingClientRect().bottom ?? 100) + 4 + "px",
+                left: (posEditorButtonRef.current?.getBoundingClientRect().left ?? 200) + "px",
+                zIndex: 9999,
+                background: "var(--background-primary, #fff)",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "6px",
+                padding: "8px",
+                boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+                minWidth: "180px",
+                maxWidth: "260px",
+                maxHeight: "320px",
+                display: "flex",
+                flexDirection: "column"
+              },
+              onClick: (e4) => e4.stopPropagation(),
+              children: [
+                /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "6px", flexShrink: 0 }, children: "Drag to reorder positions:" }),
+                /* @__PURE__ */ u4("div", { style: { overflowY: "auto", flex: 1, minHeight: 0 }, children: [
+                  posEditorItems.value.map((item, i5) => /* @__PURE__ */ u4(
+                    "div",
+                    {
+                      draggable: true,
+                      onDragStart: () => {
+                        posDragIndex.value = i5;
+                      },
+                      onDragOver: (e4) => {
+                        e4.preventDefault();
+                        posDragOverIndex.value = i5;
+                      },
+                      onDragEnd: () => {
+                        if (posDragIndex.value !== null && posDragOverIndex.value !== null && posDragIndex.value !== posDragOverIndex.value) {
+                          const next = [...posEditorItems.value];
+                          const [removed] = next.splice(posDragIndex.value, 1);
+                          next.splice(posDragOverIndex.value, 0, removed);
+                          posEditorItems.value = next;
+                        }
+                        posDragIndex.value = null;
+                        posDragOverIndex.value = null;
+                      },
+                      onDrop: (e4) => e4.preventDefault(),
+                      style: {
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        padding: "4px 6px",
+                        borderRadius: "4px",
+                        marginBottom: "2px",
+                        fontSize: "12px",
+                        cursor: "grab",
+                        background: posDragOverIndex.value === i5 ? "var(--interactive-accent, #4A90D9)" : posDragIndex.value === i5 ? "var(--background-modifier-border, #e0e0e0)" : "transparent",
+                        color: posDragOverIndex.value === i5 ? "#fff" : "var(--text-normal, #333)",
+                        transition: "background 0.1s",
+                        border: "1px solid transparent",
+                        borderColor: posDragOverIndex.value === i5 ? "var(--interactive-accent, #4A90D9)" : "transparent"
+                      },
+                      children: [
+                        /* @__PURE__ */ u4(Icon, { name: "grip-vertical", size: 12 }),
+                        /* @__PURE__ */ u4("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: item })
+                      ]
+                    },
+                    item
+                  )),
+                  posEditorItems.value.length === 0 && /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", padding: "8px", textAlign: "center" }, children: "No positions found" })
+                ] }),
+                /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px", marginTop: "6px", flexShrink: 0 }, children: [
+                  /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: () => {
+                        store.positionOrder.value = posEditorItems.value;
+                        store.saveSettings();
+                        showPosEditor.value = false;
+                      },
+                      style: {
+                        padding: "2px 10px",
+                        border: "none",
+                        borderRadius: "4px",
+                        background: "var(--interactive-accent, #4A90D9)",
+                        color: "#fff",
+                        cursor: "pointer",
+                        fontSize: "11px"
+                      },
+                      children: "Save"
+                    }
+                  ),
+                  /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: () => {
+                        showPosEditor.value = false;
+                      },
+                      style: {
+                        padding: "2px 10px",
+                        border: "1px solid var(--background-modifier-border, #ccc)",
+                        borderRadius: "4px",
+                        background: "transparent",
+                        color: "var(--text-muted, #999)",
+                        cursor: "pointer",
+                        fontSize: "11px"
+                      },
+                      children: "Cancel"
+                    }
+                  ),
+                  posEditorItems.value.length > 0 && /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: () => {
+                        posEditorItems.value = [];
+                      },
+                      style: {
+                        padding: "2px 10px",
+                        border: "1px solid #E06C75",
+                        borderRadius: "4px",
+                        background: "transparent",
+                        color: "#E06C75",
+                        cursor: "pointer",
+                        fontSize: "11px",
+                        marginLeft: "auto"
+                      },
+                      children: "Clear"
+                    }
+                  )
+                ] })
+              ]
+            }
+          )
+        ]
       }
     )
   ] });
@@ -4589,6 +4662,7 @@ function ProjectDetail(props) {
       style: {
         width: `${store.detailPanelWidth.value}px`,
         minWidth: "180px",
+        maxHeight: "100%",
         borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
         padding: "12px",
         fontSize: "13px",
@@ -4713,6 +4787,26 @@ function ProjectDetail(props) {
                   lineHeight: 1
                 },
                 children: /* @__PURE__ */ u4(Icon, { name: "trash-2", size: 13 })
+              }
+            ),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => {
+                  store.locateTarget.value = { type: "project", id: project.id };
+                },
+                title: "Scroll to project",
+                style: {
+                  padding: "2px 4px",
+                  border: "none",
+                  borderRadius: "3px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "13px",
+                  color: "var(--text-muted, #999)",
+                  lineHeight: 1
+                },
+                children: /* @__PURE__ */ u4(Icon, { name: "target", size: 13 })
               }
             ),
             /* @__PURE__ */ u4(
@@ -4873,7 +4967,7 @@ function ProjectDetail(props) {
               transition: "background 0.15s, border-color 0.15s"
             },
             children: [
-              /* @__PURE__ */ u4("span", { style: { fontSize: "14px", lineHeight: 1, flexShrink: 0 }, children: "\u283F" }),
+              /* @__PURE__ */ u4(Icon, { name: "grip-horizontal", size: 14 }),
               /* @__PURE__ */ u4("span", { style: { fontWeight: 500 }, children: "Drag to person timeline to create task" })
             ]
           }
@@ -4901,7 +4995,7 @@ function ProjectDetail(props) {
               },
               placeholder: "Project description..."
             }
-          ) : /* @__PURE__ */ u4("div", { style: valueStyle, children: description || "\u2014" })
+          ) : description ? /* @__PURE__ */ u4(MarkdownView, { markdown: description, store }) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" })
         ] }),
         /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
           /* @__PURE__ */ u4("div", { style: labelStyle, children: "Requester" }),
@@ -5394,11 +5488,21 @@ function DetailPanel(props) {
     return null;
   const personName = task.personId.value ? store.persons.value.find((p5) => p5.id === task.personId.value)?.name ?? task.personId.value : null;
   const project = task.projectId.value ? store.projects.value.find((p5) => p5.id === task.projectId.value) : null;
-  const projectOverrides = project ? store.edits.value?.projectOverrides?.[project.id] ?? null : null;
   const editTitle = useSignal(false);
   const editTitleValue = useSignal(task.title.value);
   const copiedTask = useSignal(false);
   let titleInputRef = null;
+  const editing = useSignal(false);
+  const editStartDate = useSignal(task.startDate.value ?? "");
+  const editEndDate = useSignal(task.endDate.value ?? "");
+  const editProgress = useSignal(task.progress.value ?? 0);
+  const editPersonId = useSignal(task.personId.value ?? "");
+  const editProjectId = useSignal(task.projectId.value ?? "");
+  const editUrl = useSignal(task.url.value ?? "");
+  const editDeps = useSignal([...task.dependencies.value]);
+  const editTags = useSignal([...task.tags.value]);
+  const editDepInput = useSignal("");
+  const editTagInput = useSignal("");
   function startEditTitle() {
     editTitleValue.value = task.title.value;
     editTitle.value = true;
@@ -5427,8 +5531,75 @@ function DetailPanel(props) {
       cancelTitle();
     }
   }
+  function startEditing() {
+    editStartDate.value = task.startDate.value ?? "";
+    editEndDate.value = task.endDate.value ?? "";
+    editProgress.value = task.progress.value ?? 0;
+    editPersonId.value = task.personId.value ?? "";
+    editProjectId.value = task.projectId.value ?? "";
+    editUrl.value = task.url.value ?? "";
+    editDeps.value = [...task.dependencies.value];
+    editTags.value = [...task.tags.value];
+    editing.value = true;
+  }
+  function cancelEditing() {
+    editing.value = false;
+  }
+  async function saveEditing() {
+    const t4 = task;
+    const pid = t4.id;
+    if (editStartDate.value !== (t4.startDate.value ?? ""))
+      store.persistEdit(pid, "startDate", editStartDate.value || null);
+    if (editEndDate.value !== (t4.endDate.value ?? ""))
+      store.persistEdit(pid, "endDate", editEndDate.value || null);
+    if (editProgress.value !== (t4.progress.value ?? 0))
+      store.persistEdit(pid, "progress", editProgress.value);
+    if (editPersonId.value !== (t4.personId.value ?? ""))
+      store.persistEdit(pid, "personId", editPersonId.value || null);
+    if (editProjectId.value !== (t4.projectId.value ?? ""))
+      store.persistEdit(pid, "projectId", editProjectId.value || null);
+    if (editUrl.value !== (t4.url.value ?? ""))
+      store.persistEdit(pid, "url", editUrl.value || null);
+    if (JSON.stringify(editDeps.value) !== JSON.stringify(t4.dependencies.value))
+      store.persistEdit(pid, "dependencies", editDeps.value);
+    if (JSON.stringify(editTags.value) !== JSON.stringify(t4.tags.value))
+      store.persistEdit(pid, "tags", editTags.value);
+    editing.value = false;
+  }
+  function addDep() {
+    const val = editDepInput.value.trim();
+    if (!val || editDeps.value.includes(val))
+      return;
+    editDeps.value = [...editDeps.value, val];
+    editDepInput.value = "";
+  }
+  function removeDep(id) {
+    editDeps.value = editDeps.value.filter((d4) => d4 !== id);
+  }
+  function addTag() {
+    const tag = editTagInput.value.trim();
+    if (!tag || editTags.value.includes(tag))
+      return;
+    editTags.value = [...editTags.value, tag];
+    editTagInput.value = "";
+  }
+  function removeTag(tag) {
+    editTags.value = editTags.value.filter((t4) => t4 !== tag);
+  }
   const sourceLabel = task.connectorId ? `Connector: ${task.connectorId}` : task.upstreamId ? "Local override" : "Manual entry";
   const sourceStyle = task.upstreamDeleted ? "line-through" : "normal";
+  const labelStyle = { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" };
+  const inputStyle = {
+    width: "100%",
+    fontSize: "12px",
+    padding: "3px 6px",
+    borderRadius: "4px",
+    border: "1px solid var(--background-modifier-border, #ccc)",
+    background: "var(--background-primary, #fff)",
+    color: "var(--text-normal, #333)",
+    boxSizing: "border-box"
+  };
+  const fieldStyle = { marginBottom: "10px" };
   return /* @__PURE__ */ u4(
     "div",
     {
@@ -5436,6 +5607,7 @@ function DetailPanel(props) {
       style: {
         width: `${store.detailPanelWidth.value}px`,
         minWidth: "180px",
+        maxHeight: "100%",
         borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
         padding: "12px",
         fontSize: "13px",
@@ -5482,70 +5654,128 @@ function DetailPanel(props) {
               children: task.title.value
             }
           ),
-          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "2px", flexShrink: 0, marginLeft: "4px" }, children: [
-            /* @__PURE__ */ u4(
-              "button",
-              {
-                onClick: () => props.onDelete?.(task.id, task.title.value),
-                style: {
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: "14px",
-                  lineHeight: 1,
-                  padding: "0 2px",
-                  color: "var(--text-error, #e00)"
-                },
-                title: "Delete task",
-                children: /* @__PURE__ */ u4(Icon, { name: "trash-2", size: 14 })
-              }
-            ),
-            /* @__PURE__ */ u4(
-              "button",
-              {
-                onClick: () => store.selectEntity(null),
-                style: {
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: "16px",
-                  lineHeight: 1,
-                  padding: "0 2px",
-                  color: "var(--text-muted, #999)"
-                },
-                title: "Close detail panel",
-                children: /* @__PURE__ */ u4(Icon, { name: "x", size: 16 })
-              }
-            )
-          ] })
+          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "2px", flexShrink: 0, marginLeft: "4px" }, children: editing.value ? /* @__PURE__ */ u4(S, { children: [
+            /* @__PURE__ */ u4("button", { onClick: saveEditing, title: "Save changes", style: {
+              padding: "3px 8px",
+              border: "1px solid var(--interactive-accent, #4A90D9)",
+              borderRadius: "4px",
+              background: "var(--interactive-accent, #4A90D9)",
+              color: "#fff",
+              cursor: "pointer",
+              fontSize: "11px"
+            }, children: "Save" }),
+            /* @__PURE__ */ u4("button", { onClick: cancelEditing, title: "Cancel editing", style: {
+              padding: "3px 8px",
+              border: "1px solid var(--background-modifier-border, #ccc)",
+              borderRadius: "4px",
+              background: "var(--background-secondary, #f5f5f5)",
+              cursor: "pointer",
+              fontSize: "11px"
+            }, children: "Cancel" })
+          ] }) : /* @__PURE__ */ u4(S, { children: [
+            /* @__PURE__ */ u4("button", { onClick: startEditing, title: "Edit task details", style: {
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontSize: "13px",
+              lineHeight: 1,
+              padding: "0 2px",
+              color: "var(--text-muted, #999)"
+            }, children: /* @__PURE__ */ u4(Icon, { name: "pencil", size: 13 }) }),
+            /* @__PURE__ */ u4("button", { onClick: () => props.onDelete?.(task.id, task.title.value), title: "Delete task", style: {
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontSize: "14px",
+              lineHeight: 1,
+              padding: "0 2px",
+              color: "var(--text-error, #e00)"
+            }, children: /* @__PURE__ */ u4(Icon, { name: "trash-2", size: 14 }) }),
+            /* @__PURE__ */ u4("button", { onClick: () => {
+              store.locateTarget.value = { type: "task", id: task.id };
+            }, title: "Scroll to task", style: {
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontSize: "14px",
+              lineHeight: 1,
+              padding: "0 2px",
+              color: "var(--text-muted, #999)"
+            }, children: /* @__PURE__ */ u4(Icon, { name: "target", size: 14 }) }),
+            /* @__PURE__ */ u4("button", { onClick: () => store.selectEntity(null), title: "Close detail panel", style: {
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontSize: "16px",
+              lineHeight: 1,
+              padding: "0 2px",
+              color: "var(--text-muted, #999)"
+            }, children: /* @__PURE__ */ u4(Icon, { name: "x", size: 16 }) })
+          ] }) })
         ] }),
-        /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: [
-          /* @__PURE__ */ u4("div", { children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Status" }),
+        /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column" }, children: [
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "Status" }),
             /* @__PURE__ */ u4(
               "select",
               {
                 value: task.status.value,
                 onChange: (e4) => store.setTaskStatus(task.id, e4.target.value),
-                style: {
-                  width: "100%",
-                  fontSize: "12px",
-                  padding: "3px 6px",
-                  borderRadius: "4px",
-                  border: "1px solid var(--background-modifier-border, #ccc)",
-                  background: "var(--background-primary, #fff)",
-                  color: "var(--text-normal, #333)",
-                  cursor: "pointer"
-                },
+                style: inputStyle,
                 children: STATUS_OPTIONS.map((opt) => /* @__PURE__ */ u4("option", { value: opt.value, children: opt.label }, opt.value))
               }
             )
           ] }),
-          /* @__PURE__ */ u4(FieldRow, { label: "Start", value: task.startDate.value ?? "-" }),
-          /* @__PURE__ */ u4(FieldRow, { label: "End", value: task.endDate.value ?? "-" }),
-          /* @__PURE__ */ u4("div", { children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Progress" }),
-            /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "Start" }),
+            editing.value ? /* @__PURE__ */ u4(
+              "input",
+              {
+                type: "date",
+                value: editStartDate.value,
+                onInput: (e4) => {
+                  editStartDate.value = e4.target.value;
+                },
+                style: inputStyle
+              }
+            ) : /* @__PURE__ */ u4("div", { style: { fontSize: "13px" }, children: task.startDate.value ?? "\u2014" })
+          ] }),
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "End" }),
+            editing.value ? /* @__PURE__ */ u4(
+              "input",
+              {
+                type: "date",
+                value: editEndDate.value,
+                onInput: (e4) => {
+                  editEndDate.value = e4.target.value;
+                },
+                style: inputStyle
+              }
+            ) : /* @__PURE__ */ u4("div", { style: { fontSize: "13px" }, children: task.endDate.value ?? "\u2014" })
+          ] }),
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "Progress" }),
+            editing.value ? /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+              /* @__PURE__ */ u4(
+                "input",
+                {
+                  type: "range",
+                  min: "0",
+                  max: "1",
+                  step: "0.05",
+                  value: String(editProgress.value),
+                  onInput: (e4) => {
+                    editProgress.value = parseFloat(e4.target.value);
+                  },
+                  style: { flex: 1 }
+                }
+              ),
+              /* @__PURE__ */ u4("span", { style: { fontSize: "12px", fontWeight: "bold", minWidth: "36px", textAlign: "right" }, children: [
+                Math.round(editProgress.value * 100),
+                "%"
+              ] })
+            ] }) : /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
               /* @__PURE__ */ u4("div", { style: {
                 flex: 1,
                 height: "6px",
@@ -5564,10 +5794,72 @@ function DetailPanel(props) {
               ] })
             ] })
           ] }),
-          /* @__PURE__ */ u4(FieldRow, { label: "Person", value: personName ?? "-" }),
-          /* @__PURE__ */ u4("div", { children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Link" }),
-            task.url.value ? /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px" }, children: [
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "Person" }),
+            editing.value ? /* @__PURE__ */ u4(
+              "select",
+              {
+                value: editPersonId.value,
+                onChange: (e4) => {
+                  editPersonId.value = e4.target.value;
+                },
+                style: inputStyle,
+                children: [
+                  /* @__PURE__ */ u4("option", { value: "", children: "\u2014 None \u2014" }),
+                  store.persons.value.map((p5) => /* @__PURE__ */ u4("option", { value: p5.id, children: [
+                    p5.name,
+                    p5.position ? ` (${p5.position})` : ""
+                  ] }, p5.id))
+                ]
+              }
+            ) : /* @__PURE__ */ u4("div", { style: { fontSize: "13px" }, children: personName ?? "\u2014" })
+          ] }),
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "Project" }),
+            editing.value ? /* @__PURE__ */ u4(
+              "select",
+              {
+                value: editProjectId.value,
+                onChange: (e4) => {
+                  editProjectId.value = e4.target.value;
+                },
+                style: inputStyle,
+                children: [
+                  /* @__PURE__ */ u4("option", { value: "", children: "\u2014 None \u2014" }),
+                  store.projects.value.map((p5) => /* @__PURE__ */ u4("option", { value: p5.id, children: p5.name }, p5.id))
+                ]
+              }
+            ) : project ? /* @__PURE__ */ u4(
+              "div",
+              {
+                style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" },
+                onClick: () => store.selectEntity({ type: "project", id: project.id }),
+                title: "Click to view project details",
+                children: [
+                  project.color && /* @__PURE__ */ u4("span", { style: { width: "12px", height: "12px", borderRadius: "3px", background: project.color, flexShrink: 0 } }),
+                  /* @__PURE__ */ u4("span", { style: { color: "var(--interactive-accent, #4A90D9)", fontSize: "13px", fontWeight: 500 }, children: project.name }),
+                  /* @__PURE__ */ u4("span", { style: { fontSize: "10px", color: "var(--text-muted, #999)", marginLeft: "auto" }, children: "View \u2192" })
+                ]
+              }
+            ) : task.projectId.value ? /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)" }, children: [
+              task.projectId.value,
+              " (deleted)"
+            ] }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)" }, children: "No project" })
+          ] }),
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "Link" }),
+            editing.value ? /* @__PURE__ */ u4(
+              "input",
+              {
+                type: "text",
+                value: editUrl.value,
+                onInput: (e4) => {
+                  editUrl.value = e4.target.value;
+                },
+                placeholder: "https://...",
+                style: inputStyle
+              }
+            ) : task.url.value ? /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px" }, children: [
               /* @__PURE__ */ u4(
                 "a",
                 {
@@ -5603,82 +5895,148 @@ function DetailPanel(props) {
                   ]
                 }
               ),
-              /* @__PURE__ */ u4(
-                "button",
-                {
-                  onClick: async (e4) => {
-                    e4.preventDefault();
-                    e4.stopPropagation();
-                    try {
-                      await navigator.clipboard.writeText(task.url.value);
-                      copiedTask.value = true;
-                      setTimeout(() => {
-                        copiedTask.value = false;
-                      }, 1500);
-                    } catch {
-                      const ta = document.createElement("textarea");
-                      ta.value = task.url.value;
-                      ta.style.position = "fixed";
-                      ta.style.opacity = "0";
-                      document.body.appendChild(ta);
-                      ta.select();
-                      document.execCommand("copy");
-                      document.body.removeChild(ta);
-                    }
-                  },
-                  title: "Copy link",
-                  style: {
-                    background: "none",
-                    border: "none",
-                    cursor: "pointer",
-                    fontSize: "12px",
-                    padding: "0 2px",
-                    color: "var(--text-muted, #999)",
-                    flexShrink: 0
-                  },
-                  children: copiedTask.value ? /* @__PURE__ */ u4(Icon, { name: "check", size: 14, title: "Copied!" }) : /* @__PURE__ */ u4(Icon, { name: "copy", size: 14, title: "Copy link" })
+              /* @__PURE__ */ u4("button", { onClick: async (e4) => {
+                e4.preventDefault();
+                e4.stopPropagation();
+                try {
+                  await navigator.clipboard.writeText(task.url.value);
+                  copiedTask.value = true;
+                  setTimeout(() => {
+                    copiedTask.value = false;
+                  }, 1500);
+                } catch {
+                  const ta = document.createElement("textarea");
+                  ta.value = task.url.value;
+                  ta.style.position = "fixed";
+                  ta.style.opacity = "0";
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand("copy");
+                  document.body.removeChild(ta);
                 }
-              )
+              }, title: "Copy link", style: {
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: "12px",
+                padding: "0 2px",
+                color: "var(--text-muted, #999)",
+                flexShrink: 0
+              }, children: copiedTask.value ? /* @__PURE__ */ u4(Icon, { name: "check", size: 14 }) : /* @__PURE__ */ u4(Icon, { name: "copy", size: 14 }) })
             ] }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: "\u2014" })
           ] }),
-          /* @__PURE__ */ u4("div", { children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Dependencies" }),
-            /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: task.dependencies.value.length > 0 ? task.dependencies.value.map((d4) => /* @__PURE__ */ u4("div", { style: { padding: "1px 0" }, children: d4 }, d4)) : "-" })
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "Dependencies" }),
+            editing.value ? /* @__PURE__ */ u4("div", { children: [
+              /* @__PURE__ */ u4("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "6px" }, children: editDeps.value.map((d4) => /* @__PURE__ */ u4("span", { style: {
+                padding: "1px 6px",
+                borderRadius: "10px",
+                fontSize: "11px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                background: "var(--background-modifier-border, #e0e0e0)"
+              }, children: [
+                d4,
+                /* @__PURE__ */ u4("button", { onClick: () => removeDep(d4), style: {
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  color: "var(--text-error, #e00)",
+                  lineHeight: 1,
+                  padding: 0
+                }, children: "\xD7" })
+              ] }, d4)) }),
+              /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px" }, children: [
+                /* @__PURE__ */ u4(
+                  "input",
+                  {
+                    type: "text",
+                    value: editDepInput.value,
+                    onInput: (e4) => {
+                      editDepInput.value = e4.target.value;
+                    },
+                    onKeyDown: (e4) => {
+                      if (e4.key === "Enter") {
+                        e4.preventDefault();
+                        addDep();
+                      }
+                    },
+                    placeholder: "Task ID...",
+                    style: { ...inputStyle, flex: 1 }
+                  }
+                ),
+                /* @__PURE__ */ u4("button", { onClick: addDep, style: {
+                  padding: "3px 8px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  background: "var(--background-secondary, #f5f5f5)",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  whiteSpace: "nowrap"
+                }, children: "Add" })
+              ] })
+            ] }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: task.dependencies.value.length > 0 ? task.dependencies.value.map((d4) => /* @__PURE__ */ u4("div", { style: { padding: "1px 0" }, children: d4 }, d4)) : "\u2014" })
           ] }),
-          task.tags.value.length > 0 && /* @__PURE__ */ u4("div", { children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" }, children: "Tags" }),
-            /* @__PURE__ */ u4("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" }, children: task.tags.value.map((tag) => /* @__PURE__ */ u4("span", { style: {
+          /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+            /* @__PURE__ */ u4("div", { style: labelStyle, children: "Tags" }),
+            editing.value ? /* @__PURE__ */ u4("div", { children: [
+              /* @__PURE__ */ u4("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "6px" }, children: editTags.value.map((tag) => /* @__PURE__ */ u4("span", { style: {
+                padding: "1px 6px",
+                borderRadius: "10px",
+                fontSize: "11px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                background: "var(--background-modifier-border, #e0e0e0)"
+              }, children: [
+                tag,
+                /* @__PURE__ */ u4("button", { onClick: () => removeTag(tag), style: {
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  color: "var(--text-error, #e00)",
+                  lineHeight: 1,
+                  padding: 0
+                }, children: "\xD7" })
+              ] }, tag)) }),
+              /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "4px" }, children: [
+                /* @__PURE__ */ u4(
+                  "input",
+                  {
+                    type: "text",
+                    value: editTagInput.value,
+                    onInput: (e4) => {
+                      editTagInput.value = e4.target.value;
+                    },
+                    onKeyDown: (e4) => {
+                      if (e4.key === "Enter") {
+                        e4.preventDefault();
+                        addTag();
+                      }
+                    },
+                    placeholder: "New tag...",
+                    style: { ...inputStyle, flex: 1 }
+                  }
+                ),
+                /* @__PURE__ */ u4("button", { onClick: addTag, style: {
+                  padding: "3px 8px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  background: "var(--background-secondary, #f5f5f5)",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  whiteSpace: "nowrap"
+                }, children: "Add" })
+              ] })
+            ] }) : task.tags.value.length > 0 ? /* @__PURE__ */ u4("div", { style: { display: "flex", flexWrap: "wrap", gap: "4px" }, children: task.tags.value.map((tag) => /* @__PURE__ */ u4("span", { style: {
               padding: "1px 6px",
               borderRadius: "10px",
               background: "var(--background-modifier-border, #e0e0e0)",
               fontSize: "11px"
-            }, children: tag }, tag)) })
-          ] }),
-          /* @__PURE__ */ u4("div", { style: { borderTop: "1px solid var(--background-modifier-border, #e0e0e0)", paddingTop: "10px", marginTop: "2px" }, children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "4px" }, children: "Project" }),
-            project ? /* @__PURE__ */ u4(
-              "div",
-              {
-                style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" },
-                onClick: () => store.selectEntity({ type: "project", id: project.id }),
-                title: "Click to view project details",
-                children: [
-                  project.color && /* @__PURE__ */ u4("span", { style: {
-                    width: "12px",
-                    height: "12px",
-                    borderRadius: "3px",
-                    background: project.color,
-                    flexShrink: 0
-                  } }),
-                  /* @__PURE__ */ u4("span", { style: { color: "var(--interactive-accent, #4A90D9)", fontSize: "13px", fontWeight: 500 }, children: project.name }),
-                  /* @__PURE__ */ u4(StatusBadge, { status: projectOverrides?.status ?? project.status ?? "pending" }),
-                  /* @__PURE__ */ u4("span", { style: { fontSize: "10px", color: "var(--text-muted, #999)", marginLeft: "auto" }, children: "View \u2192" })
-                ]
-              }
-            ) : task.projectId.value ? /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)" }, children: [
-              task.projectId.value,
-              " (deleted)"
-            ] }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)" }, children: "No project" })
+            }, children: tag }, tag)) }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: "\u2014" })
           ] }),
           /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginTop: "4px" }, children: [
             /* @__PURE__ */ u4("div", { style: { textDecoration: sourceStyle }, children: sourceLabel }),
@@ -5688,12 +6046,6 @@ function DetailPanel(props) {
       ]
     }
   );
-}
-function FieldRow(props) {
-  return /* @__PURE__ */ u4("div", { children: [
-    /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "1px" }, children: props.label }),
-    /* @__PURE__ */ u4("div", { style: { fontSize: "13px" }, children: props.value })
-  ] });
 }
 function ConfirmDialog(props) {
   function handleKeyDown(e4) {
@@ -6444,6 +6796,145 @@ function DualPane(props) {
   const paneRatio = useSignal(0.5);
   const isResizing = useSignal(false);
   const isResizingPanel = useSignal(false);
+  const didInitialScroll = A2(false);
+  y2(() => {
+    if (didInitialScroll.current || store.mergedTasks.value.length === 0)
+      return;
+    didInitialScroll.current = true;
+    requestAnimationFrame(() => {
+      const timelineEl = document.querySelector(".gantt-timeline");
+      if (!timelineEl)
+        return;
+      let minAbsPx = dateToPx2(todayString());
+      for (const t4 of store.mergedTasks.value) {
+        const sd = t4.startDate.value;
+        const ed = t4.endDate.value;
+        if (sd) {
+          const px = dateToPx2(sd);
+          if (px < minAbsPx)
+            minAbsPx = px;
+        }
+        if (ed) {
+          const px = dateToPx2(ed);
+          if (px < minAbsPx)
+            minAbsPx = px;
+        }
+      }
+      const bodyOriginPx = Math.floor(minAbsPx - 730 * DAY_WIDTH2);
+      const todayBodyPx = dateToPx2(todayString()) - bodyOriginPx;
+      const targetScroll = Math.max(0, todayBodyPx - timelineEl.clientWidth / 2);
+      store.sharedScrollLeft.value = targetScroll;
+    });
+  }, []);
+  y2(() => {
+    const target = store.locateTarget.value;
+    if (!target)
+      return;
+    requestAnimationFrame(() => {
+      let minAbsPx = dateToPx2(todayString());
+      for (const t4 of store.mergedTasks.value) {
+        const sd = t4.startDate.value;
+        const ed = t4.endDate.value;
+        if (sd) {
+          const px = dateToPx2(sd);
+          if (px < minAbsPx)
+            minAbsPx = px;
+        }
+        if (ed) {
+          const px = dateToPx2(ed);
+          if (px < minAbsPx)
+            minAbsPx = px;
+        }
+      }
+      const bodyOriginPx = Math.floor(minAbsPx - 730 * DAY_WIDTH2);
+      if (target.type === "task") {
+        const task = store.mergedTasks.value.find((t4) => t4.id === target.id);
+        if (!task) {
+          store.locateTarget.value = null;
+          return;
+        }
+        const startVal = task.startDate.value;
+        if (startVal) {
+          const timelineEl = document.querySelector(".gantt-timeline");
+          const viewportW = timelineEl ? timelineEl.clientWidth : 800;
+          const targetBodyPx = dateToPx2(startVal) - bodyOriginPx;
+          store.sharedScrollLeft.value = Math.max(0, targetBodyPx - viewportW / 4);
+        }
+        const personKey = task.personId.value || "__unassigned__";
+        let personRowY = 0;
+        let accY = 0;
+        for (const group of store.personGroups.value) {
+          const taskCount = group.tasks.length || 1;
+          const lanes = Math.min(taskCount, 3);
+          const h4 = ROW_HEIGHT2 + (lanes - 1) * LANE_OFFSET2;
+          if (group.personId === personKey) {
+            personRowY = accY;
+            break;
+          }
+          accY += h4;
+        }
+        const personPaneEl = document.querySelector(".gantt-pane");
+        const personViewH = personPaneEl ? personPaneEl.clientHeight / 2 : 300;
+        store.personScrollTop.value = Math.max(0, personRowY - personViewH / 3);
+        const projectKey = task.projectId.value || "__no_project__";
+        let projectRowY = 0;
+        accY = 0;
+        for (const group of store.projectGroups.value) {
+          const taskCount = group.tasks.length || 1;
+          const lanes = Math.min(taskCount, 3);
+          const h4 = ROW_HEIGHT2 + (lanes - 1) * LANE_OFFSET2;
+          if (group.projectId === projectKey) {
+            projectRowY = accY;
+            break;
+          }
+          accY += h4;
+        }
+        const projectPaneEl = document.querySelectorAll(".gantt-pane")[1];
+        const projectViewH = projectPaneEl ? projectPaneEl.clientHeight : 300;
+        store.projectScrollTop.value = Math.max(0, projectRowY - projectViewH / 3);
+      }
+      if (target.type === "project") {
+        const projectTasks = store.mergedTasks.value.filter((t4) => t4.projectId.value === target.id);
+        let earliest = null;
+        let latest = null;
+        for (const t4 of projectTasks) {
+          const s5 = t4.startDate.value;
+          const e4 = t4.endDate.value ?? s5;
+          if (s5) {
+            if (!earliest || s5 < earliest)
+              earliest = s5;
+            if (!latest || e4 > latest)
+              latest = e4;
+          }
+        }
+        if (earliest) {
+          const projectMidDate = earliest === latest || !latest ? earliest : addDays(earliest, Math.floor(daysBetween(earliest, latest) / 2));
+          if (projectMidDate) {
+            const timelineEl = document.querySelector(".gantt-timeline");
+            const viewportW = timelineEl ? timelineEl.clientWidth : 800;
+            const targetBodyPx = dateToPx2(projectMidDate) - bodyOriginPx;
+            store.sharedScrollLeft.value = Math.max(0, targetBodyPx - viewportW / 4);
+          }
+        }
+        let projectRowY = 0;
+        let accY = 0;
+        for (const group of store.projectGroups.value) {
+          const taskCount = group.tasks.length || 1;
+          const lanes = Math.min(taskCount, 3);
+          const h4 = ROW_HEIGHT2 + (lanes - 1) * LANE_OFFSET2;
+          if (group.projectId === target.id) {
+            projectRowY = accY;
+            break;
+          }
+          accY += h4;
+        }
+        const projectPaneEl = document.querySelectorAll(".gantt-pane")[1];
+        const projectViewH = projectPaneEl ? projectPaneEl.clientHeight : 300;
+        store.projectScrollTop.value = Math.max(0, projectRowY - projectViewH / 3);
+      }
+      store.locateTarget.value = null;
+    });
+  }, [store.locateTarget.value]);
   function handleResizePointerDown(e4) {
     e4.preventDefault();
     isResizing.value = true;
@@ -7409,7 +7900,7 @@ function createObsidianStorage(adapter) {
 }
 
 // src/connector-loader.ts
-function createObsidianConnectorLoader(adapter, requestUrl) {
+function createObsidianConnectorLoader(adapter, requestUrl2) {
   return {
     async load(scriptPath) {
       try {
@@ -7447,12 +7938,13 @@ function createObsidianConnectorLoader(adapter, requestUrl) {
     }
   };
 }
-function createObsidianConnectorContext(config, vaultAdapter, requestUrl) {
+function createObsidianConnectorContext(config, vaultAdapter, requestUrl2, viewState) {
   return {
     config,
+    viewState,
     log: (...args) => console.log("[Gantt Connector]", ...args),
     request: async (url, opts) => {
-      const result = await requestUrl({
+      const result = await requestUrl2({
         url,
         method: opts?.method ?? "GET",
         headers: opts?.headers,
@@ -7481,6 +7973,7 @@ function createObsidianConnectorContext(config, vaultAdapter, requestUrl) {
 var import_obsidian = require("obsidian");
 function createObsidianPlatform(app) {
   const adapter = app.vault.adapter;
+  const appRef = app;
   const storage = createObsidianStorage(adapter);
   const fetchRef = {
     requestUrl: () => {
@@ -7488,7 +7981,7 @@ function createObsidianPlatform(app) {
     }
   };
   const connectorLoader = createObsidianConnectorLoader(adapter, (...args) => fetchRef.requestUrl(...args));
-  const createConnectorContext = (config) => createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args));
+  const createConnectorContext = (config, viewState) => createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args), viewState);
   const theme = {
     isDark: () => {
       const body = document.body;
@@ -7514,6 +8007,10 @@ function createObsidianPlatform(app) {
     // File watching handled by Obsidian's vault events
     theme,
     setIcon: import_obsidian.setIcon,
+    renderMarkdown: async (el, markdown) => {
+      const component = new import_obsidian.Component();
+      await import_obsidian.MarkdownRenderer.renderMarkdown(markdown, el, "", component);
+    },
     openExternal: (url) => {
       let normalizedUrl = url.trim();
       if (!/^https?:\/\//i.test(normalizedUrl)) {
@@ -7569,6 +8066,12 @@ function createObsidianPlatform(app) {
   platform._fetchRef = fetchRef;
   return platform;
 }
+function bindObsidianFetch(platform, requestUrl2) {
+  const fetchRef = platform._fetchRef;
+  if (fetchRef) {
+    fetchRef.requestUrl = requestUrl2;
+  }
+}
 
 // src/view.tsx
 var VIEW_TYPE = "obsidian-gantt-view";
@@ -7589,6 +8092,7 @@ var GanttView = class extends import_obsidian2.ItemView {
   }
   async onOpen() {
     this.platform = createObsidianPlatform(this.app);
+    bindObsidianFetch(this.platform, import_obsidian2.requestUrl);
     this.store = createGanttStore(this.platform);
     const vault = this.app.vault;
     const BASE2 = "obsidian-gantt-data";

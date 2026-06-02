@@ -304,6 +304,7 @@ export interface TaskBarData {
   width: number;
   color: string;
   isHighlighted: boolean;
+  isSelected: boolean;
   isDimmed: boolean;
   progress: number;
 }
@@ -336,6 +337,21 @@ export function TaskBar(props: {
   const barWidth = Math.max(data.width, 4);
   const showHandles = barWidth >= 12;
 
+  // Inject pulse animation keyframes once for selected task bar glow
+  const injectedRef = useRef(false);
+  useEffect(() => {
+    if (injectedRef.current) return;
+    injectedRef.current = true;
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes gantt-selected-pulse {
+        0%, 100% { box-shadow: 0 0 0 3px var(--gantt-selected-border, #FF6B35), 0 0 10px rgba(255, 107, 53, 0.3); }
+        50% { box-shadow: 0 0 0 4px var(--gantt-selected-border, #FF6B35), 0 0 24px rgba(255, 107, 53, 0.6); }
+      }
+    `;
+    document.head.appendChild(style);
+  }, []);
+
   // Compute non-working day overlays
   let overlays: { left: number; width: number }[] = [];
   if (startDate && endDate && bodyOriginPx !== undefined && dayWidth && holidayConfig) {
@@ -352,7 +368,7 @@ export function TaskBar(props: {
 
   return (
     <div
-      class={`gantt-task-bar ${data.isHighlighted ? 'highlighted' : ''} ${data.isDimmed ? 'dimmed' : ''}`}
+      class={`gantt-task-bar ${data.isSelected ? 'selected' : ''} ${data.isHighlighted ? 'highlighted' : ''} ${data.isDimmed ? 'dimmed' : ''}`}
       style={{
         position: 'absolute',
         left: `${data.left}px`,
@@ -371,11 +387,14 @@ export function TaskBar(props: {
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         color: 'var(--text-on-accent, #fff)',
-        zIndex: 2 + props.laneIndex,
-        boxShadow: data.isHighlighted
-          ? '0 0 0 2px var(--gantt-highlight-border, #4A90D9)'
-          : 'none',
-        transition: 'opacity 0.15s, box-shadow 0.15s',
+        zIndex: data.isSelected ? 1000 : 2 + props.laneIndex,
+        animation: data.isSelected ? 'gantt-selected-pulse 1.4s ease-in-out infinite' : 'none',
+        boxShadow: data.isSelected
+          ? 'none'
+          : data.isHighlighted
+            ? '0 0 0 2px var(--gantt-highlight-border, #4A90D9)'
+            : 'none',
+        transition: data.isSelected ? 'none' : 'opacity 0.15s, box-shadow 0.15s',
       }}
       onPointerDown={(e) => {
         const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -440,16 +459,17 @@ export function TaskRow(props: {
   index: number;
   isDimmed: boolean;
   isHighlighted: boolean;
+  isSelected: boolean;
   children?: any;
   onClick?: () => void;
   onPointerOver?: (e: PointerEvent) => void;
   style?: Record<string, string>;
 }) {
-  const { label, rowHeight, index, isDimmed, isHighlighted } = props;
+  const { label, rowHeight, index, isDimmed, isHighlighted, isSelected } = props;
 
   return (
     <div
-      class={`gantt-row ${isDimmed ? 'dimmed' : ''} ${isHighlighted ? 'highlighted' : ''}`}
+      class={`gantt-row ${isSelected ? 'selected' : ''} ${isDimmed ? 'dimmed' : ''} ${isHighlighted ? 'highlighted' : ''}`}
       style={{
         position: 'relative',
         height: `${rowHeight}px`,
@@ -457,7 +477,11 @@ export function TaskRow(props: {
         borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)',
         opacity: isDimmed ? 0.4 : 1,
         transition: 'opacity 0.15s',
-        background: isHighlighted ? 'var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))' : 'transparent',
+        background: isSelected ? 'var(--gantt-selected-row-bg, rgba(255, 107, 53, 0.12))'
+          : isHighlighted ? 'var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))'
+          : 'transparent',
+        outline: isSelected ? '2px solid var(--gantt-selected-border, #FF6B35)' : 'none',
+        outlineOffset: '-2px',
       }}
       onClick={props.onClick}
     >

@@ -1,8 +1,8 @@
 import { h, render } from 'preact';
 import { createGanttStore, GanttChart } from '@obsidian-gantt/ui';
 import type { GanttPlatform } from '@obsidian-gantt/core';
-import { ItemView, WorkspaceLeaf } from 'obsidian';
-import { createObsidianPlatform } from './platform';
+import { ItemView, WorkspaceLeaf, requestUrl } from 'obsidian';
+import { createObsidianPlatform, bindObsidianFetch } from './platform';
 
 export const VIEW_TYPE = 'obsidian-gantt-view';
 
@@ -28,6 +28,7 @@ export class GanttView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.platform = createObsidianPlatform(this.app as any);
+    bindObsidianFetch(this.platform, requestUrl);
     this.store = createGanttStore(this.platform);
 
     // Ensure subdirectories exist for tags and settings

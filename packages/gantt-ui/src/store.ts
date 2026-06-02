@@ -98,9 +98,11 @@ export interface GanttStore {
   // Selection & highlight
   selectedEntity: ReturnType<typeof signal<SelectedEntity | null>>;
   highlightedTaskIds: ReturnType<typeof computed<Set<string>>>;
+  selectedTaskId: ReturnType<typeof computed<string | null>>;
+  selectedProjectId: ReturnType<typeof computed<string | null>>;
 
-  // Scroll target for auto-scroll on selection change
-  scrollTargetDate: ReturnType<typeof computed<string | null>>;
+  // Locate target — set by detail panels to trigger scroll-to-entity
+  locateTarget: ReturnType<typeof signal<{ type: 'task'; id: string } | { type: 'project'; id: string } | null>>;
 
   // Scroll
   sharedScrollLeft: ReturnType<typeof signal<number>>;
@@ -456,6 +458,20 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     return new Set();
   });
 
+  // Single selected entity IDs for prominent highlighting
+  const selectedTaskId = computed<string | null>(() => {
+    const sel = selectedEntity.value;
+    return sel?.type === 'task' ? sel.id : null;
+  });
+
+  const selectedProjectId = computed<string | null>(() => {
+    const sel = selectedEntity.value;
+    return sel?.type === 'project' ? sel.id : null;
+  });
+
+  // Locate target — set by detail panels, consumed by DualPane to scroll to entity
+  const locateTarget = signal<{ type: 'task'; id: string } | { type: 'project'; id: string } | null>(null);
+
   const timelineRange = computed(() => {
     const allDates: string[] = [];
     for (const t of mergedTasks.value) {
@@ -463,46 +479,6 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       if (t.endDate.value) allDates.push(t.endDate.value);
     }
     return computeTimelineRange(allDates, 7);
-  });
-
-  const scrollTargetDate = computed<string | null>(() => {
-    const sel = selectedEntity.value;
-    if (!sel) return null;
-
-    if (sel.type === 'task') {
-      const task = mergedTasks.value.find(t => t.id === sel.id);
-      const s = task?.startDate.value;
-      const e = task?.endDate.value;
-      if (!s) return null;
-      if (!e || s === e) return s;
-      return addDays(s, Math.floor(daysBetween(s, e) / 2));
-    }
-
-    if (sel.type === 'project') {
-      const project = mergedProjects.value.find(p => p.id === sel.id);
-      // Try configured sort key dates first
-      for (const kdName of projectSortKeyDates.value) {
-        const kd = project?.keyDates?.find(k => k.name === kdName);
-        if (kd?.date) return kd.date;
-      }
-
-      const projectTasks = mergedTasks.value.filter(t => t.projectId.value === sel.id);
-      let earliest: string | null = null;
-      let latest: string | null = null;
-      for (const t of projectTasks) {
-        const s = t.startDate.value;
-        const e = t.endDate.value ?? s;
-        if (s) {
-          if (!earliest || s < earliest) earliest = s;
-          if (!latest || e > latest) latest = e;
-        }
-      }
-      if (!earliest) return null;
-      if (!latest || earliest === latest) return earliest;
-      return addDays(earliest, Math.floor(daysBetween(earliest, latest) / 2));
-    }
-
-    return null;
   });
 
   // Filtering computed: which projects match all active filters.
@@ -669,6 +645,20 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     }
   }
 
+  // Helper: build current view filter/sort state for connector context
+  function buildViewState() {
+    return {
+      filterTimeStart: filterTimeStart.value || undefined,
+      filterTimeEnd: filterTimeEnd.value || undefined,
+      filterStatuses: filterStatuses.value.size > 0 ? [...filterStatuses.value] : undefined,
+      filterTags: filterTags.value.size > 0 ? [...filterTags.value] : undefined,
+      personSortMode: personSortMode.value,
+      projectSortMode: projectSortMode.value,
+      projectSortKeyDates: projectSortKeyDates.value,
+      positionOrder: positionOrder.value.length > 0 ? positionOrder.value : undefined,
+    };
+  }
+
   async function refreshConnector(connectorId: string): Promise<void> {
     isLoading.value = true;
     error.value = null;
@@ -691,8 +681,9 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       // Load the connector module
       const mod = await platform.connectorLoader.load(scriptPath);
 
-      // Create context with the connector's config
-      const ctx = platform.createConnectorContext(connConfig);
+      // Create context with the connector's config and current view state
+      const viewState = buildViewState();
+      const ctx = platform.createConnectorContext(connConfig, viewState);
 
       // Execute fetch → transform
       const rawData = await mod.fetch(ctx);
@@ -1030,7 +1021,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
           continue;
         }
 
-        const ctx = platform.createConnectorContext(connConfig);
+        const ctx = platform.createConnectorContext(connConfig, buildViewState());
         const result = await mod.push(payload, ctx);
         results.push({ connectorId: cache.connectorId, success: result.success, error: result.error });
       } catch (e) {
@@ -1525,7 +1516,9 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     unassignedProjects,
     selectedEntity,
     highlightedTaskIds,
-    scrollTargetDate,
+    selectedTaskId,
+    selectedProjectId,
+    locateTarget,
     sharedScrollLeft,
     personScrollTop,
     projectScrollTop,

@@ -161,6 +161,17 @@ export interface ConnectorContext {
   writeFile?: (path: string, content: string) => Promise<void>;
   /** Parse CSV text into an array of record objects */
   parseCSV?: (text: string, options?: CsvParseOptions) => Record<string, string>[];
+  /** Current view filter/sort state — connectors may use to optimize data fetching */
+  viewState?: {
+    filterTimeStart?: string;
+    filterTimeEnd?: string;
+    filterStatuses?: string[];
+    filterTags?: string[];
+    personSortMode?: 'name' | 'position';
+    projectSortMode?: 'name' | 'time';
+    projectSortKeyDates?: string[];
+    positionOrder?: string[];
+  };
 }
 
 /** Exports expected from a connector script file. */
@@ -339,11 +350,13 @@ export interface GanttPlatform {
   fetch: typeof globalThis.fetch;
   connectorLoader: IConnectorLoader;
   /** Create a ConnectorContext for executing connector scripts */
-  createConnectorContext: (config: Record<string, unknown>) => ConnectorContext;
+  createConnectorContext: (config: Record<string, unknown>, viewState?: ConnectorContext['viewState']) => ConnectorContext;
   watcher: IWatcher | null;
   theme: Theme;
   /** Render a Lucide SVG icon inside the given element. Obsidian delegates to Obsidian.setIcon. */
   setIcon(el: HTMLElement, name: string): void;
+  /** Render markdown text into HTML inside the given element. */
+  renderMarkdown?: (el: HTMLElement, markdown: string) => void | Promise<void>;
   /** Open a file picker dialog. Returns the file name and content, or null if cancelled. */
   pickFile?: (accept: string) => Promise<{ name: string; content: string } | null>;
   /** Open a URL in the system default browser. */

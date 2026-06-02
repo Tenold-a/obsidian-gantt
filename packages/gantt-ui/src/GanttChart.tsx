@@ -12,7 +12,7 @@ import {
   isTodayDate,
 } from './components';
 import type { LocalTask } from '@obsidian-gantt/core';
-import { daysBetween, todayString, parseICS, classifyICSEvents } from '@obsidian-gantt/core';
+import { daysBetween, addDays, todayString, parseICS, classifyICSEvents } from '@obsidian-gantt/core';
 import { Icon, CURATED_ICONS } from './icon';
 import { createDragHandler, dragState } from './drag';
 import {
@@ -50,6 +50,34 @@ function pxToDate(px: number): string {
 }
 
 // ============================================================
+// MarkdownView — renders markdown via platform's renderMarkdown
+// ============================================================
+
+function MarkdownView(props: { markdown: string; store: GanttStore }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const platform = (props.store as any)._platform;
+
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.innerHTML = '';
+      if (platform?.renderMarkdown) {
+        platform.renderMarkdown(ref.current, props.markdown);
+      } else {
+        ref.current.textContent = props.markdown;
+      }
+    }
+  }, [props.markdown]);
+
+  return (
+    <div
+      ref={ref}
+      class="gantt-markdown-view"
+      style={{ fontSize: '12px', lineHeight: 1.5, wordBreak: 'break-word' }}
+    />
+  );
+}
+
+// ============================================================
 // TaskList — left sidebar showing row labels
 // ============================================================
 
@@ -59,6 +87,7 @@ function TaskList(props: {
   scrollTop?: number;
   highlightedRowKeys?: Set<string>;
   dimmedRowKeys?: Set<string>;
+  selectedRowKey?: string | null;
   onRowClick?: (key: string) => void;
   headerContent?: any;
 }) {
@@ -87,16 +116,20 @@ function TaskList(props: {
         {props.labels.map((label, i) => {
           const isHighlighted = props.highlightedRowKeys?.has(label.key) ?? false;
           const isDimmed = props.dimmedRowKeys?.has(label.key) ?? false;
+          const isSelected = props.selectedRowKey === label.key;
           const h = props.rowHeights[i] ?? ROW_HEIGHT;
           return (
             <div
               key={label.key}
-              class={`gantt-task-list-row ${isHighlighted ? 'highlighted' : ''} ${isDimmed ? 'dimmed' : ''}`}
+              class={`gantt-task-list-row ${isSelected ? 'selected' : ''} ${isHighlighted ? 'highlighted' : ''} ${isDimmed ? 'dimmed' : ''}`}
               style={{
                 height: `${h}px`,
                 borderBottom: '1px solid var(--gantt-grid-line-day, #e0e0e0)',
                 opacity: isDimmed ? 0.4 : 1,
-                background: isHighlighted ? 'var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))' : 'transparent',
+                background: isSelected ? 'var(--gantt-selected-row-bg, rgba(255, 107, 53, 0.12))'
+                  : isHighlighted ? 'var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))' : 'transparent',
+                outline: isSelected ? '2px solid var(--gantt-selected-border, #FF6B35)' : 'none',
+                outlineOffset: '-2px',
                 paddingLeft: '8px',
                 paddingRight: '8px',
                 fontSize: '13px',
@@ -185,8 +218,6 @@ function Timeline(props: {
 
   // Track visible viewport width for dynamic header/grid rendering
   const viewportWidth = useSignal(800);
-  // Ref for initial scroll-to-today (run once per pane)
-  const didInitialScroll = useRef(false);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -196,18 +227,6 @@ function Timeline(props: {
       viewportWidth.value = el.clientWidth;
     });
     ro.observe(el);
-
-    // Initial scroll: center today in the viewport
-    if (!didInitialScroll.current) {
-      didInitialScroll.current = true;
-      const todayBodyPx = originToBody(dateToPx(todayString()));
-      const targetScroll = todayBodyPx - el.clientWidth / 2;
-      requestAnimationFrame(() => {
-        el.scrollLeft = targetScroll;
-        props.onScroll(targetScroll, 0);
-      });
-    }
-
     return () => ro.disconnect();
   }, []);
 
@@ -279,28 +298,19 @@ function Timeline(props: {
     return () => el.removeEventListener('wheel', handleWheel);
   }, []);
 
-  // Sync scrollLeft from signal
+  // Sync scrollLeft from signal (for shared horizontal scroll between panes)
   useEffect(() => {
     if (containerRef.current) {
       containerRef.current.scrollLeft = scrollLeft;
     }
   }, [scrollLeft]);
 
-  // Auto-scroll to target date when selection changes
-  const lastHandledDate = useRef<string | null>(null);
+  // Sync scrollTop from signal (for programmatic vertical scroll e.g. locate button)
   useEffect(() => {
-    const targetDate = store.scrollTargetDate.value;
-    if (!targetDate || targetDate === lastHandledDate.current) return;
-    lastHandledDate.current = targetDate;
-    const el = containerRef.current;
-    if (!el) return;
-    const targetPx = originToBody(dateToPx(targetDate));
-    const targetScroll = targetPx - el.clientWidth / 2;
-    requestAnimationFrame(() => {
-      el.scrollLeft = Math.max(0, targetScroll);
-      props.onScroll(el.scrollLeft, el.scrollTop);
-    });
-  }, [store.scrollTargetDate.value]);
+    if (containerRef.current) {
+      containerRef.current.scrollTop = scrollTop;
+    }
+  }, [scrollTop]);
 
   // Task bar data with lane assignment
   const taskBars: Array<{
@@ -343,7 +353,7 @@ function Timeline(props: {
       const endVal = task.endDate.value ?? startVal;
       const left = originToBody(dateToPx(startVal));
       const right = originToBody(dateToPx(endVal));
-      const width = Math.max(right - left, 4);
+      const width = Math.max(right - left, 12);
       const projectColor = task.projectId.value
         ? projectColorMap.get(task.projectId.value) ?? getDefaultColor(task.projectId.value)
         : getDefaultColor(task.id);
@@ -473,6 +483,7 @@ function Timeline(props: {
           if (!layout) return null;
           const isHighlighted = props.highlightedRowKeys.has(group.key);
           const isDimmed = props.dimmedRowKeys.has(group.key);
+          const isSelectedRow = paneType === 'project' && group.key === store.selectedProjectId.value;
           // Check if drag is hovering over this row
           const dragHovering = dragState.value?.currentPersonId != null &&
             (dragState.value.currentPersonId === group.key ||
@@ -490,8 +501,10 @@ function Timeline(props: {
                 opacity: isDimmed ? 0.4 : 1,
                 background: dragHovering
                   ? 'var(--gantt-drag-hover-bg, rgba(74, 144, 217, 0.2))'
+                  : isSelectedRow ? 'var(--gantt-selected-row-bg, rgba(255, 107, 53, 0.12))'
                   : isHighlighted ? 'var(--gantt-row-highlight-bg, rgba(74, 144, 217, 0.08))' : 'transparent',
-                outline: dragHovering ? '2px dashed var(--gantt-drag-hover-border, #4A90D9)' : 'none',
+                outline: isSelectedRow ? '2px solid var(--gantt-selected-border, #FF6B35)'
+                  : dragHovering ? '2px dashed var(--gantt-drag-hover-border, #4A90D9)' : 'none',
                 outlineOffset: '-2px',
                 transition: 'opacity 0.15s, background 0.15s',
                 pointerEvents: 'none',
@@ -515,6 +528,7 @@ function Timeline(props: {
               width,
               color,
               isHighlighted: highlightedIds.has(task.id),
+              isSelected: task.id === store.selectedTaskId.value,
               isDimmed: (hasSelection && !highlightedIds.has(task.id)) || (paneType === 'person' && props.filterDimmedTaskIds.has(task.id)),
               progress: task.progress.value,
             }}
@@ -645,7 +659,10 @@ function GanttPane(props: {
 
   // Position editor state
   const showPosEditor = useSignal(false);
-  const posEditorText = useSignal('');
+  const posEditorItems = useSignal<string[]>([]);
+  const posEditorButtonRef = useRef<HTMLButtonElement | null>(null);
+  const posDragIndex = useSignal<number | null>(null);
+  const posDragOverIndex = useSignal<number | null>(null);
 
   // Apply project filtering — null = no filter active, Set = active filter
   const filterMatches = store.filteredProjectGroupKeys.value;
@@ -684,27 +701,33 @@ function GanttPane(props: {
   );
 
   // Compute row heights with lane expansion for overlapping bars
+  // Uses pixel-based lane assignment (matching Timeline's groupLayout) to ensure
+  // the TaskList row heights are consistent with the timeline bar layout.
   const groupHeights = useMemo(() => {
     return groups.map(group => {
-      const ranges: Array<{ start: string; end: string }> = [];
+      const ranges: Array<{ left: number; right: number }> = [];
       for (const task of group.tasks) {
-        const s = task.startDate.value;
-        if (!s) continue;
-        ranges.push({ start: s, end: task.endDate.value ?? s });
+        const startVal = task.startDate.value;
+        if (!startVal) continue;
+        const endVal = task.endDate.value ?? startVal;
+        const left = dateToPx(startVal);
+        const right = dateToPx(endVal);
+        const width = Math.max(right - left, 12);
+        ranges.push({ left, right: left + width });
       }
-      ranges.sort((a, b) => a.start.localeCompare(b.start));
+      ranges.sort((a, b) => a.left - b.left);
 
-      const lanes: string[] = []; // lanes[i] = end date of last bar in lane i
+      const lanes: number[] = []; // lanes[i] = end pixel of last bar in lane i
       for (const dr of ranges) {
         let assigned = false;
         for (let li = 0; li < lanes.length; li++) {
-          if (dr.start >= lanes[li]) {
-            lanes[li] = dr.end;
+          if (dr.left >= lanes[li]) {
+            lanes[li] = dr.right;
             assigned = true;
             break;
           }
         }
-        if (!assigned) lanes.push(dr.end);
+        if (!assigned) lanes.push(dr.right);
       }
       return ROW_HEIGHT + (Math.max(1, lanes.length) - 1) * LANE_OFFSET;
     });
@@ -761,6 +784,7 @@ function GanttPane(props: {
         scrollTop={props.scrollTop}
         highlightedRowKeys={highlightedRowKeys}
         dimmedRowKeys={dimmedRowKeys}
+        selectedRowKey={type === 'project' ? store.selectedProjectId.value : null}
         onRowClick={handleRowClick}
         headerContent={type === 'person' ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
@@ -786,11 +810,20 @@ function GanttPane(props: {
             {store.personSortMode.value === 'position' && (
               <div style={{ position: 'relative' }}>
                 <button
+                  ref={posEditorButtonRef}
                   onClick={() => {
-                    showPosEditor.value = !showPosEditor.value;
                     if (showPosEditor.value) {
-                      posEditorText.value = store.positionOrder.value.join('\n');
+                      showPosEditor.value = false;
+                      return;
                     }
+                    // Collect unique positions from person data and merge with current order
+                    const existing = new Set(store.positionOrder.value);
+                    for (const g of rawGroups) {
+                      const pg = g as PersonGroup;
+                      if (pg.position) existing.add(pg.position);
+                    }
+                    posEditorItems.value = [...existing];
+                    showPosEditor.value = true;
                   }}
                   title="Edit position order"
                   style={{
@@ -803,99 +836,8 @@ function GanttPane(props: {
                     fontSize: '11px',
                   }}
                 >
-                  ⚙
+                  <Icon name="settings" size={13} />
                 </button>
-                {showPosEditor.value && (
-                  <div style={{
-                    position: 'absolute',
-                    top: '100%',
-                    right: 0,
-                    marginTop: '4px',
-                    zIndex: 100,
-                    background: 'var(--background-primary, #fff)',
-                    border: '1px solid var(--background-modifier-border, #ccc)',
-                    borderRadius: '6px',
-                    padding: '8px',
-                    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-                    minWidth: '180px',
-                  }}>
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '4px' }}>
-                      Position order (one per line):
-                    </div>
-                    <textarea
-                      value={posEditorText.value}
-                      onInput={(e) => { posEditorText.value = (e.target as HTMLTextAreaElement).value; }}
-                      rows={4}
-                      style={{
-                        width: '100%',
-                        fontSize: '11px',
-                        border: '1px solid var(--background-modifier-border, #ccc)',
-                        borderRadius: '4px',
-                        padding: '4px',
-                        background: 'var(--background-primary, #fff)',
-                        color: 'var(--text-normal, #333)',
-                        resize: 'vertical',
-                        boxSizing: 'border-box',
-                      }}
-                    />
-                    <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
-                      <button
-                        onClick={() => {
-                          const lines = posEditorText.value.split('\n').map(s => s.trim()).filter(Boolean);
-                          store.positionOrder.value = lines;
-                          store.saveSettings();
-                          showPosEditor.value = false;
-                        }}
-                        style={{
-                          padding: '2px 10px',
-                          border: 'none',
-                          borderRadius: '4px',
-                          background: 'var(--interactive-accent, #4A90D9)',
-                          color: '#fff',
-                          cursor: 'pointer',
-                          fontSize: '11px',
-                        }}
-                      >
-                        Save
-                      </button>
-                      <button
-                        onClick={() => { showPosEditor.value = false; }}
-                        style={{
-                          padding: '2px 10px',
-                          border: '1px solid var(--background-modifier-border, #ccc)',
-                          borderRadius: '4px',
-                          background: 'transparent',
-                          color: 'var(--text-muted, #999)',
-                          cursor: 'pointer',
-                          fontSize: '11px',
-                        }}
-                      >
-                        Cancel
-                      </button>
-                      {store.positionOrder.value.length > 0 && (
-                        <button
-                          onClick={() => {
-                            store.positionOrder.value = [];
-                            store.saveSettings();
-                            showPosEditor.value = false;
-                          }}
-                          style={{
-                            padding: '2px 10px',
-                            border: '1px solid #E06C75',
-                            borderRadius: '4px',
-                            background: 'transparent',
-                            color: '#E06C75',
-                            cursor: 'pointer',
-                            fontSize: '11px',
-                            marginLeft: 'auto',
-                          }}
-                        >
-                          Clear
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
               </div>
             )}
           </div>
@@ -963,6 +905,150 @@ function GanttPane(props: {
         onDrop={props.onDrop}
         onDragOver={props.onDragOver}
       />
+      {/* Position editor popup — rendered to document.body via ref portal to escape any CSS containment in Obsidian */}
+      {showPosEditor.value && (
+        <div
+          ref={(el: HTMLDivElement | null) => {
+            if (el && el.parentElement !== document.body) {
+              document.body.appendChild(el);
+            }
+          }}
+        >
+          {/* Backdrop */}
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onClick={() => { showPosEditor.value = false; }}
+          />
+          <div
+            class="gantt-pos-editor-overlay"
+            style={{
+              position: 'fixed',
+              top: (posEditorButtonRef.current?.getBoundingClientRect().bottom ?? 100) + 4 + 'px',
+              left: (posEditorButtonRef.current?.getBoundingClientRect().left ?? 200) + 'px',
+              zIndex: 9999,
+              background: 'var(--background-primary, #fff)',
+              border: '1px solid var(--background-modifier-border, #ccc)',
+              borderRadius: '6px',
+              padding: '8px',
+              boxShadow: '0 4px 16px rgba(0,0,0,0.2)',
+              minWidth: '180px',
+              maxWidth: '260px',
+              maxHeight: '320px',
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '6px', flexShrink: 0 }}>
+              Drag to reorder positions:
+            </div>
+            <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+              {posEditorItems.value.map((item, i) => (
+                <div
+                  key={item}
+                  draggable
+                  onDragStart={() => { posDragIndex.value = i; }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    posDragOverIndex.value = i;
+                  }}
+                  onDragEnd={() => {
+                    if (posDragIndex.value !== null && posDragOverIndex.value !== null && posDragIndex.value !== posDragOverIndex.value) {
+                      const next = [...posEditorItems.value];
+                      const [removed] = next.splice(posDragIndex.value, 1);
+                      next.splice(posDragOverIndex.value, 0, removed);
+                      posEditorItems.value = next;
+                    }
+                    posDragIndex.value = null;
+                    posDragOverIndex.value = null;
+                  }}
+                  onDrop={(e) => e.preventDefault()}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '4px 6px',
+                    borderRadius: '4px',
+                    marginBottom: '2px',
+                    fontSize: '12px',
+                    cursor: 'grab',
+                    background: posDragOverIndex.value === i
+                      ? 'var(--interactive-accent, #4A90D9)'
+                      : posDragIndex.value === i
+                        ? 'var(--background-modifier-border, #e0e0e0)'
+                        : 'transparent',
+                    color: posDragOverIndex.value === i ? '#fff' : 'var(--text-normal, #333)',
+                    transition: 'background 0.1s',
+                    border: '1px solid transparent',
+                    borderColor: posDragOverIndex.value === i ? 'var(--interactive-accent, #4A90D9)' : 'transparent',
+                  }}
+                >
+                  <Icon name="grip-vertical" size={12} />
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item}</span>
+                </div>
+              ))}
+              {posEditorItems.value.length === 0 && (
+                <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', padding: '8px', textAlign: 'center' }}>
+                  No positions found
+                </div>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: '4px', marginTop: '6px', flexShrink: 0 }}>
+              <button
+                onClick={() => {
+                  store.positionOrder.value = posEditorItems.value;
+                  store.saveSettings();
+                  showPosEditor.value = false;
+                }}
+                style={{
+                  padding: '2px 10px',
+                  border: 'none',
+                  borderRadius: '4px',
+                  background: 'var(--interactive-accent, #4A90D9)',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                }}
+              >
+                Save
+              </button>
+              <button
+                onClick={() => { showPosEditor.value = false; }}
+                style={{
+                  padding: '2px 10px',
+                  border: '1px solid var(--background-modifier-border, #ccc)',
+                  borderRadius: '4px',
+                  background: 'transparent',
+                  color: 'var(--text-muted, #999)',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                }}
+              >
+                Cancel
+              </button>
+              {posEditorItems.value.length > 0 && (
+                <button
+                  onClick={() => {
+                    posEditorItems.value = [];
+                  }}
+                  style={{
+                    padding: '2px 10px',
+                    border: '1px solid #E06C75',
+                    borderRadius: '4px',
+                    background: 'transparent',
+                    color: '#E06C75',
+                    cursor: 'pointer',
+                    fontSize: '11px',
+                    marginLeft: 'auto',
+                  }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1223,6 +1309,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
       style={{
         width: `${store.detailPanelWidth.value}px`,
         minWidth: '180px',
+        maxHeight: '100%',
         borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
         padding: '12px',
         fontSize: '13px',
@@ -1310,6 +1397,15 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
                   color: 'var(--text-error, #e00)', lineHeight: 1,
                 }}
               ><Icon name="trash-2" size={13} /></button>
+              <button
+                onClick={() => { store.locateTarget.value = { type: 'project', id: project.id }; }}
+                title="Scroll to project"
+                style={{
+                  padding: '2px 4px', border: 'none', borderRadius: '3px',
+                  background: 'transparent', cursor: 'pointer', fontSize: '13px',
+                  color: 'var(--text-muted, #999)', lineHeight: 1,
+                }}
+              ><Icon name="target" size={13} /></button>
               <button
                 onClick={() => store.selectEntity(null)}
                 title="Close detail panel"
@@ -1457,7 +1553,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
           transition: 'background 0.15s, border-color 0.15s',
         }}
       >
-        <span style={{ fontSize: '14px', lineHeight: 1, flexShrink: 0 }}>⠿</span>
+        <Icon name="grip-horizontal" size={14} />
         <span style={{ fontWeight: 500 }}>Drag to person timeline to create task</span>
       </div>
 
@@ -1477,7 +1573,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
             placeholder="Project description..."
           />
         ) : (
-          <div style={valueStyle}>{description || '—'}</div>
+          description ? <MarkdownView markdown={description} store={store} /> : <div style={valueStyle}>—</div>
         )}
       </div>
 
@@ -1907,15 +2003,24 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
     ? store.projects.value.find(p => p.id === task.projectId.value)
     : null;
 
-  const projectOverrides = project
-    ? (store.edits.value?.projectOverrides?.[project.id] ?? null)
-    : null;
-
   // Inline title editing
   const editTitle = useSignal(false);
   const editTitleValue = useSignal(task.title.value);
   const copiedTask = useSignal(false);
   let titleInputRef: HTMLInputElement | null = null;
+
+  // Full editing mode
+  const editing = useSignal(false);
+  const editStartDate = useSignal(task.startDate.value ?? '');
+  const editEndDate = useSignal(task.endDate.value ?? '');
+  const editProgress = useSignal(task.progress.value ?? 0);
+  const editPersonId = useSignal(task.personId.value ?? '');
+  const editProjectId = useSignal(task.projectId.value ?? '');
+  const editUrl = useSignal(task.url.value ?? '');
+  const editDeps = useSignal<string[]>([...task.dependencies.value]);
+  const editTags = useSignal<string[]>([...task.tags.value]);
+  const editDepInput = useSignal('');
+  const editTagInput = useSignal('');
 
   function startEditTitle() {
     editTitleValue.value = task!.title.value;
@@ -1941,6 +2046,60 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelTitle(); }
   }
 
+  function startEditing() {
+    editStartDate.value = task!.startDate.value ?? '';
+    editEndDate.value = task!.endDate.value ?? '';
+    editProgress.value = task!.progress.value ?? 0;
+    editPersonId.value = task!.personId.value ?? '';
+    editProjectId.value = task!.projectId.value ?? '';
+    editUrl.value = task!.url.value ?? '';
+    editDeps.value = [...task!.dependencies.value];
+    editTags.value = [...task!.tags.value];
+    editing.value = true;
+  }
+
+  function cancelEditing() {
+    editing.value = false;
+  }
+
+  async function saveEditing() {
+    const t = task!;
+    const pid = t.id;
+
+    if (editStartDate.value !== (t.startDate.value ?? '')) store.persistEdit(pid, 'startDate', editStartDate.value || null);
+    if (editEndDate.value !== (t.endDate.value ?? '')) store.persistEdit(pid, 'endDate', editEndDate.value || null);
+    if (editProgress.value !== (t.progress.value ?? 0)) store.persistEdit(pid, 'progress', editProgress.value);
+    if (editPersonId.value !== (t.personId.value ?? '')) store.persistEdit(pid, 'personId', editPersonId.value || null);
+    if (editProjectId.value !== (t.projectId.value ?? '')) store.persistEdit(pid, 'projectId', editProjectId.value || null);
+    if (editUrl.value !== (t.url.value ?? '')) store.persistEdit(pid, 'url', editUrl.value || null);
+    if (JSON.stringify(editDeps.value) !== JSON.stringify(t.dependencies.value)) store.persistEdit(pid, 'dependencies', editDeps.value);
+    if (JSON.stringify(editTags.value) !== JSON.stringify(t.tags.value)) store.persistEdit(pid, 'tags', editTags.value);
+
+    editing.value = false;
+  }
+
+  function addDep() {
+    const val = editDepInput.value.trim();
+    if (!val || editDeps.value.includes(val)) return;
+    editDeps.value = [...editDeps.value, val];
+    editDepInput.value = '';
+  }
+
+  function removeDep(id: string) {
+    editDeps.value = editDeps.value.filter(d => d !== id);
+  }
+
+  function addTag() {
+    const tag = editTagInput.value.trim();
+    if (!tag || editTags.value.includes(tag)) return;
+    editTags.value = [...editTags.value, tag];
+    editTagInput.value = '';
+  }
+
+  function removeTag(tag: string) {
+    editTags.value = editTags.value.filter(t => t !== tag);
+  }
+
   const sourceLabel = task.connectorId
     ? `Connector: ${task.connectorId}`
     : task.upstreamId
@@ -1948,6 +2107,14 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
       : 'Manual entry';
 
   const sourceStyle = task.upstreamDeleted ? 'line-through' : 'normal';
+  const labelStyle = { fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' };
+  const inputStyle = {
+    width: '100%', fontSize: '12px', padding: '3px 6px', borderRadius: '4px',
+    border: '1px solid var(--background-modifier-border, #ccc)',
+    background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
+    boxSizing: 'border-box' as const,
+  };
+  const fieldStyle = { marginBottom: '10px' };
 
   return (
     <div
@@ -1955,6 +2122,7 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
       style={{
         width: `${store.detailPanelWidth.value}px`,
         minWidth: '180px',
+        maxHeight: '100%',
         borderLeft: '1px solid var(--gantt-grid-line-week, #c0c0c0)',
         padding: '12px',
         fontSize: '13px',
@@ -1996,40 +2164,52 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
           </div>
         )}
         <div style={{ display: 'flex', gap: '2px', flexShrink: 0, marginLeft: '4px' }}>
-          <button
-            onClick={() => props.onDelete?.(task.id, task.title.value)}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px',
-              lineHeight: 1, padding: '0 2px', color: 'var(--text-error, #e00)',
-            }}
-            title="Delete task"
-          ><Icon name="trash-2" size={14} /></button>
-          <button
-            onClick={() => store.selectEntity(null)}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px',
-              lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
-            }}
-            title="Close detail panel"
-          ><Icon name="x" size={16} /></button>
+          {editing.value ? (
+            <>
+              <button onClick={saveEditing} title="Save changes" style={{
+                padding: '3px 8px', border: '1px solid var(--interactive-accent, #4A90D9)',
+                borderRadius: '4px', background: 'var(--interactive-accent, #4A90D9)', color: '#fff',
+                cursor: 'pointer', fontSize: '11px',
+              }}>Save</button>
+              <button onClick={cancelEditing} title="Cancel editing" style={{
+                padding: '3px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
+                borderRadius: '4px', background: 'var(--background-secondary, #f5f5f5)',
+                cursor: 'pointer', fontSize: '11px',
+              }}>Cancel</button>
+            </>
+          ) : (
+            <>
+              <button onClick={startEditing} title="Edit task details" style={{
+                background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px',
+                lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
+              }}><Icon name="pencil" size={13} /></button>
+              <button onClick={() => props.onDelete?.(task.id, task.title.value)} title="Delete task" style={{
+                background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px',
+                lineHeight: 1, padding: '0 2px', color: 'var(--text-error, #e00)',
+              }}><Icon name="trash-2" size={14} /></button>
+              <button onClick={() => { store.locateTarget.value = { type: 'task', id: task.id }; }} title="Scroll to task" style={{
+                background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px',
+                lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
+              }}><Icon name="target" size={14} /></button>
+              <button onClick={() => store.selectEntity(null)} title="Close detail panel" style={{
+                background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px',
+                lineHeight: 1, padding: '0 2px', color: 'var(--text-muted, #999)',
+              }}><Icon name="x" size={16} /></button>
+            </>
+          )}
         </div>
       </div>
 
       {/* Fields */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
 
         {/* Status */}
-        <div>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Status</div>
+        <div style={fieldStyle}>
+          <div style={labelStyle}>Status</div>
           <select
             value={task.status.value}
             onChange={(e) => store.setTaskStatus(task.id, (e.target as HTMLSelectElement).value)}
-            style={{
-              width: '100%', fontSize: '12px', padding: '3px 6px', borderRadius: '4px',
-              border: '1px solid var(--background-modifier-border, #ccc)',
-              background: 'var(--background-primary, #fff)', color: 'var(--text-normal, #333)',
-              cursor: 'pointer',
-            }}
+            style={inputStyle}
           >
             {STATUS_OPTIONS.map(opt => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -2037,36 +2217,120 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
           </select>
         </div>
 
-        <FieldRow label="Start" value={task.startDate.value ?? '-'} />
-        <FieldRow label="End" value={task.endDate.value ?? '-'} />
-
-        <div>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Progress</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <div style={{
-              flex: 1,
-              height: '6px',
-              borderRadius: '3px',
-              background: 'var(--background-modifier-border, #ccc)',
-              overflow: 'hidden',
-            }}>
-              <div style={{
-                height: '100%',
-                width: `${(task.progress.value ?? 0) * 100}%`,
-                background: task.progress.value === 1 ? 'var(--gantt-completed, #4caf50)' : 'var(--gantt-in-progress, #2196f3)',
-                borderRadius: '3px',
-              }} />
-            </div>
-            <span style={{ fontSize: '12px', fontWeight: 'bold' }}>{Math.round((task.progress.value ?? 0) * 100)}%</span>
-          </div>
+        {/* Start Date */}
+        <div style={fieldStyle}>
+          <div style={labelStyle}>Start</div>
+          {editing.value ? (
+            <input type="date" value={editStartDate.value}
+              onInput={(e) => { editStartDate.value = (e.target as HTMLInputElement).value; }}
+              style={inputStyle} />
+          ) : (
+            <div style={{ fontSize: '13px' }}>{task.startDate.value ?? '—'}</div>
+          )}
         </div>
 
-        <FieldRow label="Person" value={personName ?? '-'} />
+        {/* End Date */}
+        <div style={fieldStyle}>
+          <div style={labelStyle}>End</div>
+          {editing.value ? (
+            <input type="date" value={editEndDate.value}
+              onInput={(e) => { editEndDate.value = (e.target as HTMLInputElement).value; }}
+              style={inputStyle} />
+          ) : (
+            <div style={{ fontSize: '13px' }}>{task.endDate.value ?? '—'}</div>
+          )}
+        </div>
+
+        {/* Progress */}
+        <div style={fieldStyle}>
+          <div style={labelStyle}>Progress</div>
+          {editing.value ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <input type="range" min="0" max="1" step="0.05"
+                value={String(editProgress.value)}
+                onInput={(e) => { editProgress.value = parseFloat((e.target as HTMLInputElement).value); }}
+                style={{ flex: 1 }} />
+              <span style={{ fontSize: '12px', fontWeight: 'bold', minWidth: '36px', textAlign: 'right' }}>
+                {Math.round(editProgress.value * 100)}%
+              </span>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <div style={{
+                flex: 1, height: '6px', borderRadius: '3px',
+                background: 'var(--background-modifier-border, #ccc)', overflow: 'hidden',
+              }}>
+                <div style={{
+                  height: '100%',
+                  width: `${(task.progress.value ?? 0) * 100}%`,
+                  background: task.progress.value === 1 ? 'var(--gantt-completed, #4caf50)' : 'var(--gantt-in-progress, #2196f3)',
+                  borderRadius: '3px',
+                }} />
+              </div>
+              <span style={{ fontSize: '12px', fontWeight: 'bold' }}>{Math.round((task.progress.value ?? 0) * 100)}%</span>
+            </div>
+          )}
+        </div>
+
+        {/* Person */}
+        <div style={fieldStyle}>
+          <div style={labelStyle}>Person</div>
+          {editing.value ? (
+            <select value={editPersonId.value}
+              onChange={(e) => { editPersonId.value = (e.target as HTMLSelectElement).value; }}
+              style={inputStyle}>
+              <option value="">— None —</option>
+              {store.persons.value.map(p => (
+                <option key={p.id} value={p.id}>{p.name}{p.position ? ` (${p.position})` : ''}</option>
+              ))}
+            </select>
+          ) : (
+            <div style={{ fontSize: '13px' }}>{personName ?? '—'}</div>
+          )}
+        </div>
+
+        {/* Project */}
+        <div style={fieldStyle}>
+          <div style={labelStyle}>Project</div>
+          {editing.value ? (
+            <select value={editProjectId.value}
+              onChange={(e) => { editProjectId.value = (e.target as HTMLSelectElement).value; }}
+              style={inputStyle}>
+              <option value="">— None —</option>
+              {store.projects.value.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          ) : (
+            project ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
+                onClick={() => store.selectEntity({ type: 'project', id: project.id })}
+                title="Click to view project details">
+                {project.color && (
+                  <span style={{ width: '12px', height: '12px', borderRadius: '3px', background: project.color, flexShrink: 0 }} />
+                )}
+                <span style={{ color: 'var(--interactive-accent, #4A90D9)', fontSize: '13px', fontWeight: 500 }}>
+                  {project.name}
+                </span>
+                <span style={{ fontSize: '10px', color: 'var(--text-muted, #999)', marginLeft: 'auto' }}>View →</span>
+              </div>
+            ) : task.projectId.value ? (
+              <div style={{ fontSize: '12px', color: 'var(--text-muted, #999)' }}>{task.projectId.value} (deleted)</div>
+            ) : (
+              <div style={{ fontSize: '12px', color: 'var(--text-muted, #999)' }}>No project</div>
+            )
+          )}
+        </div>
 
         {/* URL */}
-        <div>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Link</div>
-          {task.url.value ? (
+        <div style={fieldStyle}>
+          <div style={labelStyle}>Link</div>
+          {editing.value ? (
+            <input type="text" value={editUrl.value}
+              onInput={(e) => { editUrl.value = (e.target as HTMLInputElement).value; }}
+              placeholder="https://..."
+              style={inputStyle} />
+          ) : task.url.value ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
               <a
                 href={task.url.value}
@@ -2082,115 +2346,126 @@ function DetailPanel(props: { store: GanttStore; onDelete?: (taskId: string, tit
                   }
                 }}
                 style={{
-                  color: 'var(--interactive-accent, #4A90D9)',
-                  textDecoration: 'none',
-                  fontSize: '12px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  flex: 1,
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
+                  color: 'var(--interactive-accent, #4A90D9)', textDecoration: 'none', fontSize: '12px',
+                  display: 'flex', alignItems: 'center', gap: '4px', flex: 1, minWidth: 0,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 }}
-                title={task.url.value}
-              >
+                title={task.url.value}>
                 <span style={{ fontSize: '10px', flexShrink: 0 }}>↗</span>
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{task.url.value}</span>
               </a>
-              <button
-                onClick={async (e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  try {
-                    await navigator.clipboard.writeText(task.url.value!);
-                    copiedTask.value = true;
-                    setTimeout(() => { copiedTask.value = false; }, 1500);
-                  } catch {
-                    const ta = document.createElement('textarea');
-                    ta.value = task.url.value!;
-                    ta.style.position = 'fixed';
-                    ta.style.opacity = '0';
-                    document.body.appendChild(ta);
-                    ta.select();
-                    document.execCommand('copy');
-                    document.body.removeChild(ta);
-                  }
-                }}
-                title="Copy link"
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontSize: '12px',
-                  padding: '0 2px',
-                  color: 'var(--text-muted, #999)',
-                  flexShrink: 0,
-                }}
-              >{copiedTask.value ? <Icon name="check" size={14} title="Copied!" /> : <Icon name="copy" size={14} title="Copy link" />}</button>
+              <button onClick={async (e) => {
+                e.preventDefault(); e.stopPropagation();
+                try {
+                  await navigator.clipboard.writeText(task.url.value!);
+                  copiedTask.value = true;
+                  setTimeout(() => { copiedTask.value = false; }, 1500);
+                } catch {
+                  const ta = document.createElement('textarea');
+                  ta.value = task.url.value!;
+                  ta.style.position = 'fixed'; ta.style.opacity = '0';
+                  document.body.appendChild(ta); ta.select();
+                  document.execCommand('copy'); document.body.removeChild(ta);
+                }
+              }} title="Copy link" style={{
+                background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px',
+                padding: '0 2px', color: 'var(--text-muted, #999)', flexShrink: 0,
+              }}>{copiedTask.value ? <Icon name="check" size={14} /> : <Icon name="copy" size={14} />}</button>
             </div>
           ) : (
             <div style={{ fontSize: '12px' }}>—</div>
           )}
         </div>
 
-        <div>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Dependencies</div>
-          <div style={{ fontSize: '12px' }}>
-            {task.dependencies.value.length > 0
-              ? task.dependencies.value.map(d => (
-                  <div key={d} style={{ padding: '1px 0' }}>{d}</div>
-                ))
-              : '-'}
-          </div>
-        </div>
-
-        {task.tags.value.length > 0 && (
-          <div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '2px' }}>Tags</div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-              {task.tags.value.map(tag => (
-                <span key={tag} style={{
-                  padding: '1px 6px', borderRadius: '10px',
-                  background: 'var(--background-modifier-border, #e0e0e0)', fontSize: '11px',
-                }}>
-                  {tag}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Project section at bottom */}
-        <div style={{ borderTop: '1px solid var(--background-modifier-border, #e0e0e0)', paddingTop: '10px', marginTop: '2px' }}>
-          <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginBottom: '4px' }}>Project</div>
-          {project ? (
-            <div
-              style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
-              onClick={() => store.selectEntity({ type: 'project', id: project.id })}
-              title="Click to view project details"
-            >
-              {project.color && (
-                <span style={{
-                  width: '12px', height: '12px', borderRadius: '3px', background: project.color, flexShrink: 0,
-                }} />
-              )}
-              <span style={{ color: 'var(--interactive-accent, #4A90D9)', fontSize: '13px', fontWeight: 500 }}>
-                {project.name}
-              </span>
-              <StatusBadge status={projectOverrides?.status ?? project.status ?? 'pending'} />
-              <span style={{ fontSize: '10px', color: 'var(--text-muted, #999)', marginLeft: 'auto' }}>View →</span>
-            </div>
-          ) : task.projectId.value ? (
-            <div style={{ fontSize: '12px', color: 'var(--text-muted, #999)' }}>
-              {task.projectId.value} (deleted)
+        {/* Dependencies */}
+        <div style={fieldStyle}>
+          <div style={labelStyle}>Dependencies</div>
+          {editing.value ? (
+            <div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '6px' }}>
+                {editDeps.value.map(d => (
+                  <span key={d} style={{
+                    padding: '1px 6px', borderRadius: '10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px',
+                    background: 'var(--background-modifier-border, #e0e0e0)',
+                  }}>
+                    {d}
+                    <button onClick={() => removeDep(d)} style={{
+                      background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px',
+                      color: 'var(--text-error, #e00)', lineHeight: 1, padding: 0,
+                    }}>×</button>
+                  </span>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <input type="text" value={editDepInput.value}
+                  onInput={(e) => { editDepInput.value = (e.target as HTMLInputElement).value; }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addDep(); } }}
+                  placeholder="Task ID..."
+                  style={{ ...inputStyle, flex: 1 }} />
+                <button onClick={addDep} style={{
+                  padding: '3px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
+                  borderRadius: '4px', background: 'var(--background-secondary, #f5f5f5)',
+                  cursor: 'pointer', fontSize: '11px', whiteSpace: 'nowrap',
+                }}>Add</button>
+              </div>
             </div>
           ) : (
-            <div style={{ fontSize: '12px', color: 'var(--text-muted, #999)' }}>No project</div>
+            <div style={{ fontSize: '12px' }}>
+              {task.dependencies.value.length > 0
+                ? task.dependencies.value.map(d => (
+                    <div key={d} style={{ padding: '1px 0' }}>{d}</div>
+                  ))
+                : '—'}
+            </div>
           )}
         </div>
 
+        {/* Tags */}
+        <div style={fieldStyle}>
+          <div style={labelStyle}>Tags</div>
+          {editing.value ? (
+            <div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '6px' }}>
+                {editTags.value.map(tag => (
+                  <span key={tag} style={{
+                    padding: '1px 6px', borderRadius: '10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px',
+                    background: 'var(--background-modifier-border, #e0e0e0)',
+                  }}>
+                    {tag}
+                    <button onClick={() => removeTag(tag)} style={{
+                      background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px',
+                      color: 'var(--text-error, #e00)', lineHeight: 1, padding: 0,
+                    }}>×</button>
+                  </span>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <input type="text" value={editTagInput.value}
+                  onInput={(e) => { editTagInput.value = (e.target as HTMLInputElement).value; }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }}
+                  placeholder="New tag..."
+                  style={{ ...inputStyle, flex: 1 }} />
+                <button onClick={addTag} style={{
+                  padding: '3px 8px', border: '1px solid var(--background-modifier-border, #ccc)',
+                  borderRadius: '4px', background: 'var(--background-secondary, #f5f5f5)',
+                  cursor: 'pointer', fontSize: '11px', whiteSpace: 'nowrap',
+                }}>Add</button>
+              </div>
+            </div>
+          ) : task.tags.value.length > 0 ? (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+              {task.tags.value.map(tag => (
+                <span key={tag} style={{
+                  padding: '1px 6px', borderRadius: '10px', background: 'var(--background-modifier-border, #e0e0e0)', fontSize: '11px',
+                }}>{tag}</span>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: '12px' }}>—</div>
+          )}
+        </div>
+
+        {/* Source */}
         <div style={{ fontSize: '11px', color: 'var(--text-muted, #999)', marginTop: '4px' }}>
           <div style={{ textDecoration: sourceStyle }}>{sourceLabel}</div>
           {task.upstreamDeleted && (
@@ -2941,6 +3216,148 @@ export function DualPane(props: {
 
   // Panel resize state
   const isResizingPanel = useSignal(false);
+
+  // Shared initial scroll — computed once to center today, using the same
+  // bodyOriginPx logic as each Timeline so both panes agree on the origin.
+  const didInitialScroll = useRef(false);
+  useEffect(() => {
+    if (didInitialScroll.current || store.mergedTasks.value.length === 0) return;
+    didInitialScroll.current = true;
+
+    requestAnimationFrame(() => {
+      const timelineEl = document.querySelector<HTMLDivElement>('.gantt-timeline');
+      if (!timelineEl) return;
+
+      // Compute bodyOriginPx from actual task dates (same logic as Timeline)
+      let minAbsPx = dateToPx(todayString());
+      for (const t of store.mergedTasks.value) {
+        const sd = t.startDate.value;
+        const ed = t.endDate.value;
+        if (sd) { const px = dateToPx(sd); if (px < minAbsPx) minAbsPx = px; }
+        if (ed) { const px = dateToPx(ed); if (px < minAbsPx) minAbsPx = px; }
+      }
+      const bodyOriginPx = Math.floor(minAbsPx - 730 * DAY_WIDTH);
+      const todayBodyPx = dateToPx(todayString()) - bodyOriginPx;
+      const targetScroll = Math.max(0, todayBodyPx - timelineEl.clientWidth / 2);
+
+      store.sharedScrollLeft.value = targetScroll;
+    });
+  }, []);
+
+  // Locate entity — scroll both X and Y to bring the selected entity into view
+  useEffect(() => {
+    const target = store.locateTarget.value;
+    if (!target) return;
+
+    requestAnimationFrame(() => {
+      // Compute bodyOriginPx from task dates (same as Timeline)
+      let minAbsPx = dateToPx(todayString());
+      for (const t of store.mergedTasks.value) {
+        const sd = t.startDate.value;
+        const ed = t.endDate.value;
+        if (sd) { const px = dateToPx(sd); if (px < minAbsPx) minAbsPx = px; }
+        if (ed) { const px = dateToPx(ed); if (px < minAbsPx) minAbsPx = px; }
+      }
+      const bodyOriginPx = Math.floor(minAbsPx - 730 * DAY_WIDTH);
+
+      if (target.type === 'task') {
+        const task = store.mergedTasks.value.find(t => t.id === target.id);
+        if (!task) { store.locateTarget.value = null; return; }
+
+        // X: scroll to task's start date
+        const startVal = task.startDate.value;
+        if (startVal) {
+          const timelineEl = document.querySelector<HTMLDivElement>('.gantt-timeline');
+          const viewportW = timelineEl ? timelineEl.clientWidth : 800;
+          const targetBodyPx = dateToPx(startVal) - bodyOriginPx;
+          store.sharedScrollLeft.value = Math.max(0, targetBodyPx - viewportW / 4);
+        }
+
+        // Y: scroll person pane to the task's person group
+        const personKey = task.personId.value || '__unassigned__';
+        let personRowY = 0;
+        let accY = 0;
+        for (const group of store.personGroups.value) {
+          const taskCount = group.tasks.length || 1;
+          const lanes = Math.min(taskCount, 3);
+          const h = ROW_HEIGHT + (lanes - 1) * LANE_OFFSET;
+          if (group.personId === personKey) {
+            personRowY = accY;
+            break;
+          }
+          accY += h;
+        }
+        const personPaneEl = document.querySelector('.gantt-pane');
+        const personViewH = personPaneEl ? personPaneEl.clientHeight / 2 : 300;
+        store.personScrollTop.value = Math.max(0, personRowY - personViewH / 3);
+
+        // Y: scroll project pane to the task's project group
+        const projectKey = task.projectId.value || '__no_project__';
+        let projectRowY = 0;
+        accY = 0;
+        for (const group of store.projectGroups.value) {
+          const taskCount = group.tasks.length || 1;
+          const lanes = Math.min(taskCount, 3);
+          const h = ROW_HEIGHT + (lanes - 1) * LANE_OFFSET;
+          if (group.projectId === projectKey) {
+            projectRowY = accY;
+            break;
+          }
+          accY += h;
+        }
+        const projectPaneEl = document.querySelectorAll('.gantt-pane')[1];
+        const projectViewH = projectPaneEl ? projectPaneEl.clientHeight : 300;
+        store.projectScrollTop.value = Math.max(0, projectRowY - projectViewH / 3);
+      }
+
+      if (target.type === 'project') {
+        const projectTasks = store.mergedTasks.value.filter(t => t.projectId.value === target.id);
+
+        // X: scroll to middle of project's date range
+        let earliest: string | null = null;
+        let latest: string | null = null;
+        for (const t of projectTasks) {
+          const s = t.startDate.value;
+          const e = t.endDate.value ?? s;
+          if (s) {
+            if (!earliest || s < earliest) earliest = s;
+            if (!latest || e > latest) latest = e;
+          }
+        }
+        if (earliest) {
+          const projectMidDate = earliest === latest || !latest
+            ? earliest
+            : addDays(earliest, Math.floor(daysBetween(earliest, latest) / 2));
+          if (projectMidDate) {
+            const timelineEl = document.querySelector<HTMLDivElement>('.gantt-timeline');
+            const viewportW = timelineEl ? timelineEl.clientWidth : 800;
+            const targetBodyPx = dateToPx(projectMidDate) - bodyOriginPx;
+            store.sharedScrollLeft.value = Math.max(0, targetBodyPx - viewportW / 4);
+          }
+        }
+
+        // Y: scroll project pane to the project's row
+        let projectRowY = 0;
+        let accY = 0;
+        for (const group of store.projectGroups.value) {
+          const taskCount = group.tasks.length || 1;
+          const lanes = Math.min(taskCount, 3);
+          const h = ROW_HEIGHT + (lanes - 1) * LANE_OFFSET;
+          if (group.projectId === target.id) {
+            projectRowY = accY;
+            break;
+          }
+          accY += h;
+        }
+        const projectPaneEl = document.querySelectorAll('.gantt-pane')[1];
+        const projectViewH = projectPaneEl ? projectPaneEl.clientHeight : 300;
+        store.projectScrollTop.value = Math.max(0, projectRowY - projectViewH / 3);
+      }
+
+      // Clear the locate target after handling
+      store.locateTarget.value = null;
+    });
+  }, [store.locateTarget.value]);
 
   function handleResizePointerDown(e: PointerEvent) {
     e.preventDefault();

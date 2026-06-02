@@ -1,7 +1,7 @@
 import type { GanttPlatform, Theme } from '@obsidian-gantt/core';
 import { createObsidianStorage } from './storage';
 import { createObsidianConnectorLoader, createObsidianConnectorContext } from './connector-loader';
-import { setIcon } from 'obsidian';
+import { setIcon, MarkdownRenderer, Component } from 'obsidian';
 
 interface ObsidianAppLike {
   vault: {
@@ -17,6 +17,8 @@ interface ObsidianAppLike {
 
 export function createObsidianPlatform(app: ObsidianAppLike): GanttPlatform {
   const adapter = app.vault.adapter;
+  // Store app ref for MarkdownRenderer
+  const appRef = app as any;
 
   const storage = createObsidianStorage(adapter);
 
@@ -29,8 +31,8 @@ export function createObsidianPlatform(app: ObsidianAppLike): GanttPlatform {
 
   const connectorLoader = createObsidianConnectorLoader(adapter, (...args) => fetchRef.requestUrl(...args));
 
-  const createConnectorContext = (config: Record<string, unknown>) =>
-    createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args));
+  const createConnectorContext = (config: Record<string, unknown>, viewState?: any) =>
+    createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args), viewState);
 
   const theme: Theme = {
     isDark: () => {
@@ -58,6 +60,10 @@ export function createObsidianPlatform(app: ObsidianAppLike): GanttPlatform {
     watcher: null, // File watching handled by Obsidian's vault events
     theme,
     setIcon,
+    renderMarkdown: async (el: HTMLElement, markdown: string) => {
+      const component = new Component();
+      await MarkdownRenderer.renderMarkdown(markdown, el, '', component);
+    },
     openExternal: (url: string) => {
       // Ensure URL has a protocol prefix, otherwise shell.openExternal may open file manager
       let normalizedUrl = url.trim();
