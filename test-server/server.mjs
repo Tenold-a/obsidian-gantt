@@ -29,7 +29,7 @@ const persons = [
 
 // 10 projects with varied statuses
 const projects = [
-  { id: 'proj-crm', name: 'CRM Platform', color: '#4A90D9', status: 'in-progress', requester: 'Sales Dept' },
+  { id: 'proj-crm', name: 'CRM Platform', status: 'in-progress', requester: 'Sales Dept' },
   { id: 'proj-mobile', name: 'Mobile Banking App', color: '#7B61F8', status: 'in-progress', requester: 'Retail Banking' },
   { id: 'proj-data', name: 'Data Lake Migration', color: '#98C379', status: 'pending', requester: 'Data Platform' },
   { id: 'proj-qa', name: 'QA Automation', color: '#E06C75', status: 'online', requester: 'Engineering' },
@@ -38,7 +38,7 @@ const projects = [
   { id: 'proj-analytics', name: 'Real-time Analytics', color: '#C678DD', status: 'in-progress', requester: 'BI Team' },
   { id: 'proj-auth', name: 'SSO & Auth Service', color: '#BE5046', status: 'online', requester: 'Security' },
   { id: 'proj-notify', name: 'Notification Center', color: '#61AFEF', status: 'pending', requester: 'Product' },
-  { id: 'proj-search', name: 'Full-Text Search', color: '#D19A66', status: 'completed', requester: 'All Teams' },
+  { id: 'proj-search', name: 'Full-Text Search', status: 'completed', requester: 'All Teams' },
 ];
 
 // 55 tasks spread across projects and persons

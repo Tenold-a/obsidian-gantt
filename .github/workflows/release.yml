@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: |
+          npm run build:core
+          npm run build:ui
+          npm run build:plugin
+
+      - name: Build test package
+        run: bash scripts/package-test.sh obsidian-gantt-test.zip
+
+      - name: Create Release
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            packages/obsidian-plugin/main.js \
+            packages/obsidian-plugin/main.js.map \
+            packages/obsidian-plugin/manifest.json \
+            packages/obsidian-plugin/styles.css \
+            obsidian-gantt-test.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
