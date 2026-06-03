@@ -246,7 +246,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     const personMap = new Map<string, Person>();
     for (const cache of caches.value) {
       for (const p of cache.persons) {
-        personMap.set(p.id, p);
+        if (p.id) personMap.set(p.id, p);
       }
     }
     return [...personMap.values()];
@@ -256,7 +256,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     const projectMap = new Map<string, Project>();
     for (const cache of caches.value) {
       for (const p of cache.projects) {
-        projectMap.set(p.id, p);
+        if (p.id) projectMap.set(p.id, p);
       }
     }
     return [...projectMap.values()];
@@ -266,7 +266,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     const overrides = edits.value?.projectOverrides ?? {};
     const deletedProjects = new Set(edits.value?.deletedProjects ?? []);
     return projects.value
-      .filter(p => !deletedProjects.has(p.id))
+      .filter(p => p.id && !deletedProjects.has(p.id))
       .map(p => {
         const override = overrides[p.id];
         if (!override) return p;
@@ -276,7 +276,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
   const personGroups = computed<PersonGroup[]>(() => {
     const map = new Map<string, LocalTask[]>();
-    const personMap = new Map(persons.value.map(p => [p.id, p]));
+    const personMap = new Map(persons.value.filter(p => p.id).map(p => [p.id, p]));
 
     for (const t of mergedTasks.value) {
       const key = t.personId.value || '__unassigned__';
@@ -286,7 +286,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
     // Include people with no assigned tasks
     for (const p of persons.value) {
-      if (!map.has(p.id)) {
+      if (p.id && !map.has(p.id)) {
         map.set(p.id, []);
       }
     }
@@ -343,7 +343,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
   const projectGroups = computed<ProjectGroup[]>(() => {
     const map = new Map<string, LocalTask[]>();
-    const projectInfoMap = new Map(mergedProjects.value.map(p => [p.id, p]));
+    const projectInfoMap = new Map(mergedProjects.value.filter(p => p.id).map(p => [p.id, p]));
 
     for (const t of mergedTasks.value) {
       const key = t.projectId.value || '__no_project__';
@@ -356,8 +356,8 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       const info = projectInfoMap.get(projectId);
       groups.push({
         projectId,
-        projectName: info?.name ?? projectId,
-        color: info?.color,
+        projectName: info?.name || projectId,
+        color: info?.color || undefined,
         tasks,
       });
     }

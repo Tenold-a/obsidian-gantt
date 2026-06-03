@@ -1,9 +1,8 @@
 import { h } from 'preact';
 import { useRef, useEffect } from 'preact/hooks';
 import type { GanttStore } from './store';
-import type { HolidayConfig } from '@obsidian-gantt/core';
-import { getDayOfWeek, isNonWorkingDay, getDateLabelType, getNonWorkingBlocks } from '@obsidian-gantt/core';
 import type { HolidayConfig, NonWorkingBlock } from '@obsidian-gantt/core';
+import { getDayOfWeek, isNonWorkingDay, getDateLabelType, getNonWorkingBlocks, daysBetween, addDays } from '@obsidian-gantt/core';
 import { Icon, isLucideIcon } from './icon';
 
 // ============================================================
@@ -542,11 +541,17 @@ function buildMonthColumns(startDate: string, endDate: string, dayWidth: number)
 }
 
 function parseDate(s: string): Date {
-  const [y, m, d] = s.split('-').map(Number);
+  if (!s || typeof s !== 'string') return new Date(NaN);
+  const parts = s.split('-');
+  if (parts.length !== 3) return new Date(NaN);
+  const [y, m, d] = parts.map(Number);
+  if (isNaN(y) || isNaN(m) || isNaN(d)) return new Date(NaN);
+  if (m < 1 || m > 12 || d < 1 || d > 31) return new Date(NaN);
   return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
 }
 
 function formatDateStr(d: Date): string {
+  if (isNaN(d.getTime())) return '';
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
@@ -554,19 +559,16 @@ function formatDateStr(d: Date): string {
 }
 
 function daysBetweenDates(a: string, b: string): number {
-  const da = parseDate(a);
-  const db = parseDate(b);
-  return Math.round((db.getTime() - da.getTime()) / 86400000);
+  return daysBetween(a, b);
 }
 
 function addDaysToDate(date: string, days: number): string {
-  const d = parseDate(date);
-  const r = new Date(d.getTime() + days * 86400000);
-  return formatDateStr(r);
+  return addDays(date, days);
 }
 
 function getDayLabel(date: string): string {
   const d = parseDate(date);
+  if (isNaN(d.getTime())) return '';
   return String(d.getUTCDate());
 }
 

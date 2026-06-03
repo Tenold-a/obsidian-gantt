@@ -12,7 +12,7 @@ import {
   isTodayDate,
 } from './components';
 import type { LocalTask } from '@obsidian-gantt/core';
-import { daysBetween, addDays, todayString, parseICS, classifyICSEvents } from '@obsidian-gantt/core';
+import { daysBetween, addDays, todayString, isValidDate, parseICS, classifyICSEvents } from '@obsidian-gantt/core';
 import { Icon, CURATED_ICONS } from './icon';
 import { createDragHandler, dragState } from './drag';
 import {
@@ -28,8 +28,9 @@ const LEFT_PANEL_WIDTH = 180;
 const RIGHT_PANEL_WIDTH = 220;
 const GRID_BUFFER_PX = 600;    // buffer for both grid and header on each side
 
-/** Convert a date to absolute pixel from TIMELINE_ORIGIN. */
+/** Convert a date to absolute pixel from TIMELINE_ORIGIN. Returns 0 for invalid dates. */
 function dateToPx(date: string): number {
+  if (!isValidDate(date)) return 0;
   return dateToAbsolutePixel(date, DAY_WIDTH);
 }
 
@@ -44,8 +45,9 @@ function hashColor(str: string): string {
   return `hsl(${hue}, 55%, 35%)`;
 }
 
-/** Convert absolute pixel to date. */
+/** Convert absolute pixel to date. Returns empty string for invalid pixels. */
 function pxToDate(px: number): string {
+  if (!isFinite(px)) return '';
   return absolutePixelToDate(px, DAY_WIDTH);
 }
 
@@ -74,6 +76,118 @@ function MarkdownView(props: { markdown: string; store: GanttStore }) {
       class="gantt-markdown-view"
       style={{ fontSize: '12px', lineHeight: 1.5, wordBreak: 'break-word' }}
     />
+  );
+}
+
+/** Collapse 3+ consecutive newlines down to 2 (one blank line). */
+function collapseNewlines(text: string): string {
+  return text.replace(/\n{3,}/g, '\n\n');
+}
+
+/** Modal popup showing full description with markdown rendering. */
+function DescriptionModal(props: { description: string; store: GanttStore; onClose: () => void }) {
+  function handleKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Escape') props.onClose();
+  }
+
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  return (
+    <div
+      class="gantt-description-backdrop"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.4)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 10000,
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div
+        class="gantt-description-modal"
+        style={{
+          background: 'var(--background-primary, #fff)',
+          borderRadius: '8px',
+          padding: '24px',
+          maxWidth: '700px',
+          width: '90%',
+          maxHeight: '80vh',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.25)',
+          color: 'var(--text-normal, #333)',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexShrink: 0 }}>
+          <span style={{ fontWeight: 'bold', fontSize: '14px' }}>Description</span>
+          <button
+            onClick={props.onClose}
+            title="Close"
+            style={{
+              padding: '2px 6px', border: 'none', borderRadius: '3px',
+              background: 'transparent', cursor: 'pointer', fontSize: '16px',
+              color: 'var(--text-muted, #999)', lineHeight: 1,
+            }}
+          >x</button>
+        </div>
+        <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+          <MarkdownView markdown={collapseNewlines(props.description)} store={props.store} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Description viewer with collapsed newlines, markdown rendering, max height + scroll, and a view-full button. */
+function DescriptionViewer(props: { description: string; store: GanttStore }) {
+  const showModal = useSignal(false);
+
+  return (
+    <div>
+      <div
+        class="gantt-description-preview"
+        style={{
+          maxHeight: '200px',
+          overflowY: 'auto',
+          border: '1px solid var(--background-modifier-border, #e0e0e0)',
+          borderRadius: '4px',
+          padding: '6px 8px',
+          background: 'var(--background-primary, #fff)',
+        }}
+      >
+        <MarkdownView markdown={collapseNewlines(props.description)} store={props.store} />
+      </div>
+      <button
+        onClick={() => { showModal.value = true; }}
+        style={{
+          marginTop: '6px',
+          padding: '3px 12px',
+          border: '1px solid var(--background-modifier-border, #ccc)',
+          borderRadius: '4px',
+          background: 'var(--background-secondary, #f5f5f5)',
+          cursor: 'pointer',
+          fontSize: '11px',
+          color: 'var(--text-muted, #666)',
+        }}
+      >
+        View full description
+      </button>
+      {showModal.value && (
+        <DescriptionModal
+          description={props.description}
+          store={props.store}
+          onClose={() => { showModal.value = false; }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -238,11 +352,11 @@ function Timeline(props: {
       for (const task of group.tasks) {
         const startVal = task.startDate.value;
         const endVal = task.endDate.value;
-        if (startVal) {
+        if (startVal && isValidDate(startVal)) {
           const px = dateToPx(startVal);
           if (px < minAbsPx) minAbsPx = px;
         }
-        if (endVal) {
+        if (endVal && isValidDate(endVal)) {
           const px = dateToPx(endVal);
           if (px < minAbsPx) minAbsPx = px;
         }
@@ -257,11 +371,11 @@ function Timeline(props: {
       for (const task of group.tasks) {
         const startVal = task.startDate.value;
         const endVal = task.endDate.value;
-        if (startVal) {
+        if (startVal && isValidDate(startVal)) {
           const px = dateToPx(startVal);
           if (px > maxAbsPx) maxAbsPx = px;
         }
-        if (endVal) {
+        if (endVal && isValidDate(endVal)) {
           const px = dateToPx(endVal);
           if (px > maxAbsPx) maxAbsPx = px;
         }
@@ -326,16 +440,19 @@ function Timeline(props: {
   // Per-group lane counts and cumulative Y offsets
   const groupLayout: { startY: number; height: number; laneCount: number }[] = [];
 
-  const projectColorMap = new Map<string, string>();
-  for (const p of store.projects.value) {
-    projectColorMap.set(p.id, p.color ?? getDefaultColor(p.id));
-  }
   const DEFAULT_COLORS = ['#4A90D9', '#7B61F8', '#E06C75', '#61AFEF', '#98C379', '#E5C07B', '#C678DD', '#56B6C2'];
 
   function getDefaultColor(id: string): string {
     let hash = 0;
     for (let i = 0; i < id.length; i++) hash = ((hash << 5) - hash) + id.charCodeAt(i);
     return DEFAULT_COLORS[Math.abs(hash) % DEFAULT_COLORS.length];
+  }
+
+  const projectColorMap = new Map<string, string>();
+  for (const p of store.projects.value) {
+    if (p.id) {
+      projectColorMap.set(p.id, p.color || getDefaultColor(p.id));
+    }
   }
 
   // Greedy lane assignment per group
@@ -349,10 +466,14 @@ function Timeline(props: {
 
     for (const task of group.tasks) {
       const startVal = task.startDate.value;
-      if (!startVal) continue;
-      const endVal = task.endDate.value ?? startVal;
-      const left = originToBody(dateToPx(startVal));
-      const right = originToBody(dateToPx(endVal));
+      if (!startVal || !isValidDate(startVal)) continue;
+      let endVal = task.endDate.value;
+      if (!endVal || !isValidDate(endVal)) endVal = startVal;
+      // Swap if end date is earlier than start date
+      const effectiveStart = startVal <= endVal ? startVal : endVal;
+      const effectiveEnd = startVal <= endVal ? endVal : startVal;
+      const left = originToBody(dateToPx(effectiveStart));
+      const right = originToBody(dateToPx(effectiveEnd));
       const width = Math.max(right - left, 12);
       const projectColor = task.projectId.value
         ? projectColorMap.get(task.projectId.value) ?? getDefaultColor(task.projectId.value)
@@ -708,10 +829,14 @@ function GanttPane(props: {
       const ranges: Array<{ left: number; right: number }> = [];
       for (const task of group.tasks) {
         const startVal = task.startDate.value;
-        if (!startVal) continue;
-        const endVal = task.endDate.value ?? startVal;
-        const left = dateToPx(startVal);
-        const right = dateToPx(endVal);
+        if (!startVal || !isValidDate(startVal)) continue;
+        let endVal = task.endDate.value;
+        if (!endVal || !isValidDate(endVal)) endVal = startVal;
+        // Swap if end date is earlier than start date
+        const effectiveStart = startVal <= endVal ? startVal : endVal;
+        const effectiveEnd = startVal <= endVal ? endVal : startVal;
+        const left = dateToPx(effectiveStart);
+        const right = dateToPx(effectiveEnd);
         const width = Math.max(right - left, 12);
         ranges.push({ left, right: left + width });
       }
@@ -1573,7 +1698,7 @@ function ProjectDetail(props: { store: GanttStore; onDelete?: (projectId: string
             placeholder="Project description..."
           />
         ) : (
-          description ? <MarkdownView markdown={description} store={store} /> : <div style={valueStyle}>—</div>
+          description ? <DescriptionViewer description={description} store={store} /> : <div style={valueStyle}>—</div>
         )}
       </div>
 

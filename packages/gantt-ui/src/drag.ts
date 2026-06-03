@@ -1,6 +1,6 @@
 import { signal } from '@preact/signals';
 import type { GanttStore } from './store';
-import { addDays, daysBetween } from '@obsidian-gantt/core';
+import { addDays, daysBetween, isValidDate } from '@obsidian-gantt/core';
 import { TIMELINE_ORIGIN, dateToAbsolutePixel, absolutePixelToDate } from './components';
 
 const DAY_WIDTH = 30;
@@ -44,6 +44,7 @@ function findRowIndex(groups: Array<{ tasks: Array<{ startDate: { value: string 
 
 /** Convert date to absolute pixel from TIMELINE_ORIGIN. */
 function dateToPx(date: string): number {
+  if (!isValidDate(date)) return 0;
   return dateToAbsolutePixel(date, DAY_WIDTH);
 }
 

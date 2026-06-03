@@ -1127,7 +1127,8 @@ var EDITABLE_FIELDS = [
   "projectId",
   "parentId",
   "dependencies",
-  "tags"
+  "tags",
+  "url"
 ];
 function fieldWithSource(value, source) {
   return { value, source };
@@ -1140,9 +1141,10 @@ function mergeFields(task, overrides, connectorId) {
     }
     return fieldWithSource(upstreamVal, "upstream");
   }
+  const taskId = task.id != null ? String(task.id) : "";
   return {
-    id: task.id,
-    title: get("title", task.title),
+    id: taskId,
+    title: get("title", task.title ?? "Untitled"),
     startDate: get("startDate", task.startDate ?? null),
     endDate: get("endDate", task.endDate ?? null),
     progress: get("progress", task.progress ?? 0),
@@ -1152,8 +1154,7 @@ function mergeFields(task, overrides, connectorId) {
     parentId: get("parentId", task.parentId ?? null),
     dependencies: get("dependencies", task.dependencies ?? []),
     tags: get("tags", task.tags ?? []),
-    url: fieldWithSource(task.url ?? null, "upstream"),
-    // url is not user-editable
+    url: get("url", task.url ?? null),
     metadata: task.metadata ?? {},
     connectorId,
     upstreamId: task.id,
@@ -1162,8 +1163,8 @@ function mergeFields(task, overrides, connectorId) {
 }
 function localToLocalTask(task) {
   return {
-    id: task.id,
-    title: fieldWithSource(task.title, "manual"),
+    id: task.id != null ? String(task.id) : "",
+    title: fieldWithSource(task.title ?? "Untitled", "manual"),
     startDate: fieldWithSource(task.startDate ?? null, "manual"),
     endDate: fieldWithSource(task.endDate ?? null, "manual"),
     progress: fieldWithSource(task.progress ?? 0, "manual"),
@@ -1186,6 +1187,8 @@ function mergeTasks(cachedTasks, edits, connectorId) {
   const deleted = new Set(edits.deletedTasks ?? []);
   const result = [];
   for (const task of cachedTasks) {
+    if (!task.id)
+      continue;
     if (hidden.has(task.id))
       continue;
     if (deleted.has(task.id))
@@ -1207,6 +1210,8 @@ function mergeTasks(cachedTasks, edits, connectorId) {
     }
   }
   for (const localTask of edits.localTasks ?? []) {
+    if (!localTask.id)
+      continue;
     if (hidden.has(localTask.id))
       continue;
     result.push(localToLocalTask(localTask));
@@ -1264,8 +1269,35 @@ function mergeAll(caches, edits) {
   return applyStatusCascade(allTasks, caches, edits);
 }
 function parseDate(dateStr) {
-  const [y4, m4, d4] = dateStr.split("-").map(Number);
+  if (!dateStr || typeof dateStr !== "string")
+    return /* @__PURE__ */ new Date(NaN);
+  const parts = dateStr.split("-");
+  if (parts.length !== 3)
+    return /* @__PURE__ */ new Date(NaN);
+  const [y4, m4, d4] = parts.map(Number);
+  if (isNaN(y4) || isNaN(m4) || isNaN(d4))
+    return /* @__PURE__ */ new Date(NaN);
+  if (m4 < 1 || m4 > 12 || d4 < 1 || d4 > 31)
+    return /* @__PURE__ */ new Date(NaN);
   return new Date(Date.UTC(y4, m4 - 1, d4, 12, 0, 0));
+}
+function isValidDate(dateStr) {
+  if (!dateStr || typeof dateStr !== "string")
+    return false;
+  const parts = dateStr.split("-");
+  if (parts.length !== 3)
+    return false;
+  const [y4, m4, d4] = parts.map(Number);
+  if (isNaN(y4) || isNaN(m4) || isNaN(d4))
+    return false;
+  if (m4 < 1 || m4 > 12 || d4 < 1 || d4 > 31)
+    return false;
+  if (y4 < 1900 || y4 > 2200)
+    return false;
+  const date = new Date(Date.UTC(y4, m4 - 1, d4, 12, 0, 0));
+  if (date.getUTCFullYear() !== y4 || date.getUTCMonth() !== m4 - 1 || date.getUTCDate() !== d4)
+    return false;
+  return !isNaN(date.getTime());
 }
 function formatDate(d4) {
   const y4 = d4.getUTCFullYear();
@@ -1276,10 +1308,15 @@ function formatDate(d4) {
 function daysBetween(a4, b3) {
   const da = parseDate(a4);
   const db = parseDate(b3);
+  if (isNaN(da.getTime()) || isNaN(db.getTime()))
+    return 0;
   return Math.round((db.getTime() - da.getTime()) / 864e5);
 }
 function getDayOfWeek(date) {
-  return parseDate(date).getUTCDay();
+  const d4 = parseDate(date);
+  if (isNaN(d4.getTime()))
+    return -1;
+  return d4.getUTCDay();
 }
 function isWeekend(date) {
   const dow = getDayOfWeek(date);
@@ -1302,7 +1339,9 @@ function isNonWorkingDay(date, config) {
 function getNonWorkingBlocks(startDate, endDate, config) {
   if (!config.weekendsEnabled && !config.holidaysEnabled)
     return [];
-  if (!startDate || !endDate)
+  if (!isValidDate(startDate) || !isValidDate(endDate))
+    return [];
+  if (endDate < startDate)
     return [];
   const blocks = [];
   let blockStart = null;
@@ -1327,6 +1366,8 @@ function getNonWorkingBlocks(startDate, endDate, config) {
 }
 function addDays(date, days) {
   const d4 = parseDate(date);
+  if (isNaN(d4.getTime()))
+    return "";
   const result = new Date(d4.getTime() + days * 864e5);
   return formatDate(result);
 }
@@ -1334,7 +1375,7 @@ function todayString() {
   return formatDate(/* @__PURE__ */ new Date());
 }
 function computeTimelineRange(dates, paddingDays = 7) {
-  const validDates = dates.filter((d4) => !!d4);
+  const validDates = dates.filter((d4) => isValidDate(d4));
   if (validDates.length === 0) {
     const today = todayString();
     return { startDate: today, endDate: today };
@@ -1349,8 +1390,8 @@ function computeTimelineRange(dates, paddingDays = 7) {
       maxDate = d4;
   }
   return {
-    startDate: addDays(minDate, -paddingDays),
-    endDate: addDays(maxDate, paddingDays)
+    startDate: addDays(minDate, -paddingDays) || todayString(),
+    endDate: addDays(maxDate, paddingDays) || todayString()
   };
 }
 function parseCSV(text, options = {}) {
@@ -1663,7 +1704,8 @@ function createGanttStore(platform) {
     const personMap = /* @__PURE__ */ new Map();
     for (const cache of caches.value) {
       for (const p5 of cache.persons) {
-        personMap.set(p5.id, p5);
+        if (p5.id)
+          personMap.set(p5.id, p5);
       }
     }
     return [...personMap.values()];
@@ -1672,7 +1714,8 @@ function createGanttStore(platform) {
     const projectMap = /* @__PURE__ */ new Map();
     for (const cache of caches.value) {
       for (const p5 of cache.projects) {
-        projectMap.set(p5.id, p5);
+        if (p5.id)
+          projectMap.set(p5.id, p5);
       }
     }
     return [...projectMap.values()];
@@ -1680,7 +1723,7 @@ function createGanttStore(platform) {
   const mergedProjects = g2(() => {
     const overrides = edits.value?.projectOverrides ?? {};
     const deletedProjects = new Set(edits.value?.deletedProjects ?? []);
-    return projects.value.filter((p5) => !deletedProjects.has(p5.id)).map((p5) => {
+    return projects.value.filter((p5) => p5.id && !deletedProjects.has(p5.id)).map((p5) => {
       const override = overrides[p5.id];
       if (!override)
         return p5;
@@ -1689,7 +1732,7 @@ function createGanttStore(platform) {
   });
   const personGroups = g2(() => {
     const map = /* @__PURE__ */ new Map();
-    const personMap = new Map(persons.value.map((p5) => [p5.id, p5]));
+    const personMap = new Map(persons.value.filter((p5) => p5.id).map((p5) => [p5.id, p5]));
     for (const t4 of mergedTasks.value) {
       const key = t4.personId.value || "__unassigned__";
       if (!map.has(key))
@@ -1697,7 +1740,7 @@ function createGanttStore(platform) {
       map.get(key).push(t4);
     }
     for (const p5 of persons.value) {
-      if (!map.has(p5.id)) {
+      if (p5.id && !map.has(p5.id)) {
         map.set(p5.id, []);
       }
     }
@@ -1749,7 +1792,7 @@ function createGanttStore(platform) {
   });
   const projectGroups = g2(() => {
     const map = /* @__PURE__ */ new Map();
-    const projectInfoMap = new Map(mergedProjects.value.map((p5) => [p5.id, p5]));
+    const projectInfoMap = new Map(mergedProjects.value.filter((p5) => p5.id).map((p5) => [p5.id, p5]));
     for (const t4 of mergedTasks.value) {
       const key = t4.projectId.value || "__no_project__";
       if (!map.has(key))
@@ -1761,8 +1804,8 @@ function createGanttStore(platform) {
       const info = projectInfoMap.get(projectId);
       groups.push({
         projectId,
-        projectName: info?.name ?? projectId,
-        color: info?.color,
+        projectName: info?.name || projectId,
+        color: info?.color || void 0,
         tasks
       });
     }
@@ -3161,27 +3204,36 @@ function buildMonthColumns(startDate, endDate, dayWidth) {
   return results;
 }
 function parseDate2(s5) {
-  const [y4, m4, d4] = s5.split("-").map(Number);
+  if (!s5 || typeof s5 !== "string")
+    return /* @__PURE__ */ new Date(NaN);
+  const parts = s5.split("-");
+  if (parts.length !== 3)
+    return /* @__PURE__ */ new Date(NaN);
+  const [y4, m4, d4] = parts.map(Number);
+  if (isNaN(y4) || isNaN(m4) || isNaN(d4))
+    return /* @__PURE__ */ new Date(NaN);
+  if (m4 < 1 || m4 > 12 || d4 < 1 || d4 > 31)
+    return /* @__PURE__ */ new Date(NaN);
   return new Date(Date.UTC(y4, m4 - 1, d4, 12, 0, 0));
 }
 function formatDateStr(d4) {
+  if (isNaN(d4.getTime()))
+    return "";
   const y4 = d4.getUTCFullYear();
   const m4 = String(d4.getUTCMonth() + 1).padStart(2, "0");
   const day = String(d4.getUTCDate()).padStart(2, "0");
   return `${y4}-${m4}-${day}`;
 }
 function daysBetweenDates(a4, b3) {
-  const da = parseDate2(a4);
-  const db = parseDate2(b3);
-  return Math.round((db.getTime() - da.getTime()) / 864e5);
+  return daysBetween(a4, b3);
 }
 function addDaysToDate(date, days) {
-  const d4 = parseDate2(date);
-  const r4 = new Date(d4.getTime() + days * 864e5);
-  return formatDateStr(r4);
+  return addDays(date, days);
 }
 function getDayLabel(date) {
   const d4 = parseDate2(date);
+  if (isNaN(d4.getTime()))
+    return "";
   return String(d4.getUTCDate());
 }
 function KeyDateMarker(props) {
@@ -3264,6 +3316,8 @@ function findRowIndex(groups, contentY) {
   return groups.length - 1;
 }
 function dateToPx(date) {
+  if (!isValidDate(date))
+    return 0;
   return dateToAbsolutePixel(date, DAY_WIDTH);
 }
 function pxToDate(px) {
@@ -3535,6 +3589,8 @@ var LANE_OFFSET2 = 12;
 var LEFT_PANEL_WIDTH = 180;
 var GRID_BUFFER_PX = 600;
 function dateToPx2(date) {
+  if (!isValidDate(date))
+    return 0;
   return dateToAbsolutePixel(date, DAY_WIDTH2);
 }
 function hashColor(str) {
@@ -3567,6 +3623,129 @@ function MarkdownView(props) {
       style: { fontSize: "12px", lineHeight: 1.5, wordBreak: "break-word" }
     }
   );
+}
+function collapseNewlines(text) {
+  return text.replace(/\n{3,}/g, "\n\n");
+}
+function DescriptionModal(props) {
+  function handleKeyDown(e4) {
+    if (e4.key === "Escape")
+      props.onClose();
+  }
+  y2(() => {
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      class: "gantt-description-backdrop",
+      style: {
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1e4
+      },
+      onClick: (e4) => {
+        if (e4.target === e4.currentTarget)
+          props.onClose();
+      },
+      children: /* @__PURE__ */ u4(
+        "div",
+        {
+          class: "gantt-description-modal",
+          style: {
+            background: "var(--background-primary, #fff)",
+            borderRadius: "8px",
+            padding: "24px",
+            maxWidth: "700px",
+            width: "90%",
+            maxHeight: "80vh",
+            boxShadow: "0 4px 24px rgba(0,0,0,0.25)",
+            color: "var(--text-normal, #333)",
+            display: "flex",
+            flexDirection: "column"
+          },
+          children: [
+            /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexShrink: 0 }, children: [
+              /* @__PURE__ */ u4("span", { style: { fontWeight: "bold", fontSize: "14px" }, children: "Description" }),
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: props.onClose,
+                  title: "Close",
+                  style: {
+                    padding: "2px 6px",
+                    border: "none",
+                    borderRadius: "3px",
+                    background: "transparent",
+                    cursor: "pointer",
+                    fontSize: "16px",
+                    color: "var(--text-muted, #999)",
+                    lineHeight: 1
+                  },
+                  children: "x"
+                }
+              )
+            ] }),
+            /* @__PURE__ */ u4("div", { style: { overflowY: "auto", flex: 1, minHeight: 0 }, children: /* @__PURE__ */ u4(MarkdownView, { markdown: collapseNewlines(props.description), store: props.store }) })
+          ]
+        }
+      )
+    }
+  );
+}
+function DescriptionViewer(props) {
+  const showModal = useSignal(false);
+  return /* @__PURE__ */ u4("div", { children: [
+    /* @__PURE__ */ u4(
+      "div",
+      {
+        class: "gantt-description-preview",
+        style: {
+          maxHeight: "200px",
+          overflowY: "auto",
+          border: "1px solid var(--background-modifier-border, #e0e0e0)",
+          borderRadius: "4px",
+          padding: "6px 8px",
+          background: "var(--background-primary, #fff)"
+        },
+        children: /* @__PURE__ */ u4(MarkdownView, { markdown: collapseNewlines(props.description), store: props.store })
+      }
+    ),
+    /* @__PURE__ */ u4(
+      "button",
+      {
+        onClick: () => {
+          showModal.value = true;
+        },
+        style: {
+          marginTop: "6px",
+          padding: "3px 12px",
+          border: "1px solid var(--background-modifier-border, #ccc)",
+          borderRadius: "4px",
+          background: "var(--background-secondary, #f5f5f5)",
+          cursor: "pointer",
+          fontSize: "11px",
+          color: "var(--text-muted, #666)"
+        },
+        children: "View full description"
+      }
+    ),
+    showModal.value && /* @__PURE__ */ u4(
+      DescriptionModal,
+      {
+        description: props.description,
+        store: props.store,
+        onClose: () => {
+          showModal.value = false;
+        }
+      }
+    )
+  ] });
 }
 function TaskList(props) {
   const totalRowsHeight = props.rowHeights.reduce((a4, b3) => a4 + b3, 0);
@@ -3690,12 +3869,12 @@ function Timeline(props) {
       for (const task of group.tasks) {
         const startVal = task.startDate.value;
         const endVal = task.endDate.value;
-        if (startVal) {
+        if (startVal && isValidDate(startVal)) {
           const px = dateToPx2(startVal);
           if (px < minAbsPx)
             minAbsPx = px;
         }
-        if (endVal) {
+        if (endVal && isValidDate(endVal)) {
           const px = dateToPx2(endVal);
           if (px < minAbsPx)
             minAbsPx = px;
@@ -3710,12 +3889,12 @@ function Timeline(props) {
       for (const task of group.tasks) {
         const startVal = task.startDate.value;
         const endVal = task.endDate.value;
-        if (startVal) {
+        if (startVal && isValidDate(startVal)) {
           const px = dateToPx2(startVal);
           if (px > maxAbsPx)
             maxAbsPx = px;
         }
-        if (endVal) {
+        if (endVal && isValidDate(endVal)) {
           const px = dateToPx2(endVal);
           if (px > maxAbsPx)
             maxAbsPx = px;
@@ -3756,10 +3935,6 @@ function Timeline(props) {
   }, [scrollTop]);
   const taskBars = [];
   const groupLayout = [];
-  const projectColorMap = /* @__PURE__ */ new Map();
-  for (const p5 of store.projects.value) {
-    projectColorMap.set(p5.id, p5.color ?? getDefaultColor(p5.id));
-  }
   const DEFAULT_COLORS = ["#4A90D9", "#7B61F8", "#E06C75", "#61AFEF", "#98C379", "#E5C07B", "#C678DD", "#56B6C2"];
   function getDefaultColor(id) {
     let hash = 0;
@@ -3767,15 +3942,25 @@ function Timeline(props) {
       hash = (hash << 5) - hash + id.charCodeAt(i5);
     return DEFAULT_COLORS[Math.abs(hash) % DEFAULT_COLORS.length];
   }
+  const projectColorMap = /* @__PURE__ */ new Map();
+  for (const p5 of store.projects.value) {
+    if (p5.id) {
+      projectColorMap.set(p5.id, p5.color || getDefaultColor(p5.id));
+    }
+  }
   for (const group of groups) {
     const groupTasks = [];
     for (const task of group.tasks) {
       const startVal = task.startDate.value;
-      if (!startVal)
+      if (!startVal || !isValidDate(startVal))
         continue;
-      const endVal = task.endDate.value ?? startVal;
-      const left = originToBody(dateToPx2(startVal));
-      const right = originToBody(dateToPx2(endVal));
+      let endVal = task.endDate.value;
+      if (!endVal || !isValidDate(endVal))
+        endVal = startVal;
+      const effectiveStart = startVal <= endVal ? startVal : endVal;
+      const effectiveEnd = startVal <= endVal ? endVal : startVal;
+      const left = originToBody(dateToPx2(effectiveStart));
+      const right = originToBody(dateToPx2(effectiveEnd));
       const width = Math.max(right - left, 12);
       const projectColor = task.projectId.value ? projectColorMap.get(task.projectId.value) ?? getDefaultColor(task.projectId.value) : getDefaultColor(task.id);
       groupTasks.push({ task, left, width, color: projectColor });
@@ -4077,11 +4262,15 @@ function GanttPane(props) {
       const ranges = [];
       for (const task of group.tasks) {
         const startVal = task.startDate.value;
-        if (!startVal)
+        if (!startVal || !isValidDate(startVal))
           continue;
-        const endVal = task.endDate.value ?? startVal;
-        const left = dateToPx2(startVal);
-        const right = dateToPx2(endVal);
+        let endVal = task.endDate.value;
+        if (!endVal || !isValidDate(endVal))
+          endVal = startVal;
+        const effectiveStart = startVal <= endVal ? startVal : endVal;
+        const effectiveEnd = startVal <= endVal ? endVal : startVal;
+        const left = dateToPx2(effectiveStart);
+        const right = dateToPx2(effectiveEnd);
         const width = Math.max(right - left, 12);
         ranges.push({ left, right: left + width });
       }
@@ -4995,7 +5184,7 @@ function ProjectDetail(props) {
               },
               placeholder: "Project description..."
             }
-          ) : description ? /* @__PURE__ */ u4(MarkdownView, { markdown: description, store }) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" })
+          ) : description ? /* @__PURE__ */ u4(DescriptionViewer, { description, store }) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" })
         ] }),
         /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
           /* @__PURE__ */ u4("div", { style: labelStyle, children: "Requester" }),

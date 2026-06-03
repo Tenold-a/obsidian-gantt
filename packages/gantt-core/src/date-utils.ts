@@ -6,8 +6,27 @@
 
 /** Parse YYYY-MM-DD into a local Date (noon UTC to avoid tz edge cases). */
 function parseDate(dateStr: string): Date {
-  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!dateStr || typeof dateStr !== 'string') return new Date(NaN);
+  const parts = dateStr.split('-');
+  if (parts.length !== 3) return new Date(NaN);
+  const [y, m, d] = parts.map(Number);
+  if (isNaN(y) || isNaN(m) || isNaN(d)) return new Date(NaN);
+  if (m < 1 || m > 12 || d < 1 || d > 31) return new Date(NaN);
   return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+}
+
+/** Check if a date string is valid (YYYY-MM-DD format, represents a real date). */
+export function isValidDate(dateStr: string | null | undefined): dateStr is string {
+  if (!dateStr || typeof dateStr !== 'string') return false;
+  const parts = dateStr.split('-');
+  if (parts.length !== 3) return false;
+  const [y, m, d] = parts.map(Number);
+  if (isNaN(y) || isNaN(m) || isNaN(d)) return false;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  if (y < 1900 || y > 2200) return false;
+  const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return false;
+  return !isNaN(date.getTime());
 }
 
 /** Format a Date to YYYY-MM-DD. */
@@ -18,16 +37,19 @@ function formatDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-/** Signed number of days from a to b (b - a). */
+/** Signed number of days from a to b (b - a). Returns 0 for invalid dates. */
 export function daysBetween(a: string, b: string): number {
   const da = parseDate(a);
   const db = parseDate(b);
+  if (isNaN(da.getTime()) || isNaN(db.getTime())) return 0;
   return Math.round((db.getTime() - da.getTime()) / 86400000);
 }
 
-/** Get day of week for a date string. Returns 0-6 (Sunday=0, Monday=1, ..., Saturday=6). */
+/** Get day of week for a date string. Returns 0-6 (Sunday=0, Monday=1, ..., Saturday=6). Returns -1 for invalid dates. */
 export function getDayOfWeek(date: string): number {
-  return parseDate(date).getUTCDay();
+  const d = parseDate(date);
+  if (isNaN(d.getTime())) return -1;
+  return d.getUTCDay();
 }
 
 /** Check if a date is a weekend day (Saturday or Sunday). */
@@ -87,7 +109,8 @@ export function getNonWorkingBlocks(
   config: HolidayConfig,
 ): NonWorkingBlock[] {
   if (!config.weekendsEnabled && !config.holidaysEnabled) return [];
-  if (!startDate || !endDate) return [];
+  if (!isValidDate(startDate) || !isValidDate(endDate)) return [];
+  if (endDate < startDate) return [];
 
   const blocks: NonWorkingBlock[] = [];
   let blockStart: string | null = null;
@@ -114,20 +137,23 @@ export function getNonWorkingBlocks(
   return blocks;
 }
 
-/** Add N days to a date string. */
+/** Add N days to a date string. Returns empty string for invalid input dates. */
 export function addDays(date: string, days: number): string {
   const d = parseDate(date);
+  if (isNaN(d.getTime())) return '';
   const result = new Date(d.getTime() + days * 86400000);
   return formatDate(result);
 }
 
-/** Convert a date to its pixel offset from a timeline start. */
+/** Convert a date to its pixel offset from a timeline start. Returns 0 for invalid dates. */
 export function dateToPixel(date: string, timelineStart: string, dayWidth: number): number {
+  if (!isValidDate(date)) return 0;
   return daysBetween(timelineStart, date) * dayWidth;
 }
 
-/** Convert a pixel offset to a date string, based on timeline start. */
+/** Convert a pixel offset to a date string, based on timeline start. Returns empty string for invalid timeline. */
 export function pixelToDate(px: number, timelineStart: string, dayWidth: number): string {
+  if (dayWidth <= 0 || !isValidDate(timelineStart)) return '';
   const days = Math.round(px / dayWidth);
   return addDays(timelineStart, days);
 }
@@ -171,8 +197,9 @@ const MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
 
-/** Generate month ranges between two dates (inclusive). */
+/** Generate month ranges between two dates (inclusive). Returns empty array for invalid inputs. */
 export function getMonthRanges(startDate: string, endDate: string): MonthRange[] {
+  if (!isValidDate(startDate) || !isValidDate(endDate)) return [];
   const start = parseDate(startDate);
   const end = parseDate(endDate);
   const ranges: MonthRange[] = [];
@@ -220,7 +247,7 @@ export function computeTimelineRange(
   dates: (string | null | undefined)[],
   paddingDays: number = 7,
 ): { startDate: string; endDate: string } {
-  const validDates = dates.filter((d): d is string => !!d);
+  const validDates = dates.filter((d): d is string => isValidDate(d));
   if (validDates.length === 0) {
     const today = todayString();
     return { startDate: today, endDate: today };
@@ -236,7 +263,7 @@ export function computeTimelineRange(
   }
 
   return {
-    startDate: addDays(minDate, -paddingDays),
-    endDate: addDays(maxDate, paddingDays),
+    startDate: addDays(minDate, -paddingDays) || todayString(),
+    endDate: addDays(maxDate, paddingDays) || todayString(),
   };
 }

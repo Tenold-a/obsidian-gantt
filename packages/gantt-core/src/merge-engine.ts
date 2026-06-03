@@ -75,7 +75,7 @@ export function applyStatusCascade(
 
 const EDITABLE_FIELDS = [
   'title', 'startDate', 'endDate', 'progress', 'status',
-  'personId', 'projectId', 'parentId', 'dependencies', 'tags',
+  'personId', 'projectId', 'parentId', 'dependencies', 'tags', 'url',
 ] as const;
 
 type EditableField = typeof EDITABLE_FIELDS[number];
@@ -102,9 +102,12 @@ export function mergeFields(
     return fieldWithSource(upstreamVal, 'upstream');
   }
 
+  // Guard: ensure task has a valid id
+  const taskId = task.id != null ? String(task.id) : '';
+
   return {
-    id: task.id,
-    title: get('title', task.title),
+    id: taskId,
+    title: get('title', task.title ?? 'Untitled'),
     startDate: get('startDate', task.startDate ?? null),
     endDate: get('endDate', task.endDate ?? null),
     progress: get('progress', task.progress ?? 0),
@@ -114,7 +117,7 @@ export function mergeFields(
     parentId: get('parentId', task.parentId ?? null),
     dependencies: get('dependencies', task.dependencies ?? []),
     tags: get('tags', task.tags ?? []),
-    url: fieldWithSource(task.url ?? null, 'upstream'),   // url is not user-editable
+    url: get('url', task.url ?? null),
     metadata: task.metadata ?? {},
     connectorId,
     upstreamId: task.id,
@@ -127,8 +130,8 @@ export function mergeFields(
  */
 function localToLocalTask(task: Task): LocalTask {
   return {
-    id: task.id,
-    title: fieldWithSource(task.title, 'manual'),
+    id: task.id != null ? String(task.id) : '',
+    title: fieldWithSource(task.title ?? 'Untitled', 'manual'),
     startDate: fieldWithSource(task.startDate ?? null, 'manual'),
     endDate: fieldWithSource(task.endDate ?? null, 'manual'),
     progress: fieldWithSource(task.progress ?? 0, 'manual'),
@@ -169,6 +172,7 @@ export function mergeTasks(
 
   // 1. Merge cached tasks with overrides
   for (const task of cachedTasks) {
+    if (!task.id) continue; // skip tasks without valid id
     if (hidden.has(task.id)) continue;
     if (deleted.has(task.id)) continue;
     const overrides = overrideMap[task.id];
@@ -193,6 +197,7 @@ export function mergeTasks(
 
   // 3. Append locally-created tasks
   for (const localTask of edits.localTasks ?? []) {
+    if (!localTask.id) continue;
     if (hidden.has(localTask.id)) continue;
     result.push(localToLocalTask(localTask));
   }

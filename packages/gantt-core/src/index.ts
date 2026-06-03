@@ -24,6 +24,7 @@ export {
   getNonWorkingBlocks,
   getMonthRanges,
   computeTimelineRange,
+  isValidDate,
 } from './date-utils';
 export type { MonthRange, HolidayConfig, NonWorkingBlock, DateLabelType } from './date-utils';
 
@@ -133,8 +134,6 @@ export interface TagDefinition {
   name: string;
   color: string;
 }
-
-export type { HolidayConfig } from './date-utils';
 
 /** Standardised output from a connector's transform() function. */
 export interface CanonicalData {
@@ -248,7 +247,7 @@ export interface LocalTask {
 
 /** A partial Task stored as a user override. */
 export type TaskOverride = Partial<
-  Pick<Task, 'startDate' | 'endDate' | 'progress' | 'personId' | 'projectId' | 'parentId' | 'dependencies' | 'tags' | 'title' | 'status'>
+  Pick<Task, 'startDate' | 'endDate' | 'progress' | 'personId' | 'projectId' | 'parentId' | 'dependencies' | 'tags' | 'title' | 'status' | 'url'>
 >;
 
 // ============================================================
