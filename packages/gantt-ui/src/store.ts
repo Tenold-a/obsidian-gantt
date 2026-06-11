@@ -5,12 +5,17 @@ import type {
   Task,
   Person,
   Project,
+  ProjectDetail,
+  TaskDetail,
+  ConnectorModule,
   EditsOverlay,
   CacheFile,
   ViewDefinition,
   Conflict,
   PushChangesPayload,
+  PushProgress,
   TagDefinition,
+  FieldMemory,
 } from '@obsidian-gantt/core';
 import {
   mergeAll,
@@ -85,6 +90,7 @@ export interface GanttStore {
   projectSortKeyDates: ReturnType<typeof signal<string[]>>;
   positionOrder: ReturnType<typeof signal<string[]>>;
   detailPanelWidth: ReturnType<typeof signal<number>>;
+  leftPanelWidth: ReturnType<typeof signal<number>>;
 
   // Filtering
   filterTimeStart: ReturnType<typeof signal<string>>;
@@ -128,6 +134,19 @@ export interface GanttStore {
   isLoading: ReturnType<typeof signal<boolean>>;
   error: ReturnType<typeof signal<string | null>>;
 
+  // Push progress
+  pushProgress: ReturnType<typeof signal<PushProgress | null>>;
+
+  // Detail fetching
+  detailCache: ReturnType<typeof signal<Map<string, ProjectDetail | TaskDetail>>>;
+  detailLoading: ReturnType<typeof signal<Set<string>>>;
+  fetchEntityDetail(id: string, type: 'project' | 'task', connectorId: string): Promise<ProjectDetail | TaskDetail | null>;
+
+  // Field input memory
+  fieldMemory: ReturnType<typeof signal<FieldMemory>>;
+  loadFieldMemory(): Promise<void>;
+  saveFieldMemory(field: keyof FieldMemory, value: string): Promise<void>;
+
   // Actions
   loadView(viewId: string): Promise<void>;
   refreshConnector(connectorId: string): Promise<void>;
@@ -135,6 +154,7 @@ export interface GanttStore {
   resetField(taskId: string, fieldName: string): Promise<void>;
   createLocalTask(task: Task): Promise<void>;
   persistProjectEdit(projectId: string, fieldName: string, value: unknown): Promise<void>;
+  persistPersonEdit(personId: string, fieldName: string, value: unknown): Promise<void>;
   selectEntity(entity: SelectedEntity | null): void;
   deleteTask(taskId: string): Promise<void>;
   deleteProject(projectId: string): Promise<void>;
@@ -150,6 +170,8 @@ export interface GanttStore {
   deleteTag(name: string): Promise<void>;
   saveSettings(): Promise<void>;
   saveHolidayConfig(config: HolidayConfig): Promise<void>;
+  /** Set holiday config from an external source (plugin settings) without persisting to view settings */
+  setHolidayConfig(config: HolidayConfig): void;
 }
 
 const DAY_WIDTH = 30;
@@ -162,6 +184,9 @@ function safeName(name: string): string {
 
 export function createGanttStore(platform: GanttPlatform): GanttStore {
   configureIconRenderer((el, name) => platform.setIcon(el, name));
+
+  // ── Logger ──
+  const logger = platform.createLogger('ui');
 
   // ── State signals ──
   const caches = signal<CacheFile[]>([]);
@@ -177,6 +202,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
   const projectSortKeyDates = signal<string[]>(['上线时间']);
   const positionOrder = signal<string[]>([]);
   const detailPanelWidth = signal<number>(220);
+  const leftPanelWidth = signal<number>(180);
   const filterTimeStart = signal<string>('');
   const filterTimeEnd = signal<string>('');
   const filterStatuses = signal<Set<string>>(new Set());
@@ -190,6 +216,21 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
   });
   const isLoading = signal<boolean>(false);
   const error = signal<string | null>(null);
+  const pushProgress = signal<PushProgress | null>(null);
+
+  // Field input memory — auto-complete suggestions for manual fields
+  const fieldMemory = signal<FieldMemory>({
+    persons: [],
+    projects: [],
+    urls: [],
+    tags: [],
+    dependencies: [],
+  });
+
+  // Detail cache: keyed by "<type>:<id>", cleared on connector refresh
+  const detailCache = signal<Map<string, ProjectDetail | TaskDetail>>(new Map());
+  // Detail loading: set of keys currently being fetched
+  const detailLoading = signal<Set<string>>(new Set());
 
   // Scroll sync guard
   let scrollGuardActive = false;
@@ -602,6 +643,49 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     return allConflicts;
   });
 
+  // ── Field input memory ──
+
+  async function loadFieldMemory(): Promise<void> {
+    const viewId = currentViewId.value;
+    if (!viewId) return;
+    try {
+      const raw = await platform.storage.read(`memory/${safeName(viewId)}.json`);
+      if (raw) {
+        const data = JSON.parse(raw) as FieldMemory;
+        fieldMemory.value = {
+          persons: data.persons ?? [],
+          projects: data.projects ?? [],
+          urls: data.urls ?? [],
+          tags: data.tags ?? [],
+          dependencies: data.dependencies ?? [],
+        };
+      } else {
+        fieldMemory.value = { persons: [], projects: [], urls: [], tags: [], dependencies: [] };
+      }
+    } catch {
+      fieldMemory.value = { persons: [], projects: [], urls: [], tags: [], dependencies: [] };
+    }
+  }
+
+  async function saveFieldMemory(field: keyof FieldMemory, value: string): Promise<void> {
+    const viewId = currentViewId.value;
+    if (!viewId || !value) return;
+    const mem = fieldMemory.value;
+    const list = [...mem[field]];
+    // Remove duplicate if exists
+    const idx = list.indexOf(value);
+    if (idx !== -1) list.splice(idx, 1);
+    // Add to front
+    list.unshift(value);
+    // Cap at 50
+    if (list.length > 50) list.length = 50;
+    const updated: FieldMemory = { ...mem, [field]: list };
+    fieldMemory.value = updated;
+    try {
+      await platform.storage.write(`memory/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
+    } catch { /* non-fatal */ }
+  }
+
   // ── Actions ──
   async function loadView(viewId: string): Promise<void> {
     isLoading.value = true;
@@ -638,6 +722,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       // Load tag definitions and settings
       await loadTags();
       await loadSettings();
+      await loadFieldMemory();
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -674,7 +759,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
         // No config file yet — create a default one with default script path
         connConfig = { script: `connectors/${connectorId}.js` };
         await platform.storage.write(configPath, JSON.stringify(connConfig, null, 2));
-        console.log(`[Gantt] Auto-created connector config: ${configPath}`);
+        logger.info(`Auto-created connector config: ${configPath}`);
       }
       const scriptPath = (connConfig.script as string) || `connectors/${safeName(connectorId)}.js`;
 
@@ -683,7 +768,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
       // Create context with the connector's config and current view state
       const viewState = buildViewState();
-      const ctx = platform.createConnectorContext(connConfig, viewState);
+      const ctx = platform.createConnectorContext(connConfig, viewState, connectorId);
 
       // Execute fetch → transform
       const rawData = await mod.fetch(ctx);
@@ -706,13 +791,145 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
         ...caches.value.filter(c => c.connectorId !== connectorId),
         cache,
       ];
+
+      // Clear detail cache entries for this connector
+      const prefix = `${connectorId}:`;
+      const newDetailCache = new Map(detailCache.value);
+      for (const key of newDetailCache.keys()) {
+        if (key.startsWith(prefix)) newDetailCache.delete(key);
+      }
+      detailCache.value = newDetailCache;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[Gantt] Failed to refresh connector "${connectorId}":`, msg);
+      logger.error(`Failed to refresh connector "${connectorId}": ${msg}`);
       error.value = msg;
     } finally {
       isLoading.value = false;
     }
+  }
+
+  const DETAIL_FETCH_TIMEOUT_MS = 10_000;
+
+  async function fetchEntityDetail(
+    id: string,
+    type: 'project' | 'task',
+    connectorId: string,
+  ): Promise<ProjectDetail | TaskDetail | null> {
+    const cacheKey = `${connectorId}:${type}:${id}`;
+
+    // Check cache
+    const cached = detailCache.value.get(cacheKey);
+    if (cached) {
+      logger.info(`[detail] cache hit for ${cacheKey}`);
+      return cached;
+    }
+
+    // Check if already loading
+    if (detailLoading.value.has(cacheKey)) {
+      logger.info(`[detail] already loading ${cacheKey}`);
+      return null;
+    }
+
+    // Find connector module
+    const configPath = `connectors/${safeName(connectorId)}.json`;
+    const configRaw = await platform.storage.read(configPath);
+    if (!configRaw) {
+      logger.info(`[detail] no connector config at ${configPath}`);
+      return null;
+    }
+    const connConfig = JSON.parse(configRaw);
+    const scriptPath = (connConfig.script as string) || `connectors/${safeName(connectorId)}.js`;
+
+    logger.info(`[detail] loading ${type} detail for ${id} from ${scriptPath}`);
+
+    let mod: ConnectorModule;
+    try {
+      mod = await platform.connectorLoader.load(scriptPath);
+    } catch (e) {
+      logger.info(`[detail] failed to load connector: ${(e as Error).message}`);
+      return null;
+    }
+
+    // If connector doesn't support detail fetch, fall back to CanonicalData
+    if (!mod.fetchDetail || !mod.transformDetail) {
+      logger.info(`[detail] connector has no fetchDetail/transformDetail, using fallback`);
+      return buildFallbackDetail(id, type, connectorId);
+    }
+
+    // Start loading
+    detailLoading.value = new Set([...detailLoading.value, cacheKey]);
+
+    try {
+      const viewState = buildViewState();
+      const ctx = platform.createConnectorContext(connConfig, viewState, connectorId);
+      logger.info(`[detail] calling fetchDetail for ${type}/${id}`);
+      const rawData = await Promise.race([
+        mod.fetchDetail(id, type, ctx),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Detail fetch timeout')), DETAIL_FETCH_TIMEOUT_MS),
+        ),
+      ]);
+      const detail = mod.transformDetail(rawData, ctx);
+
+      // Cache and return
+      const newCache = new Map(detailCache.value);
+      newCache.set(cacheKey, detail);
+      detailCache.value = newCache;
+      logger.info(`[detail] fetchDetail succeeded for ${type}/${id}`);
+      return detail;
+    } catch (e) {
+      // On error (including timeout), fall back to CanonicalData
+      logger.info(`[detail] fetchDetail failed: ${(e as Error).message}, using fallback`);
+      return buildFallbackDetail(id, type, connectorId);
+    } finally {
+      const loading = new Set(detailLoading.value);
+      loading.delete(cacheKey);
+      detailLoading.value = loading;
+    }
+  }
+
+  function buildFallbackDetail(
+    id: string,
+    type: 'project' | 'task',
+    connectorId: string,
+  ): ProjectDetail | TaskDetail | null {
+    const cache = caches.value.find(c => c.connectorId === connectorId);
+    if (!cache) return null;
+
+    if (type === 'project') {
+      const project = cache.projects.find(p => p.id === id);
+      if (!project) return null;
+      return {
+        id: project.id,
+        name: project.name,
+        status: project.status,
+        color: project.color,
+        description: project.description,
+        requester: project.requester,
+        keyDates: project.keyDates,
+        keyLinks: project.keyLinks,
+        tags: project.tags,
+        metadata: project.metadata,
+      } satisfies ProjectDetail;
+    }
+
+    const task = cache.tasks.find(t => t.id === id);
+    if (!task) return null;
+    return {
+      id: task.id,
+      title: task.title,
+      startDate: task.startDate,
+      endDate: task.endDate,
+      progress: task.progress,
+      status: task.status,
+      personId: task.personId,
+      projectId: task.projectId,
+      parentId: task.parentId,
+      dependencies: task.dependencies,
+      tags: task.tags,
+      url: task.url,
+      metadata: task.metadata,
+    } satisfies TaskDetail;
   }
 
   async function persistEdit(taskId: string, fieldName: string, value: unknown): Promise<void> {
@@ -788,6 +1005,25 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     const updated: EditsOverlay = {
       ...currentEdits,
       projectOverrides,
+    };
+
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
+    edits.value = updated;
+  }
+
+  async function persistPersonEdit(personId: string, fieldName: string, value: unknown): Promise<void> {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId) return;
+
+    const personOverrides = { ...(currentEdits.personOverrides ?? {}) };
+    const personFields = { ...(personOverrides[personId] ?? {}) };
+    (personFields as Record<string, unknown>)[fieldName] = value;
+    personOverrides[personId] = personFields as Partial<Pick<Person, 'name' | 'position'>>;
+
+    const updated: EditsOverlay = {
+      ...currentEdits,
+      personOverrides,
     };
 
     await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
@@ -931,10 +1167,9 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
     const results: { connectorId: string; success: boolean; error?: string }[] = [];
 
-    // Build a filter set from selectedIds if provided
     const hasSelection = selectedIds !== undefined && selectedIds.size > 0;
 
-    // Build push payload from all local changes
+    // Build push payload from overrides (only modified fields) + local tasks (full objects)
     const payload: PushChangesPayload = {
       tasks: [],
       projects: [],
@@ -946,69 +1181,46 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
         : (currentEdits.deletedProjects ?? []),
     };
 
-    // Track which task/project IDs are in the payload for selective clearing
+    // Track which task/project IDs are in the payload
     const pushedTaskIds = new Set<string>();
     const pushedProjectIds = new Set<string>();
 
-    // Collect tasks with overrides as full merged objects (upstream tasks only)
-    const allMerged = mergeAll(caches.value, currentEdits);
-    const overrideIds = new Set(Object.keys(currentEdits.overrides));
-    for (const task of allMerged) {
-      // Only include upstream tasks with overrides (local tasks handled separately)
-      if (task.connectorId !== null && overrideIds.has(task.id)) {
-        if (hasSelection && !selectedIds!.has(task.id)) continue;
-        payload.tasks.push({
-          id: task.id,
-          title: task.title.value,
-          startDate: task.startDate.value ?? undefined,
-          endDate: task.endDate.value ?? undefined,
-          progress: task.progress.value,
-          status: task.status.value as Task['status'],
-          personId: task.personId.value ?? undefined,
-          projectId: task.projectId.value ?? undefined,
-          dependencies: task.dependencies.value,
-          tags: task.tags.value,
-          url: task.url.value ?? undefined,
-        });
-        pushedTaskIds.add(task.id);
-      }
+    // Upstream tasks with overrides: send only modified fields (Partial<Task>)
+    for (const [taskId, overrides] of Object.entries(currentEdits.overrides)) {
+      if (hasSelection && !selectedIds!.has(taskId)) continue;
+      payload.tasks.push({ id: taskId, ...overrides });
+      pushedTaskIds.add(taskId);
     }
 
-    // Include locally created tasks (connectorId === null)
+    // Local tasks: send full objects (no upstream baseline)
     for (const lt of currentEdits.localTasks) {
       if (hasSelection && !selectedIds!.has(lt.id)) continue;
       payload.tasks.push(lt);
       pushedTaskIds.add(lt.id);
     }
 
-    // Collect project overrides
+    // Project overrides: send only modified fields
     if (currentEdits.projectOverrides) {
       for (const [projectId, overrides] of Object.entries(currentEdits.projectOverrides)) {
         if (hasSelection && !selectedIds!.has(projectId)) continue;
-        const project = caches.value
-          .flatMap(c => c.projects)
-          .find(p => p.id === projectId);
-        if (project) {
-          payload.projects.push({ ...project, ...overrides });
-        }
+        payload.projects.push({ id: projectId, ...overrides });
         pushedProjectIds.add(projectId);
       }
     }
 
-    // Add deleted task/project IDs
-    for (const id of payload.deletedTaskIds) {
-      if (hasSelection && !selectedIds!.has(id)) continue;
-      pushedTaskIds.add(id);
-    }
-    for (const id of payload.deletedProjectIds) {
-      if (hasSelection && !selectedIds!.has(id)) continue;
-      pushedProjectIds.add(id);
-    }
+    // Deleted task/project IDs
+    for (const id of payload.deletedTaskIds) pushedTaskIds.add(id);
+    for (const id of payload.deletedProjectIds) pushedProjectIds.add(id);
 
-    // Try pushing through each connector
+    // Compute total items for progress tracking
+    const totalItems = payload.tasks.length + payload.projects.length
+      + payload.deletedTaskIds.length + payload.deletedProjectIds.length;
+
+    // Push through each connector
+    const connectorFailedItems: { id: string; type: 'task' | 'project'; error: string }[] = [];
+
     for (const cache of caches.value) {
       try {
-        // Load connector module
         const configPath = `connectors/${safeName(cache.connectorId)}.json`;
         const configRaw = await platform.storage.read(configPath);
         if (!configRaw) continue;
@@ -1021,34 +1233,66 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
           continue;
         }
 
-        const ctx = platform.createConnectorContext(connConfig, buildViewState());
-        const result = await mod.push(payload, ctx);
+        const ctx = platform.createConnectorContext(connConfig, buildViewState(), cache.connectorId);
+
+        // Create onProgress callback that writes to pushProgress signal
+        const onProgress = (progress: PushProgress) => {
+          pushProgress.value = progress;
+        };
+
+        const result = await mod.push(payload, ctx, onProgress);
         results.push({ connectorId: cache.connectorId, success: result.success, error: result.error });
+
+        // Collect failed items for selective clearing
+        if (result.failedItems && result.failedItems.length > 0) {
+          for (const fi of result.failedItems) {
+            connectorFailedItems.push(fi);
+          }
+        }
       } catch (e) {
         results.push({ connectorId: cache.connectorId, success: false, error: e instanceof Error ? e.message : String(e) });
       }
     }
 
-    // If any connector succeeded, clear the pushed edits and refresh caches
-    const anySuccess = results.some(r => r.success);
-    if (anySuccess) {
-      // Selectively clear only pushed items, preserving unpushed ones
+    // Clear push progress
+    pushProgress.value = null;
+
+    // Build sets of failed item IDs across all connectors
+    const failedTaskIds = new Set<string>();
+    const failedProjectIds = new Set<string>();
+    for (const fi of connectorFailedItems) {
+      if (fi.type === 'task') failedTaskIds.add(fi.id);
+      else failedProjectIds.add(fi.id);
+    }
+
+    // Build succeeded sets: items in payload but NOT in any connector's failedItems
+    const succeededTaskIds = new Set<string>();
+    const succeededProjectIds = new Set<string>();
+    for (const id of pushedTaskIds) {
+      if (!failedTaskIds.has(id)) succeededTaskIds.add(id);
+    }
+    for (const id of pushedProjectIds) {
+      if (!failedProjectIds.has(id)) succeededProjectIds.add(id);
+    }
+
+    // If no connector succeeded at all and none returned explicit failedItems, don't clear anything.
+    // When failedItems are present (partial failure), trust them: clear only succeeded items.
+    const anySuccess = results.some(r => r.success) || connectorFailedItems.length > 0;
+    if (anySuccess && (succeededTaskIds.size > 0 || succeededProjectIds.size > 0)) {
+      // Selectively clear only successfully pushed items
       const newOverrides = { ...currentEdits.overrides };
-      for (const id of pushedTaskIds) delete newOverrides[id];
+      for (const id of succeededTaskIds) delete newOverrides[id];
 
       const newProjectOverrides = { ...(currentEdits.projectOverrides ?? {}) };
-      for (const id of pushedProjectIds) delete newProjectOverrides[id];
+      for (const id of succeededProjectIds) delete newProjectOverrides[id];
 
       const cleared: EditsOverlay = {
         ...currentEdits,
         overrides: newOverrides,
-        // Remove pushed local tasks (NOT keep — filter was inverted)
-        localTasks: currentEdits.localTasks.filter(
-          lt => !pushedTaskIds.has(lt.id)
-        ),
+        localTasks: currentEdits.localTasks.filter(lt => !succeededTaskIds.has(lt.id)),
         projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : undefined,
-        deletedTasks: (currentEdits.deletedTasks ?? []).filter(id => !pushedTaskIds.has(id)),
-        deletedProjects: (currentEdits.deletedProjects ?? []).filter(id => !pushedProjectIds.has(id)),
+        deletedTasks: (currentEdits.deletedTasks ?? []).filter(id => !succeededTaskIds.has(id)),
+        deletedProjects: (currentEdits.deletedProjects ?? []).filter(id => !succeededProjectIds.has(id)),
       };
       await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(cleared, null, 2));
       edits.value = cleared;
@@ -1245,6 +1489,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       if (data.projectSortKeyDates) projectSortKeyDates.value = data.projectSortKeyDates;
       if (data.positionOrder) positionOrder.value = data.positionOrder;
       if (data.detailPanelWidth !== undefined) detailPanelWidth.value = data.detailPanelWidth;
+      if (data.leftPanelWidth !== undefined) leftPanelWidth.value = data.leftPanelWidth;
       if (data.holidayConfig) {
           holidayConfig.value = {
             weekendsEnabled: data.holidayConfig.weekendsEnabled ?? true,
@@ -1269,14 +1514,19 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       projectSortKeyDates: projectSortKeyDates.value,
       positionOrder: positionOrder.value,
       detailPanelWidth: detailPanelWidth.value,
-      holidayConfig: holidayConfig.value,
+      leftPanelWidth: leftPanelWidth.value,
     };
     await platform.storage.write(`settings/${safeName(viewId)}.json`, JSON.stringify(data, null, 2));
   }
 
   async function saveHolidayConfig(config: HolidayConfig): Promise<void> {
     holidayConfig.value = config;
-    await saveSettings();
+    // No longer per-view; plugin settings are the source of truth.
+    // saveSettings() is NOT called here.
+  }
+
+  function setHolidayConfig(config: HolidayConfig): void {
+    holidayConfig.value = config;
   }
 
   // ── Pending changes computed ──
@@ -1527,6 +1777,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     projectSortKeyDates,
     positionOrder,
     detailPanelWidth,
+    leftPanelWidth,
     filterTimeStart,
     filterTimeEnd,
     filterStatuses,
@@ -1541,12 +1792,17 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     holidayConfig,
     isLoading,
     error,
+    pushProgress,
+    detailCache,
+    detailLoading,
+    fetchEntityDetail,
     loadView,
     refreshConnector,
     persistEdit,
     resetField,
     createLocalTask,
     persistProjectEdit,
+    persistPersonEdit,
     selectEntity,
     deleteTask,
     deleteProject,
@@ -1560,7 +1816,11 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     deleteTag,
     saveSettings,
     saveHolidayConfig,
+    setHolidayConfig,
     loadSettings,
+    fieldMemory,
+    loadFieldMemory,
+    saveFieldMemory,
     _platform: platform,
   };
 }

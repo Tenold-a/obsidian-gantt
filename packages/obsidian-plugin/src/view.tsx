@@ -3,6 +3,7 @@ import { createGanttStore, GanttChart } from '@obsidian-gantt/ui';
 import type { GanttPlatform } from '@obsidian-gantt/core';
 import { ItemView, WorkspaceLeaf, requestUrl } from 'obsidian';
 import { createObsidianPlatform, bindObsidianFetch } from './platform';
+import { getSettings } from './settings';
 
 export const VIEW_TYPE = 'obsidian-gantt-view';
 
@@ -30,6 +31,9 @@ export class GanttView extends ItemView {
     this.platform = createObsidianPlatform(this.app as any);
     bindObsidianFetch(this.platform, requestUrl);
     this.store = createGanttStore(this.platform);
+
+    // Apply plugin-level holiday config
+    this.store.setHolidayConfig(getSettings().holidayConfig);
 
     // Ensure subdirectories exist for tags and settings
     const vault = (this.app as any).vault;
