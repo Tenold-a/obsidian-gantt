@@ -96,6 +96,7 @@ npm run build --workspace=packages/obsidian-plugin
 - **CSV 连接器** —— 内置连接器，读取 persons.csv、projects.csv、tasks.csv，支持自定义列映射、自定义数据持久化和推送
 - **多连接器视图** —— 一个视图可合并多个连接器的数据
 - **平台抽象** —— 连接器在 Obsidian（Vault 文件）或独立 Web 应用（localStorage）中均可运行
+- **连接器开发指引** —— 详见 [CONNECTOR_GUIDE.md](./CONNECTOR_GUIDE.md)
 
 ### 本地数据存储
 - **三类文件分离** —— cache（快照，机器写入，可丢弃）、edits（用户覆盖，人工修改，需备份）、views（显示配置）
