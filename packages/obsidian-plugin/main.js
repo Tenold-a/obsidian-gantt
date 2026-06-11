@@ -20,10 +20,13 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/main.ts
 var main_exports = {};
 __export(main_exports, {
-  default: () => GanttPlugin
+  default: () => GanttPlugin,
+  destroyLogStore: () => destroyLogStore,
+  getSettings: () => getSettings,
+  initLogStore: () => initLogStore
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // ../../node_modules/preact/dist/preact.module.js
 var n;
@@ -1128,7 +1131,8 @@ var EDITABLE_FIELDS = [
   "parentId",
   "dependencies",
   "tags",
-  "url"
+  "url",
+  "description"
 ];
 function fieldWithSource(value, source) {
   return { value, source };
@@ -1541,6 +1545,29 @@ function classifyICSEvents(events) {
   }
   return { holidayDates, makeupWorkdays };
 }
+var DEFAULT_LOG_SETTINGS = {
+  enabled: true,
+  level: "info",
+  retentionDays: 30
+};
+var LEVEL_ORDER = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3
+};
+function meetsLevel(entryLevel, minLevel) {
+  return LEVEL_ORDER[entryLevel] >= LEVEL_ORDER[minLevel];
+}
+function createLogEntry(level, source, message, data) {
+  return {
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    level,
+    source,
+    message,
+    data
+  };
+}
 var PlatformError = class extends Error {
   constructor(message, code, cause) {
     super(message);
@@ -1628,6 +1655,7 @@ function safeName(name) {
 }
 function createGanttStore(platform) {
   configureIconRenderer((el, name) => platform.setIcon(el, name));
+  const logger = platform.createLogger("ui");
   const caches = y3([]);
   const edits = y3(null);
   const views = y3([]);
@@ -1641,6 +1669,7 @@ function createGanttStore(platform) {
   const projectSortKeyDates = y3(["\u4E0A\u7EBF\u65F6\u95F4"]);
   const positionOrder = y3([]);
   const detailPanelWidth = y3(220);
+  const leftPanelWidth = y3(180);
   const filterTimeStart = y3("");
   const filterTimeEnd = y3("");
   const filterStatuses = y3(/* @__PURE__ */ new Set());
@@ -1654,6 +1683,16 @@ function createGanttStore(platform) {
   });
   const isLoading = y3(false);
   const error = y3(null);
+  const pushProgress = y3(null);
+  const fieldMemory = y3({
+    persons: [],
+    projects: [],
+    urls: [],
+    tags: [],
+    dependencies: []
+  });
+  const detailCache = y3(/* @__PURE__ */ new Map());
+  const detailLoading = y3(/* @__PURE__ */ new Set());
   let scrollGuardActive = false;
   let scrollGuardTimer = null;
   function syncScrollTo(value) {
@@ -2009,6 +2048,47 @@ function createGanttStore(platform) {
     }
     return allConflicts;
   });
+  async function loadFieldMemory() {
+    const viewId = currentViewId.value;
+    if (!viewId)
+      return;
+    try {
+      const raw = await platform.storage.read(`memory/${safeName(viewId)}.json`);
+      if (raw) {
+        const data = JSON.parse(raw);
+        fieldMemory.value = {
+          persons: data.persons ?? [],
+          projects: data.projects ?? [],
+          urls: data.urls ?? [],
+          tags: data.tags ?? [],
+          dependencies: data.dependencies ?? []
+        };
+      } else {
+        fieldMemory.value = { persons: [], projects: [], urls: [], tags: [], dependencies: [] };
+      }
+    } catch {
+      fieldMemory.value = { persons: [], projects: [], urls: [], tags: [], dependencies: [] };
+    }
+  }
+  async function saveFieldMemory(field, value) {
+    const viewId = currentViewId.value;
+    if (!viewId || !value)
+      return;
+    const mem = fieldMemory.value;
+    const list = [...mem[field]];
+    const idx = list.indexOf(value);
+    if (idx !== -1)
+      list.splice(idx, 1);
+    list.unshift(value);
+    if (list.length > 50)
+      list.length = 50;
+    const updated = { ...mem, [field]: list };
+    fieldMemory.value = updated;
+    try {
+      await platform.storage.write(`memory/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
+    } catch {
+    }
+  }
   async function loadView(viewId) {
     isLoading.value = true;
     error.value = null;
@@ -2034,6 +2114,7 @@ function createGanttStore(platform) {
       });
       await loadTags();
       await loadSettings();
+      await loadFieldMemory();
     } catch (e4) {
       error.value = e4 instanceof Error ? e4.message : String(e4);
     } finally {
@@ -2064,12 +2145,12 @@ function createGanttStore(platform) {
       } else {
         connConfig = { script: `connectors/${connectorId}.js` };
         await platform.storage.write(configPath, JSON.stringify(connConfig, null, 2));
-        console.log(`[Gantt] Auto-created connector config: ${configPath}`);
+        logger.info(`Auto-created connector config: ${configPath}`);
       }
       const scriptPath = connConfig.script || `connectors/${safeName(connectorId)}.js`;
       const mod = await platform.connectorLoader.load(scriptPath);
       const viewState = buildViewState();
-      const ctx = platform.createConnectorContext(connConfig, viewState);
+      const ctx = platform.createConnectorContext(connConfig, viewState, connectorId);
       const rawData = await mod.fetch(ctx);
       const canonical = mod.transform(rawData, ctx);
       const cache = {
@@ -2085,13 +2166,118 @@ function createGanttStore(platform) {
         ...caches.value.filter((c4) => c4.connectorId !== connectorId),
         cache
       ];
+      const prefix = `${connectorId}:`;
+      const newDetailCache = new Map(detailCache.value);
+      for (const key of newDetailCache.keys()) {
+        if (key.startsWith(prefix))
+          newDetailCache.delete(key);
+      }
+      detailCache.value = newDetailCache;
     } catch (e4) {
       const msg = e4 instanceof Error ? e4.message : String(e4);
-      console.error(`[Gantt] Failed to refresh connector "${connectorId}":`, msg);
+      logger.error(`Failed to refresh connector "${connectorId}": ${msg}`);
       error.value = msg;
     } finally {
       isLoading.value = false;
     }
+  }
+  const DETAIL_FETCH_TIMEOUT_MS = 1e4;
+  async function fetchEntityDetail(id, type, connectorId) {
+    const cacheKey = `${connectorId}:${type}:${id}`;
+    const cached = detailCache.value.get(cacheKey);
+    if (cached) {
+      logger.info(`[detail] cache hit for ${cacheKey}`);
+      return cached;
+    }
+    if (detailLoading.value.has(cacheKey)) {
+      logger.info(`[detail] already loading ${cacheKey}`);
+      return null;
+    }
+    const configPath = `connectors/${safeName(connectorId)}.json`;
+    const configRaw = await platform.storage.read(configPath);
+    if (!configRaw) {
+      logger.info(`[detail] no connector config at ${configPath}`);
+      return null;
+    }
+    const connConfig = JSON.parse(configRaw);
+    const scriptPath = connConfig.script || `connectors/${safeName(connectorId)}.js`;
+    logger.info(`[detail] loading ${type} detail for ${id} from ${scriptPath}`);
+    let mod;
+    try {
+      mod = await platform.connectorLoader.load(scriptPath);
+    } catch (e4) {
+      logger.info(`[detail] failed to load connector: ${e4.message}`);
+      return null;
+    }
+    if (!mod.fetchDetail || !mod.transformDetail) {
+      logger.info(`[detail] connector has no fetchDetail/transformDetail, using fallback`);
+      return buildFallbackDetail(id, type, connectorId);
+    }
+    detailLoading.value = /* @__PURE__ */ new Set([...detailLoading.value, cacheKey]);
+    try {
+      const viewState = buildViewState();
+      const ctx = platform.createConnectorContext(connConfig, viewState, connectorId);
+      logger.info(`[detail] calling fetchDetail for ${type}/${id}`);
+      const rawData = await Promise.race([
+        mod.fetchDetail(id, type, ctx),
+        new Promise(
+          (_3, reject) => setTimeout(() => reject(new Error("Detail fetch timeout")), DETAIL_FETCH_TIMEOUT_MS)
+        )
+      ]);
+      const detail = mod.transformDetail(rawData, ctx);
+      const newCache = new Map(detailCache.value);
+      newCache.set(cacheKey, detail);
+      detailCache.value = newCache;
+      logger.info(`[detail] fetchDetail succeeded for ${type}/${id}`);
+      return detail;
+    } catch (e4) {
+      logger.info(`[detail] fetchDetail failed: ${e4.message}, using fallback`);
+      return buildFallbackDetail(id, type, connectorId);
+    } finally {
+      const loading = new Set(detailLoading.value);
+      loading.delete(cacheKey);
+      detailLoading.value = loading;
+    }
+  }
+  function buildFallbackDetail(id, type, connectorId) {
+    const cache = caches.value.find((c4) => c4.connectorId === connectorId);
+    if (!cache)
+      return null;
+    if (type === "project") {
+      const project = cache.projects.find((p5) => p5.id === id);
+      if (!project)
+        return null;
+      return {
+        id: project.id,
+        name: project.name,
+        status: project.status,
+        color: project.color,
+        description: project.description,
+        requester: project.requester,
+        keyDates: project.keyDates,
+        keyLinks: project.keyLinks,
+        tags: project.tags,
+        metadata: project.metadata
+      };
+    }
+    const task = cache.tasks.find((t4) => t4.id === id);
+    if (!task)
+      return null;
+    return {
+      id: task.id,
+      title: task.title,
+      startDate: task.startDate,
+      endDate: task.endDate,
+      progress: task.progress,
+      status: task.status,
+      personId: task.personId,
+      projectId: task.projectId,
+      parentId: task.parentId,
+      dependencies: task.dependencies,
+      tags: task.tags,
+      url: task.url,
+      metadata: task.metadata
+    };
   }
   async function persistEdit(taskId, fieldName, value) {
     const currentEdits = edits.value;
@@ -2156,6 +2342,22 @@ function createGanttStore(platform) {
     const updated = {
       ...currentEdits,
       projectOverrides
+    };
+    await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
+    edits.value = updated;
+  }
+  async function persistPersonEdit(personId, fieldName, value) {
+    const currentEdits = edits.value;
+    const viewId = currentViewId.value;
+    if (!currentEdits || !viewId)
+      return;
+    const personOverrides = { ...currentEdits.personOverrides ?? {} };
+    const personFields = { ...personOverrides[personId] ?? {} };
+    personFields[fieldName] = value;
+    personOverrides[personId] = personFields;
+    const updated = {
+      ...currentEdits,
+      personOverrides
     };
     await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(updated, null, 2));
     edits.value = updated;
@@ -2285,27 +2487,11 @@ function createGanttStore(platform) {
     };
     const pushedTaskIds = /* @__PURE__ */ new Set();
     const pushedProjectIds = /* @__PURE__ */ new Set();
-    const allMerged = mergeAll(caches.value, currentEdits);
-    const overrideIds = new Set(Object.keys(currentEdits.overrides));
-    for (const task of allMerged) {
-      if (task.connectorId !== null && overrideIds.has(task.id)) {
-        if (hasSelection && !selectedIds.has(task.id))
-          continue;
-        payload.tasks.push({
-          id: task.id,
-          title: task.title.value,
-          startDate: task.startDate.value ?? void 0,
-          endDate: task.endDate.value ?? void 0,
-          progress: task.progress.value,
-          status: task.status.value,
-          personId: task.personId.value ?? void 0,
-          projectId: task.projectId.value ?? void 0,
-          dependencies: task.dependencies.value,
-          tags: task.tags.value,
-          url: task.url.value ?? void 0
-        });
-        pushedTaskIds.add(task.id);
-      }
+    for (const [taskId, overrides] of Object.entries(currentEdits.overrides)) {
+      if (hasSelection && !selectedIds.has(taskId))
+        continue;
+      payload.tasks.push({ id: taskId, ...overrides });
+      pushedTaskIds.add(taskId);
     }
     for (const lt of currentEdits.localTasks) {
       if (hasSelection && !selectedIds.has(lt.id))
@@ -2317,23 +2503,16 @@ function createGanttStore(platform) {
       for (const [projectId, overrides] of Object.entries(currentEdits.projectOverrides)) {
         if (hasSelection && !selectedIds.has(projectId))
           continue;
-        const project = caches.value.flatMap((c4) => c4.projects).find((p5) => p5.id === projectId);
-        if (project) {
-          payload.projects.push({ ...project, ...overrides });
-        }
+        payload.projects.push({ id: projectId, ...overrides });
         pushedProjectIds.add(projectId);
       }
     }
-    for (const id of payload.deletedTaskIds) {
-      if (hasSelection && !selectedIds.has(id))
-        continue;
+    for (const id of payload.deletedTaskIds)
       pushedTaskIds.add(id);
-    }
-    for (const id of payload.deletedProjectIds) {
-      if (hasSelection && !selectedIds.has(id))
-        continue;
+    for (const id of payload.deletedProjectIds)
       pushedProjectIds.add(id);
-    }
+    const totalItems = payload.tasks.length + payload.projects.length + payload.deletedTaskIds.length + payload.deletedProjectIds.length;
+    const connectorFailedItems = [];
     for (const cache of caches.value) {
       try {
         const configPath = `connectors/${safeName(cache.connectorId)}.json`;
@@ -2347,31 +2526,55 @@ function createGanttStore(platform) {
           results.push({ connectorId: cache.connectorId, success: false, error: "Connector does not support push" });
           continue;
         }
-        const ctx = platform.createConnectorContext(connConfig, buildViewState());
-        const result = await mod.push(payload, ctx);
+        const ctx = platform.createConnectorContext(connConfig, buildViewState(), cache.connectorId);
+        const onProgress = (progress) => {
+          pushProgress.value = progress;
+        };
+        const result = await mod.push(payload, ctx, onProgress);
         results.push({ connectorId: cache.connectorId, success: result.success, error: result.error });
+        if (result.failedItems && result.failedItems.length > 0) {
+          for (const fi of result.failedItems) {
+            connectorFailedItems.push(fi);
+          }
+        }
       } catch (e4) {
         results.push({ connectorId: cache.connectorId, success: false, error: e4 instanceof Error ? e4.message : String(e4) });
       }
     }
-    const anySuccess = results.some((r4) => r4.success);
-    if (anySuccess) {
+    pushProgress.value = null;
+    const failedTaskIds = /* @__PURE__ */ new Set();
+    const failedProjectIds = /* @__PURE__ */ new Set();
+    for (const fi of connectorFailedItems) {
+      if (fi.type === "task")
+        failedTaskIds.add(fi.id);
+      else
+        failedProjectIds.add(fi.id);
+    }
+    const succeededTaskIds = /* @__PURE__ */ new Set();
+    const succeededProjectIds = /* @__PURE__ */ new Set();
+    for (const id of pushedTaskIds) {
+      if (!failedTaskIds.has(id))
+        succeededTaskIds.add(id);
+    }
+    for (const id of pushedProjectIds) {
+      if (!failedProjectIds.has(id))
+        succeededProjectIds.add(id);
+    }
+    const anySuccess = results.some((r4) => r4.success) || connectorFailedItems.length > 0;
+    if (anySuccess && (succeededTaskIds.size > 0 || succeededProjectIds.size > 0)) {
       const newOverrides = { ...currentEdits.overrides };
-      for (const id of pushedTaskIds)
+      for (const id of succeededTaskIds)
         delete newOverrides[id];
       const newProjectOverrides = { ...currentEdits.projectOverrides ?? {} };
-      for (const id of pushedProjectIds)
+      for (const id of succeededProjectIds)
         delete newProjectOverrides[id];
       const cleared = {
         ...currentEdits,
         overrides: newOverrides,
-        // Remove pushed local tasks (NOT keep — filter was inverted)
-        localTasks: currentEdits.localTasks.filter(
-          (lt) => !pushedTaskIds.has(lt.id)
-        ),
+        localTasks: currentEdits.localTasks.filter((lt) => !succeededTaskIds.has(lt.id)),
         projectOverrides: Object.keys(newProjectOverrides).length > 0 ? newProjectOverrides : void 0,
-        deletedTasks: (currentEdits.deletedTasks ?? []).filter((id) => !pushedTaskIds.has(id)),
-        deletedProjects: (currentEdits.deletedProjects ?? []).filter((id) => !pushedProjectIds.has(id))
+        deletedTasks: (currentEdits.deletedTasks ?? []).filter((id) => !succeededTaskIds.has(id)),
+        deletedProjects: (currentEdits.deletedProjects ?? []).filter((id) => !succeededProjectIds.has(id))
       };
       await platform.storage.write(`edits/${safeName(viewId)}.json`, JSON.stringify(cleared, null, 2));
       edits.value = cleared;
@@ -2547,6 +2750,8 @@ function createGanttStore(platform) {
         positionOrder.value = data.positionOrder;
       if (data.detailPanelWidth !== void 0)
         detailPanelWidth.value = data.detailPanelWidth;
+      if (data.leftPanelWidth !== void 0)
+        leftPanelWidth.value = data.leftPanelWidth;
       if (data.holidayConfig) {
         holidayConfig.value = {
           weekendsEnabled: data.holidayConfig.weekendsEnabled ?? true,
@@ -2558,7 +2763,7 @@ function createGanttStore(platform) {
     } catch {
     }
   }
-  async function saveSettings() {
+  async function saveSettings2() {
     const viewId = currentViewId.value;
     if (!viewId)
       return;
@@ -2572,13 +2777,15 @@ function createGanttStore(platform) {
       projectSortKeyDates: projectSortKeyDates.value,
       positionOrder: positionOrder.value,
       detailPanelWidth: detailPanelWidth.value,
-      holidayConfig: holidayConfig.value
+      leftPanelWidth: leftPanelWidth.value
     };
     await platform.storage.write(`settings/${safeName(viewId)}.json`, JSON.stringify(data, null, 2));
   }
   async function saveHolidayConfig(config) {
     holidayConfig.value = config;
-    await saveSettings();
+  }
+  function setHolidayConfig(config) {
+    holidayConfig.value = config;
   }
   const pendingChanges = g2(() => {
     const currentEdits = edits.value;
@@ -2801,6 +3008,7 @@ function createGanttStore(platform) {
     projectSortKeyDates,
     positionOrder,
     detailPanelWidth,
+    leftPanelWidth,
     filterTimeStart,
     filterTimeEnd,
     filterStatuses,
@@ -2815,12 +3023,17 @@ function createGanttStore(platform) {
     holidayConfig,
     isLoading,
     error,
+    pushProgress,
+    detailCache,
+    detailLoading,
+    fetchEntityDetail,
     loadView,
     refreshConnector,
     persistEdit,
     resetField,
     createLocalTask,
     persistProjectEdit,
+    persistPersonEdit,
     selectEntity,
     deleteTask,
     deleteProject,
@@ -2832,9 +3045,13 @@ function createGanttStore(platform) {
     createTag,
     updateTag,
     deleteTag,
-    saveSettings,
+    saveSettings: saveSettings2,
     saveHolidayConfig,
+    setHolidayConfig,
     loadSettings,
+    fieldMemory,
+    loadFieldMemory,
+    saveFieldMemory,
     _platform: platform
   };
 }
@@ -3324,10 +3541,10 @@ function pxToDate(px) {
   return absolutePixelToDate(px, DAY_WIDTH);
 }
 var dragState = y3(null);
-function createDragHandler(store) {
+function createDragHandler(store2) {
   let undoStack = [];
   function onTaskPointerDown(e4, taskId, edge, paneType) {
-    const task = store.mergedTasks.value.find((t4) => t4.id === taskId);
+    const task = store2.mergedTasks.value.find((t4) => t4.id === taskId);
     if (!task)
       return;
     const startDate = task.startDate.value;
@@ -3339,7 +3556,7 @@ function createDragHandler(store) {
     const originEndPx = dateToPx(effectiveEnd);
     const baseLeft = originStartPx;
     const baseRight = originEndPx;
-    const groups = paneType === "person" ? store.personGroups.value : store.projectGroups.value;
+    const groups = paneType === "person" ? store2.personGroups.value : store2.projectGroups.value;
     let rowIndex = 0;
     for (let i5 = 0; i5 < groups.length; i5++) {
       if (groups[i5].tasks.some((t4) => t4.id === taskId)) {
@@ -3381,7 +3598,7 @@ function createDragHandler(store) {
   }
   function onKeyDatePointerDown(e4, projectId, keyDateIndex, currentDate) {
     const originPx = dateToPx(currentDate);
-    const groups = store.projectGroups.value;
+    const groups = store2.projectGroups.value;
     let rowIndex = 0;
     for (let i5 = 0; i5 < groups.length; i5++) {
       if (groups[i5].projectId === projectId) {
@@ -3442,7 +3659,7 @@ function createDragHandler(store) {
       ds.ghostLeft = dateToPx(newStart);
       ds.ghostWidth = Math.max(duration * DAY_WIDTH, 4);
       if (ds.paneType === "person") {
-        const pg = store.personGroups.value;
+        const pg = store2.personGroups.value;
         const scrollEl = document.querySelector(".gantt-timeline");
         const timelineBody = scrollEl?.querySelector('[style*="position: relative"]');
         const currentBodyTop = timelineBody?.getBoundingClientRect().top ?? ds.bodyTopStart;
@@ -3483,17 +3700,17 @@ function createDragHandler(store) {
       dragState.value = null;
       if (newDate === origDate)
         return;
-      const project = store.mergedProjects.value.find((p5) => p5.id === projectId);
+      const project = store2.mergedProjects.value.find((p5) => p5.id === projectId);
       if (!project)
         return;
       const keyDates = [...project.keyDates ?? []];
       keyDates[keyDateIndex] = { ...keyDates[keyDateIndex], date: newDate };
       const undo3 = async () => {
-        await store.persistProjectEdit(projectId, "keyDates", keyDates.map(
+        await store2.persistProjectEdit(projectId, "keyDates", keyDates.map(
           (kd, i5) => i5 === keyDateIndex ? { ...kd, date: origDate } : kd
         ));
       };
-      await store.persistProjectEdit(projectId, "keyDates", keyDates);
+      await store2.persistProjectEdit(projectId, "keyDates", keyDates);
       undoStack.push(undo3);
       return;
     }
@@ -3509,23 +3726,23 @@ function createDragHandler(store) {
       return;
     const undo2 = async () => {
       if (origStart !== newStart) {
-        await store.persistEdit(taskId, "startDate", origStart);
+        await store2.persistEdit(taskId, "startDate", origStart);
       }
       if (origEnd !== newEnd) {
-        await store.persistEdit(taskId, "endDate", origEnd);
+        await store2.persistEdit(taskId, "endDate", origEnd);
       }
       if (origPersonId !== newPersonId) {
-        await store.persistEdit(taskId, "personId", origPersonId ?? null);
+        await store2.persistEdit(taskId, "personId", origPersonId ?? null);
       }
     };
     if (newStart !== origStart) {
-      await store.persistEdit(taskId, "startDate", newStart);
+      await store2.persistEdit(taskId, "startDate", newStart);
     }
     if (newEnd !== origEnd) {
-      await store.persistEdit(taskId, "endDate", newEnd);
+      await store2.persistEdit(taskId, "endDate", newEnd);
     }
     if (newPersonId !== origPersonId) {
-      await store.persistEdit(taskId, "personId", newPersonId ?? null);
+      await store2.persistEdit(taskId, "personId", newPersonId ?? null);
     }
     undoStack.push(undo2);
   }
@@ -3555,7 +3772,7 @@ function createDragHandler(store) {
     const contentY = relY + totalScrollTop;
     const absX = contentX + (bodyOriginPx ?? 0);
     const dropDate = pxToDate(absX);
-    const personGroups = store.personGroups.value;
+    const personGroups = store2.personGroups.value;
     const rowIndex = findRowIndex(personGroups, contentY);
     const targetPerson = rowIndex >= 0 && rowIndex < personGroups.length ? personGroups[rowIndex].personId : null;
     const personId = targetPerson === "__unassigned__" ? null : targetPerson;
@@ -3567,7 +3784,7 @@ function createDragHandler(store) {
       endDate: addDays(dropDate, 5),
       personId: personId ?? void 0
     };
-    store.createLocalTask(newTask);
+    store2.createLocalTask(newTask);
   }
   function handleTimelineDragOver(e4) {
     e4.preventDefault();
@@ -3586,8 +3803,14 @@ function createDragHandler(store) {
 var DAY_WIDTH2 = 30;
 var ROW_HEIGHT2 = 40;
 var LANE_OFFSET2 = 12;
-var LEFT_PANEL_WIDTH = 180;
 var GRID_BUFFER_PX = 600;
+var DEFAULT_COLORS = ["#4A90D9", "#7B61F8", "#E06C75", "#61AFEF", "#98C379", "#E5C07B", "#C678DD", "#56B6C2"];
+function getDefaultColor(id) {
+  let hash = 0;
+  for (let i5 = 0; i5 < id.length; i5++)
+    hash = (hash << 5) - hash + id.charCodeAt(i5);
+  return DEFAULT_COLORS[Math.abs(hash) % DEFAULT_COLORS.length];
+}
 function dateToPx2(date) {
   if (!isValidDate(date))
     return 0;
@@ -3628,14 +3851,36 @@ function collapseNewlines(text) {
   return text.replace(/\n{3,}/g, "\n\n");
 }
 function DescriptionModal(props) {
+  const editMode = useSignal(props.startEdit ?? false);
+  const editText = useSignal(props.description);
   function handleKeyDown(e4) {
-    if (e4.key === "Escape")
-      props.onClose();
+    if (e4.key === "Escape") {
+      if (editMode.value) {
+        editText.value = props.description;
+        editMode.value = false;
+      } else {
+        props.onClose();
+      }
+    }
   }
   y2(() => {
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, []);
+  function handleSave() {
+    const newValue = editText.value;
+    if (props.onSave) {
+      props.onSave(newValue);
+    } else if (props.taskId) {
+      props.store.persistEdit(props.taskId, "description", newValue || null);
+    }
+    editMode.value = false;
+    props.onClose();
+  }
+  function handleCancel() {
+    editText.value = props.description;
+    editMode.value = false;
+  }
   return /* @__PURE__ */ u4(
     "div",
     {
@@ -3650,8 +3895,12 @@ function DescriptionModal(props) {
         zIndex: 1e4
       },
       onClick: (e4) => {
-        if (e4.target === e4.currentTarget)
-          props.onClose();
+        if (e4.target === e4.currentTarget) {
+          if (editMode.value)
+            handleCancel();
+          else
+            props.onClose();
+        }
       },
       children: /* @__PURE__ */ u4(
         "div",
@@ -3672,26 +3921,105 @@ function DescriptionModal(props) {
           children: [
             /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexShrink: 0 }, children: [
               /* @__PURE__ */ u4("span", { style: { fontWeight: "bold", fontSize: "14px" }, children: "Description" }),
-              /* @__PURE__ */ u4(
-                "button",
-                {
-                  onClick: props.onClose,
-                  title: "Close",
-                  style: {
-                    padding: "2px 6px",
-                    border: "none",
-                    borderRadius: "3px",
-                    background: "transparent",
-                    cursor: "pointer",
-                    fontSize: "16px",
-                    color: "var(--text-muted, #999)",
-                    lineHeight: 1
-                  },
-                  children: "x"
-                }
-              )
+              /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "6px", alignItems: "center" }, children: [
+                editMode.value ? /* @__PURE__ */ u4(S, { children: [
+                  /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: handleSave,
+                      title: "Save",
+                      style: {
+                        padding: "3px 10px",
+                        border: "1px solid var(--interactive-accent, #4A90D9)",
+                        borderRadius: "4px",
+                        background: "var(--interactive-accent, #4A90D9)",
+                        color: "#fff",
+                        cursor: "pointer",
+                        fontSize: "11px"
+                      },
+                      children: "Save"
+                    }
+                  ),
+                  /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: handleCancel,
+                      title: "Cancel",
+                      style: {
+                        padding: "3px 8px",
+                        border: "1px solid var(--background-modifier-border, #ccc)",
+                        borderRadius: "4px",
+                        background: "transparent",
+                        cursor: "pointer",
+                        fontSize: "11px",
+                        color: "var(--text-muted, #999)"
+                      },
+                      children: "Cancel"
+                    }
+                  )
+                ] }) : (props.taskId || props.onSave) && /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: () => {
+                      editText.value = props.description;
+                      editMode.value = true;
+                    },
+                    title: "Edit description",
+                    style: {
+                      padding: "3px 8px",
+                      border: "1px solid var(--background-modifier-border, #ccc)",
+                      borderRadius: "4px",
+                      background: "var(--background-secondary, #f5f5f5)",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      color: "var(--text-normal, #333)"
+                    },
+                    children: "Edit"
+                  }
+                ),
+                /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: props.onClose,
+                    title: "Close",
+                    style: {
+                      padding: "2px 6px",
+                      border: "none",
+                      borderRadius: "3px",
+                      background: "transparent",
+                      cursor: "pointer",
+                      fontSize: "16px",
+                      color: "var(--text-muted, #999)",
+                      lineHeight: 1
+                    },
+                    children: "x"
+                  }
+                )
+              ] })
             ] }),
-            /* @__PURE__ */ u4("div", { style: { overflowY: "auto", flex: 1, minHeight: 0 }, children: /* @__PURE__ */ u4(MarkdownView, { markdown: collapseNewlines(props.description), store: props.store }) })
+            /* @__PURE__ */ u4("div", { style: { overflowY: "auto", flex: 1, minHeight: 0 }, children: editMode.value ? /* @__PURE__ */ u4(
+              "textarea",
+              {
+                value: editText.value,
+                onInput: (e4) => {
+                  editText.value = e4.target.value;
+                },
+                style: {
+                  width: "100%",
+                  boxSizing: "border-box",
+                  resize: "vertical",
+                  minHeight: "200px",
+                  fontSize: "13px",
+                  padding: "8px",
+                  borderRadius: "4px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  background: "var(--background-primary, #fff)",
+                  color: "var(--text-normal, #333)",
+                  fontFamily: "var(--font-monospace, monospace)",
+                  lineHeight: 1.5
+                }
+              }
+            ) : /* @__PURE__ */ u4(MarkdownView, { markdown: collapseNewlines(props.description), store: props.store }) })
           ]
         }
       )
@@ -3700,6 +4028,7 @@ function DescriptionModal(props) {
 }
 function DescriptionViewer(props) {
   const showModal = useSignal(false);
+  const startEdit = useSignal(false);
   return /* @__PURE__ */ u4("div", { children: [
     /* @__PURE__ */ u4(
       "div",
@@ -3713,33 +4042,56 @@ function DescriptionViewer(props) {
           padding: "6px 8px",
           background: "var(--background-primary, #fff)"
         },
-        children: /* @__PURE__ */ u4(MarkdownView, { markdown: collapseNewlines(props.description), store: props.store })
+        children: props.description ? /* @__PURE__ */ u4(MarkdownView, { markdown: collapseNewlines(props.description), store: props.store }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)", fontStyle: "italic" }, children: "No description" })
       }
     ),
-    /* @__PURE__ */ u4(
-      "button",
-      {
-        onClick: () => {
-          showModal.value = true;
-        },
-        style: {
-          marginTop: "6px",
-          padding: "3px 12px",
-          border: "1px solid var(--background-modifier-border, #ccc)",
-          borderRadius: "4px",
-          background: "var(--background-secondary, #f5f5f5)",
-          cursor: "pointer",
-          fontSize: "11px",
-          color: "var(--text-muted, #666)"
-        },
-        children: "View full description"
-      }
-    ),
+    /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "6px", marginTop: "6px" }, children: [
+      props.description && /* @__PURE__ */ u4(
+        "button",
+        {
+          onClick: () => {
+            showModal.value = true;
+            startEdit.value = false;
+          },
+          style: {
+            padding: "3px 12px",
+            border: "1px solid var(--background-modifier-border, #ccc)",
+            borderRadius: "4px",
+            background: "var(--background-secondary, #f5f5f5)",
+            cursor: "pointer",
+            fontSize: "11px",
+            color: "var(--text-muted, #666)"
+          },
+          children: "View full description"
+        }
+      ),
+      props.taskId && /* @__PURE__ */ u4(
+        "button",
+        {
+          onClick: () => {
+            showModal.value = true;
+            startEdit.value = true;
+          },
+          style: {
+            padding: "3px 12px",
+            border: "1px solid var(--background-modifier-border, #ccc)",
+            borderRadius: "4px",
+            background: "var(--background-secondary, #f5f5f5)",
+            cursor: "pointer",
+            fontSize: "11px",
+            color: "var(--interactive-accent, #4A90D9)"
+          },
+          children: "Edit description"
+        }
+      )
+    ] }),
     showModal.value && /* @__PURE__ */ u4(
       DescriptionModal,
       {
         description: props.description,
         store: props.store,
+        taskId: props.taskId,
+        startEdit: startEdit.value,
         onClose: () => {
           showModal.value = false;
         }
@@ -3748,27 +4100,49 @@ function DescriptionViewer(props) {
   ] });
 }
 function TaskList(props) {
+  const panelWidth = props.width ?? 180;
   const totalRowsHeight = props.rowHeights.reduce((a4, b3) => a4 + b3, 0);
+  const scrollRef = A2(null);
+  const scrollGuard = A2(false);
+  y2(() => {
+    if (scrollRef.current && props.scrollTop !== void 0) {
+      scrollGuard.current = true;
+      scrollRef.current.scrollTop = props.scrollTop;
+      requestAnimationFrame(() => {
+        scrollGuard.current = false;
+      });
+    }
+  }, [props.scrollTop]);
+  function handleScroll(e4) {
+    if (scrollGuard.current)
+      return;
+    const el = e4.currentTarget;
+    props.onScroll?.(el.scrollTop);
+  }
   return /* @__PURE__ */ u4(
     "div",
     {
       class: "gantt-task-list",
       style: {
-        width: `${LEFT_PANEL_WIDTH}px`,
-        minWidth: `${LEFT_PANEL_WIDTH}px`,
-        overflow: "hidden",
+        width: `${panelWidth}px`,
+        minWidth: `${panelWidth}px`,
+        display: "flex",
+        flexDirection: "column",
         borderRight: "1px solid var(--gantt-grid-line-week, #c0c0c0)"
       },
       children: [
-        /* @__PURE__ */ u4("div", { style: { height: "44px", borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)", display: "flex", alignItems: "center", paddingLeft: "8px", paddingRight: "8px", background: "var(--background-primary, #ffffff)", position: "relative", zIndex: 1 }, children: props.headerContent }),
+        /* @__PURE__ */ u4("div", { style: { height: "44px", borderBottom: "1px solid var(--gantt-grid-line-day, #e0e0e0)", display: "flex", alignItems: "center", paddingLeft: "8px", paddingRight: "8px", background: "var(--background-primary, #ffffff)", flexShrink: 0 }, children: props.headerContent }),
         /* @__PURE__ */ u4(
           "div",
           {
+            ref: scrollRef,
             style: {
-              height: `${totalRowsHeight}px`,
-              transform: props.scrollTop ? `translateY(-${props.scrollTop}px)` : void 0
+              flex: 1,
+              overflowY: "auto",
+              overflowX: "hidden"
             },
-            children: props.labels.map((label, i5) => {
+            onScroll: handleScroll,
+            children: /* @__PURE__ */ u4("div", { style: { height: `${totalRowsHeight}px` }, children: props.labels.map((label, i5) => {
               const isHighlighted = props.highlightedRowKeys?.has(label.key) ?? false;
               const isDimmed = props.dimmedRowKeys?.has(label.key) ?? false;
               const isSelected = props.selectedRowKey === label.key;
@@ -3839,7 +4213,7 @@ function TaskList(props) {
                 },
                 label.key
               );
-            })
+            }) })
           }
         )
       ]
@@ -3848,7 +4222,7 @@ function TaskList(props) {
 }
 function Timeline(props) {
   const containerRef = A2(null);
-  const { store, groups, scrollLeft, scrollTop } = props;
+  const { store: store2, groups, scrollLeft, scrollTop } = props;
   const paneType = props.groupKeyField === "personId" ? "person" : "project";
   const viewportWidth = useSignal(800);
   y2(() => {
@@ -3935,15 +4309,8 @@ function Timeline(props) {
   }, [scrollTop]);
   const taskBars = [];
   const groupLayout = [];
-  const DEFAULT_COLORS = ["#4A90D9", "#7B61F8", "#E06C75", "#61AFEF", "#98C379", "#E5C07B", "#C678DD", "#56B6C2"];
-  function getDefaultColor(id) {
-    let hash = 0;
-    for (let i5 = 0; i5 < id.length; i5++)
-      hash = (hash << 5) - hash + id.charCodeAt(i5);
-    return DEFAULT_COLORS[Math.abs(hash) % DEFAULT_COLORS.length];
-  }
   const projectColorMap = /* @__PURE__ */ new Map();
-  for (const p5 of store.projects.value) {
+  for (const p5 of store2.projects.value) {
     if (p5.id) {
       projectColorMap.set(p5.id, p5.color || getDefaultColor(p5.id));
     }
@@ -4006,8 +4373,8 @@ function Timeline(props) {
     }
   }
   const totalHeight = groupLayout.length > 0 ? groupLayout[groupLayout.length - 1].startY + groupLayout[groupLayout.length - 1].height : 0;
-  const highlightedIds = store.highlightedTaskIds.value;
-  const hasSelection = store.selectedEntity.value !== null;
+  const highlightedIds = store2.highlightedTaskIds.value;
+  const hasSelection = store2.selectedEntity.value !== null;
   const gridAbsAligned = Math.floor((bodyOriginPx + scrollLeft - GRID_BUFFER_PX) / DAY_WIDTH2) * DAY_WIDTH2;
   const gridLeft = gridAbsAligned - bodyOriginPx;
   const headerTranslateX = gridLeft - scrollLeft;
@@ -4020,7 +4387,7 @@ function Timeline(props) {
         viewportWidth: viewportWidth.value,
         bufferPx: GRID_BUFFER_PX,
         bodyOriginPx,
-        holidayConfig: store.holidayConfig.value
+        holidayConfig: store2.holidayConfig.value
       }
     ) }),
     /* @__PURE__ */ u4(
@@ -4061,7 +4428,7 @@ function Timeline(props) {
               height: `${totalHeight}px`
             },
             children: [
-              /* @__PURE__ */ u4(TimelineGrid, { dayWidth: DAY_WIDTH2, scrollLeft, viewportWidth: viewportWidth.value, bufferPx: GRID_BUFFER_PX, bodyOriginPx, holidayConfig: store.holidayConfig.value }),
+              /* @__PURE__ */ u4(TimelineGrid, { dayWidth: DAY_WIDTH2, scrollLeft, viewportWidth: viewportWidth.value, bufferPx: GRID_BUFFER_PX, bodyOriginPx, holidayConfig: store2.holidayConfig.value }),
               /* @__PURE__ */ u4(
                 TodayLine,
                 {
@@ -4075,7 +4442,7 @@ function Timeline(props) {
                   return null;
                 const isHighlighted = props.highlightedRowKeys.has(group.key);
                 const isDimmed = props.dimmedRowKeys.has(group.key);
-                const isSelectedRow = paneType === "project" && group.key === store.selectedProjectId.value;
+                const isSelectedRow = paneType === "project" && group.key === store2.selectedProjectId.value;
                 const dragHovering = dragState.value?.currentPersonId != null && (dragState.value.currentPersonId === group.key || dragState.value.currentPersonId === null && group.key === "__unassigned__");
                 return /* @__PURE__ */ u4(
                   "div",
@@ -4112,7 +4479,7 @@ function Timeline(props) {
                     width,
                     color,
                     isHighlighted: highlightedIds.has(task.id),
-                    isSelected: task.id === store.selectedTaskId.value,
+                    isSelected: task.id === store2.selectedTaskId.value,
                     isDimmed: hasSelection && !highlightedIds.has(task.id) || paneType === "person" && props.filterDimmedTaskIds.has(task.id),
                     progress: task.progress.value
                   },
@@ -4124,7 +4491,7 @@ function Timeline(props) {
                   endDate: task.endDate.value,
                   bodyOriginPx,
                   dayWidth: DAY_WIDTH2,
-                  holidayConfig: store.holidayConfig.value
+                  holidayConfig: store2.holidayConfig.value
                 },
                 task.id
               )),
@@ -4135,10 +4502,10 @@ function Timeline(props) {
                 const projectId = group.projectId;
                 if (!projectId || projectId === "__no_project__")
                   return null;
-                const project = store.mergedProjects.value.find((p5) => p5.id === projectId);
+                const project = store2.mergedProjects.value.find((p5) => p5.id === projectId);
                 if (!project?.keyDates?.length)
                   return null;
-                return project.keyDates.map((kd, ki) => /* @__PURE__ */ u4(
+                return [...project.keyDates].sort((a4, b3) => a4.date.localeCompare(b3.date)).map((kd, ki) => /* @__PURE__ */ u4(
                   KeyDateMarker,
                   {
                     leftPx: originToBody(dateToPx2(kd.date)),
@@ -4182,7 +4549,7 @@ function Timeline(props) {
                 const barHeight = ROW_HEIGHT2 * 0.6;
                 const ghostLayout = groupLayout[ds.rowIndex];
                 const barTop = ghostLayout ? ghostLayout.startY + (ROW_HEIGHT2 - barHeight) / 2 : ds.rowIndex * ROW_HEIGHT2 + (ROW_HEIGHT2 - barHeight) / 2;
-                const ghostTask = store.mergedTasks.value.find((t4) => t4.id === ds.taskId);
+                const ghostTask = store2.mergedTasks.value.find((t4) => t4.id === ds.taskId);
                 const ghostTitle = ghostTask?.title.value ?? "";
                 return /* @__PURE__ */ u4(
                   "div",
@@ -4220,16 +4587,19 @@ function Timeline(props) {
   ] });
 }
 function GanttPane(props) {
-  const { store, type } = props;
-  const rawGroups = type === "person" ? store.personGroups.value : store.projectGroups.value;
+  const { store: store2, type } = props;
+  const rawGroups = type === "person" ? store2.personGroups.value : store2.projectGroups.value;
   const showPosEditor = useSignal(false);
   const posEditorItems = useSignal([]);
   const posEditorButtonRef = A2(null);
   const posDragIndex = useSignal(null);
   const posDragOverIndex = useSignal(null);
-  const filterMatches = store.filteredProjectGroupKeys.value;
+  const isResizingSidebar = useSignal(false);
+  let taskListVGuardActive = false;
+  let taskListVGuardTimer = null;
+  const filterMatches = store2.filteredProjectGroupKeys.value;
   const filterActive = filterMatches !== null;
-  const filterDimmedIds = store.filterDimmedTaskIds.value;
+  const filterDimmedIds = store2.filterDimmedTaskIds.value;
   const groups = filterActive && type === "project" ? rawGroups.filter((g3) => filterMatches.has(g3.projectId)) : rawGroups;
   const paneType = type;
   const labels = T2(
@@ -4251,8 +4621,8 @@ function GanttPane(props) {
         name: g3.projectName,
         color: g3.color,
         tooltip: void 0,
-        tags: store.mergedProjects.value.find((p5) => p5.id === key)?.tags,
-        tagColors: new Map(store.tagDefinitions.value.map((t4) => [t4.name, t4.color]))
+        tags: store2.mergedProjects.value.find((p5) => p5.id === key)?.tags,
+        tagColors: new Map(store2.tagDefinitions.value.map((t4) => [t4.name, t4.color]))
       };
     }),
     [groups]
@@ -4291,8 +4661,8 @@ function GanttPane(props) {
       return ROW_HEIGHT2 + (Math.max(1, lanes.length) - 1) * LANE_OFFSET2;
     });
   }, [groups]);
-  const highlightedIds = store.highlightedTaskIds.value;
-  const hasSelection = store.selectedEntity.value !== null;
+  const highlightedIds = store2.highlightedTaskIds.value;
+  const hasSelection = store2.selectedEntity.value !== null;
   const highlightedRowKeys = T2(() => {
     if (!hasSelection)
       return /* @__PURE__ */ new Set();
@@ -4318,13 +4688,32 @@ function GanttPane(props) {
   }, [groups, highlightedRowKeys, hasSelection]);
   function handleRowClick(key) {
     if (type === "person") {
-      store.selectEntity({ type: "person", id: key });
+      store2.selectEntity({ type: "person", id: key });
     } else {
-      store.selectEntity({ type: "project", id: key });
+      store2.selectEntity({ type: "project", id: key });
     }
   }
   function handleTaskClick(taskId) {
-    store.selectEntity({ type: "task", id: taskId });
+    store2.selectEntity({ type: "task", id: taskId });
+  }
+  function handleSidebarResizePointerDown(e4) {
+    e4.preventDefault();
+    isResizingSidebar.value = true;
+    const startX = e4.clientX;
+    const startWidth = store2.leftPanelWidth.value;
+    function onMove(ev) {
+      const dx = ev.clientX - startX;
+      const newWidth = Math.min(400, Math.max(120, startWidth + dx));
+      store2.leftPanelWidth.value = newWidth;
+    }
+    function onUp() {
+      isResizingSidebar.value = false;
+      store2.saveSettings();
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    }
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
   }
   return /* @__PURE__ */ u4("div", { class: "gantt-pane", style: { display: "flex", flex: 1, overflow: "hidden" }, children: [
     /* @__PURE__ */ u4(
@@ -4335,18 +4724,34 @@ function GanttPane(props) {
         scrollTop: props.scrollTop,
         highlightedRowKeys,
         dimmedRowKeys,
-        selectedRowKey: type === "project" ? store.selectedProjectId.value : null,
+        selectedRowKey: type === "project" ? store2.selectedProjectId.value : store2.selectedEntity.value?.type === "person" ? store2.selectedEntity.value.id : null,
         onRowClick: handleRowClick,
+        width: store2.leftPanelWidth.value,
+        onScroll: (st) => {
+          if (taskListVGuardActive)
+            return;
+          taskListVGuardActive = true;
+          if (type === "person") {
+            store2.personScrollTop.value = st;
+          } else {
+            store2.projectScrollTop.value = st;
+          }
+          if (taskListVGuardTimer)
+            clearTimeout(taskListVGuardTimer);
+          taskListVGuardTimer = setTimeout(() => {
+            taskListVGuardActive = false;
+          }, 100);
+        },
         headerContent: type === "person" ? /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }, children: [
           /* @__PURE__ */ u4(
             "button",
             {
               class: "gantt-sort-toggle",
               onClick: () => {
-                store.personSortMode.value = store.personSortMode.value === "name" ? "position" : "name";
-                store.saveSettings();
+                store2.personSortMode.value = store2.personSortMode.value === "name" ? "position" : "name";
+                store2.saveSettings();
               },
-              title: `Sort: ${store.personSortMode.value === "name" ? "by name" : "by position"}`,
+              title: `Sort: ${store2.personSortMode.value === "name" ? "by name" : "by position"}`,
               style: {
                 padding: "2px 8px",
                 border: "1px solid var(--background-modifier-border, #ccc)",
@@ -4358,11 +4763,11 @@ function GanttPane(props) {
               },
               children: [
                 "Sort: ",
-                store.personSortMode.value === "name" ? "Name" : "Position"
+                store2.personSortMode.value === "name" ? "Name" : "Position"
               ]
             }
           ),
-          store.personSortMode.value === "position" && /* @__PURE__ */ u4("div", { style: { position: "relative" }, children: /* @__PURE__ */ u4(
+          store2.personSortMode.value === "position" && /* @__PURE__ */ u4("div", { style: { position: "relative" }, children: /* @__PURE__ */ u4(
             "button",
             {
               ref: posEditorButtonRef,
@@ -4371,7 +4776,7 @@ function GanttPane(props) {
                   showPosEditor.value = false;
                   return;
                 }
-                const existing = new Set(store.positionOrder.value);
+                const existing = new Set(store2.positionOrder.value);
                 for (const g3 of rawGroups) {
                   const pg = g3;
                   if (pg.position)
@@ -4399,10 +4804,10 @@ function GanttPane(props) {
             {
               class: "gantt-sort-toggle",
               onClick: () => {
-                store.projectSortMode.value = store.projectSortMode.value === "name" ? "time" : "name";
-                store.saveSettings();
+                store2.projectSortMode.value = store2.projectSortMode.value === "name" ? "time" : "name";
+                store2.saveSettings();
               },
-              title: `Sort: ${store.projectSortMode.value === "name" ? "by name" : "by time"}`,
+              title: `Sort: ${store2.projectSortMode.value === "name" ? "by name" : "by time"}`,
               style: {
                 padding: "2px 8px",
                 border: "1px solid var(--background-modifier-border, #ccc)",
@@ -4414,20 +4819,20 @@ function GanttPane(props) {
               },
               children: [
                 "Sort: ",
-                store.projectSortMode.value === "name" ? "Name" : "Time"
+                store2.projectSortMode.value === "name" ? "Name" : "Time"
               ]
             }
           ),
-          store.projectSortMode.value === "time" && /* @__PURE__ */ u4(
+          store2.projectSortMode.value === "time" && /* @__PURE__ */ u4(
             "input",
             {
               type: "text",
-              value: store.projectSortKeyDates.value.join(", "),
+              value: store2.projectSortKeyDates.value.join(", "),
               onInput: (e4) => {
                 const raw = e4.target.value;
                 const names = raw.split(/[,，]/).map((s5) => s5.trim()).filter(Boolean);
-                store.projectSortKeyDates.value = names.length > 0 ? names : ["\u4E0A\u7EBF\u65F6\u95F4"];
-                store.saveSettings();
+                store2.projectSortKeyDates.value = names.length > 0 ? names : ["\u4E0A\u7EBF\u65F6\u95F4"];
+                store2.saveSettings();
               },
               title: "Key date names for sort priority (comma-separated)",
               placeholder: "\u4E0A\u7EBF\u65F6\u95F4",
@@ -4446,9 +4851,23 @@ function GanttPane(props) {
       }
     ),
     /* @__PURE__ */ u4(
+      "div",
+      {
+        class: "gantt-sidebar-resize-handle",
+        style: {
+          width: "4px",
+          cursor: "col-resize",
+          background: isResizingSidebar.value ? "var(--interactive-accent, #4A90D9)" : "var(--background-modifier-border, #ccc)",
+          flexShrink: 0,
+          transition: isResizingSidebar.value ? "none" : "background 0.15s"
+        },
+        onPointerDown: handleSidebarResizePointerDown
+      }
+    ),
+    /* @__PURE__ */ u4(
       Timeline,
       {
-        store,
+        store: store2,
         groups,
         groupKeyField: type === "person" ? "personId" : "projectId",
         scrollLeft: props.scrollLeft,
@@ -4456,7 +4875,7 @@ function GanttPane(props) {
         onScroll: props.onScroll,
         highlightedRowKeys,
         dimmedRowKeys,
-        filterDimmedTaskIds: type === "person" ? store.filterDimmedTaskIds.value : /* @__PURE__ */ new Set(),
+        filterDimmedTaskIds: type === "person" ? store2.filterDimmedTaskIds.value : /* @__PURE__ */ new Set(),
         onRowClick: handleRowClick,
         onTaskClick: handleTaskClick,
         onTaskPointerDown: props.onTaskPointerDown,
@@ -4558,8 +4977,8 @@ function GanttPane(props) {
                     "button",
                     {
                       onClick: () => {
-                        store.positionOrder.value = posEditorItems.value;
-                        store.saveSettings();
+                        store2.positionOrder.value = posEditorItems.value;
+                        store2.saveSettings();
                         showPosEditor.value = false;
                       },
                       style: {
@@ -4620,7 +5039,69 @@ function GanttPane(props) {
     )
   ] });
 }
-var PRESET_COLORS = ["#E06C75", "#61AFEF", "#98C379", "#E5C07B", "#C678DD", "#56B6C2", "#D19A66", "#4A90D9"];
+function ColorSwatchPicker(props) {
+  const palette = props.colors ?? PRESET_COLORS;
+  const showCustom = useSignal(false);
+  return /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: [
+    /* @__PURE__ */ u4("div", { style: {
+      display: "grid",
+      gridTemplateColumns: `repeat(${palette[0]?.length ?? 7}, 14px)`,
+      gap: "3px"
+    }, children: palette.flat().map((c4) => /* @__PURE__ */ u4(
+      "button",
+      {
+        onClick: () => props.onChange(c4),
+        title: c4,
+        style: {
+          width: "14px",
+          height: "14px",
+          borderRadius: "2px",
+          background: c4,
+          border: props.value === c4 ? "2px solid var(--text-normal, #333)" : "1px solid var(--background-modifier-border, #ccc)",
+          cursor: "pointer",
+          padding: 0,
+          outline: props.value === c4 ? `2px solid ${c4}` : "none",
+          outlineOffset: "1px"
+        }
+      },
+      c4
+    )) }),
+    /* @__PURE__ */ u4(
+      "button",
+      {
+        onClick: () => {
+          showCustom.value = !showCustom.value;
+        },
+        style: {
+          padding: "2px 6px",
+          border: "1px solid var(--background-modifier-border, #ccc)",
+          borderRadius: "3px",
+          background: "transparent",
+          cursor: "pointer",
+          fontSize: "10px",
+          color: "var(--text-muted, #999)",
+          alignSelf: "flex-start"
+        },
+        children: showCustom.value ? "Hide custom" : "Custom..."
+      }
+    ),
+    showCustom.value && /* @__PURE__ */ u4(
+      "input",
+      {
+        type: "color",
+        value: props.value,
+        onInput: (e4) => props.onChange(e4.target.value),
+        style: { width: "100%", height: "28px", padding: 0, border: "none", cursor: "pointer" }
+      }
+    )
+  ] });
+}
+var PRESET_COLORS = [
+  ["#C0392B", "#D35400", "#D4AC0D", "#1E8449", "#148F77", "#2471A3", "#7D3C98"],
+  ["#E74C3C", "#E67E22", "#F1C40F", "#2ECC71", "#1ABC9C", "#3498DB", "#9B59B6"],
+  ["#F1948A", "#F0B27A", "#F7DC6F", "#82E0AA", "#76D7C4", "#85C1E9", "#C39BD3"],
+  ["#FADBD8", "#FDEBD0", "#FEF9E7", "#D5F5E3", "#D1F2EB", "#D6EAF8", "#E8DAEF"]
+];
 var KEY_DATE_PRESETS = [
   { name: "\u9A8C\u6536\u65F6\u95F4", color: "#98C379", icon: "check" },
   { name: "\u4E0A\u7EBF\u65F6\u95F4", color: "#61AFEF", icon: "triangle" },
@@ -4724,20 +5205,49 @@ function UnassignedPanel(props) {
   );
 }
 function ProjectDetail(props) {
-  const { store } = props;
-  const sel = store.selectedEntity.value;
+  const { store: store2 } = props;
+  const sel = store2.selectedEntity.value;
   const editing = useSignal(false);
   const copiedKey = useSignal(null);
   if (!sel || sel.type !== "project")
     return null;
-  const project = store.mergedProjects.value.find((p5) => p5.id === sel.id);
+  const project = store2.mergedProjects.value.find((p5) => p5.id === sel.id);
   if (!project)
     return null;
-  const projectOverrides = store.edits.value?.projectOverrides?.[project.id];
+  const projectOverrides = store2.edits.value?.projectOverrides?.[project.id];
   const description = projectOverrides?.description ?? project.description ?? "";
   const requester = projectOverrides?.requester ?? project.requester ?? "";
   const keyDates = projectOverrides?.keyDates ?? project.keyDates ?? [];
   const keyLinks = projectOverrides?.keyLinks ?? project.keyLinks ?? [];
+  const projectDetail = useSignal(null);
+  const projectDetailLoading = useSignal(false);
+  y2(() => {
+    let connectorId = null;
+    for (const cache of store2.caches.value) {
+      if (cache.projects.some((p5) => p5.id === project.id)) {
+        connectorId = cache.connectorId;
+        break;
+      }
+    }
+    if (!connectorId)
+      return;
+    let cancelled = false;
+    projectDetailLoading.value = true;
+    store2.fetchEntityDetail(project.id, "project", connectorId).then((data) => {
+      if (!cancelled && data)
+        projectDetail.value = data;
+    }).finally(() => {
+      if (!cancelled)
+        projectDetailLoading.value = false;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id]);
+  const displayDescription = projectDetail.value?.description ?? description;
+  const displayRequester = projectDetail.value?.requester ?? requester;
+  const displayKeyDates = projectDetail.value?.keyDates ?? keyDates;
+  const displayKeyLinks = projectDetail.value?.keyLinks ?? keyLinks;
   const editName = useSignal(false);
   const editNameValue = useSignal(project.name);
   let nameInputRef = null;
@@ -4749,7 +5259,7 @@ function ProjectDetail(props) {
   function saveName() {
     const newName = editNameValue.value.trim();
     if (newName && newName !== project.name) {
-      store.persistProjectEdit(project.id, "name", newName);
+      store2.persistProjectEdit(project.id, "name", newName);
     }
     editName.value = false;
   }
@@ -4769,7 +5279,7 @@ function ProjectDetail(props) {
       cancelName();
     }
   }
-  const associatedTasks = store.mergedTasks.value.filter((t4) => t4.projectId.value === project.id);
+  const associatedTasks = store2.mergedTasks.value.filter((t4) => t4.projectId.value === project.id);
   const editDescription = useSignal(description);
   const editRequester = useSignal(requester);
   const editKeyDates = useSignal(
@@ -4783,19 +5293,21 @@ function ProjectDetail(props) {
   const editTagInput = useSignal("");
   const editTagInputRef = A2(null);
   const iconPickerOpen = useSignal(null);
+  const colorPickerOpen = useSignal(null);
+  const showProjectColorPicker = useSignal(false);
   const knownTags = T2(() => {
     const set = /* @__PURE__ */ new Set();
-    for (const p5 of store.mergedProjects.value) {
+    for (const p5 of store2.mergedProjects.value) {
       for (const t4 of p5.tags ?? [])
         set.add(t4);
     }
-    const defs = store.tagDefinitions?.value;
+    const defs = store2.tagDefinitions?.value;
     if (defs) {
       for (const d4 of defs)
         set.add(d4.name);
     }
     return [...set].sort();
-  }, [store.mergedProjects.value]);
+  }, [store2.mergedProjects.value]);
   function addTag() {
     const tag = editTagInput.value.trim();
     if (!tag || editTags.value.includes(tag))
@@ -4823,16 +5335,16 @@ function ProjectDetail(props) {
     editing.value = true;
   }
   async function handleSave() {
-    await store.persistProjectEdit(project.id, "description", editDescription.value || void 0);
-    await store.persistProjectEdit(project.id, "requester", editRequester.value || void 0);
-    await store.persistProjectEdit(project.id, "keyDates", editKeyDates.value.length > 0 ? editKeyDates.value.map((kd) => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon })) : void 0);
-    await store.persistProjectEdit(project.id, "keyLinks", editKeyLinks.value.length > 0 ? editKeyLinks.value : void 0);
-    await store.persistProjectEdit(project.id, "tags", editTags.value.length > 0 ? editTags.value : void 0);
-    const existingNames = new Set(store.tagDefinitions.value.map((t4) => t4.name));
-    const presetColors = ["#E06C75", "#61AFEF", "#98C379", "#E5C07B", "#C678DD", "#56B6C2", "#D19A66", "#4A90D9"];
+    await store2.persistProjectEdit(project.id, "description", editDescription.value || void 0);
+    await store2.persistProjectEdit(project.id, "requester", editRequester.value || void 0);
+    await store2.persistProjectEdit(project.id, "keyDates", editKeyDates.value.length > 0 ? editKeyDates.value.map((kd) => ({ name: kd.name, date: kd.date, color: kd.color, icon: kd.icon })) : void 0);
+    await store2.persistProjectEdit(project.id, "keyLinks", editKeyLinks.value.length > 0 ? editKeyLinks.value : void 0);
+    await store2.persistProjectEdit(project.id, "tags", editTags.value.length > 0 ? editTags.value : void 0);
+    const existingNames = new Set(store2.tagDefinitions.value.map((t4) => t4.name));
+    const flatColors = PRESET_COLORS.flat();
     for (const tag of editTags.value) {
       if (!existingNames.has(tag)) {
-        await store.createTag(tag, presetColors[Math.floor(Math.random() * presetColors.length)]);
+        await store2.createTag(tag, flatColors[Math.floor(Math.random() * flatColors.length)]);
         existingNames.add(tag);
       }
     }
@@ -4849,7 +5361,7 @@ function ProjectDetail(props) {
     {
       class: "gantt-detail-panel",
       style: {
-        width: `${store.detailPanelWidth.value}px`,
+        width: `${store2.detailPanelWidth.value}px`,
         minWidth: "180px",
         maxHeight: "100%",
         borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
@@ -4862,13 +5374,47 @@ function ProjectDetail(props) {
       children: [
         /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }, children: [
           /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px", flex: 1 }, children: [
-            project.color && /* @__PURE__ */ u4("span", { style: {
-              width: "12px",
-              height: "12px",
-              borderRadius: "3px",
-              background: project.color,
-              flexShrink: 0
-            } }),
+            /* @__PURE__ */ u4("div", { style: { position: "relative", flexShrink: 0 }, children: [
+              /* @__PURE__ */ u4(
+                "button",
+                {
+                  onClick: () => {
+                    showProjectColorPicker.value = !showProjectColorPicker.value;
+                  },
+                  title: "Change project color",
+                  style: {
+                    width: "12px",
+                    height: "12px",
+                    borderRadius: "3px",
+                    background: project.color ?? getDefaultColor(project.id),
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    cursor: "pointer",
+                    padding: 0
+                  }
+                }
+              ),
+              showProjectColorPicker.value && /* @__PURE__ */ u4("div", { style: {
+                position: "absolute",
+                top: "100%",
+                left: 0,
+                zIndex: 100,
+                background: "var(--background-primary, #fff)",
+                border: "1px solid var(--background-modifier-border, #ccc)",
+                borderRadius: "4px",
+                padding: "6px",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                marginTop: "4px"
+              }, children: /* @__PURE__ */ u4(
+                ColorSwatchPicker,
+                {
+                  value: project.color ?? getDefaultColor(project.id),
+                  onChange: (c4) => {
+                    store2.persistProjectEdit(project.id, "color", c4);
+                    showProjectColorPicker.value = false;
+                  }
+                }
+              ) })
+            ] }),
             editName.value ? /* @__PURE__ */ u4(
               "input",
               {
@@ -4982,7 +5528,7 @@ function ProjectDetail(props) {
               "button",
               {
                 onClick: () => {
-                  store.locateTarget.value = { type: "project", id: project.id };
+                  store2.locateTarget.value = { type: "project", id: project.id };
                 },
                 title: "Scroll to project",
                 style: {
@@ -5001,7 +5547,7 @@ function ProjectDetail(props) {
             /* @__PURE__ */ u4(
               "button",
               {
-                onClick: () => store.selectEntity(null),
+                onClick: () => store2.selectEntity(null),
                 title: "Close detail panel",
                 style: {
                   padding: "2px 4px",
@@ -5024,7 +5570,7 @@ function ProjectDetail(props) {
             "select",
             {
               value: projectOverrides?.status ?? project.status ?? "pending",
-              onChange: (e4) => store.setProjectStatus(project.id, e4.target.value),
+              onChange: (e4) => store2.setProjectStatus(project.id, e4.target.value),
               style: {
                 width: "100%",
                 fontSize: "12px",
@@ -5184,7 +5730,7 @@ function ProjectDetail(props) {
               },
               placeholder: "Project description..."
             }
-          ) : description ? /* @__PURE__ */ u4(DescriptionViewer, { description, store }) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" })
+          ) : description ? /* @__PURE__ */ u4(DescriptionViewer, { description: displayDescription, store: store2 }) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "\u2014" })
         ] }),
         /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
           /* @__PURE__ */ u4("div", { style: labelStyle, children: "Requester" }),
@@ -5208,7 +5754,7 @@ function ProjectDetail(props) {
               },
               placeholder: "Stakeholder or department..."
             }
-          ) : /* @__PURE__ */ u4("div", { style: valueStyle, children: requester || "\u2014" })
+          ) : /* @__PURE__ */ u4("div", { style: valueStyle, children: displayRequester || "\u2014" })
         ] }),
         /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
           /* @__PURE__ */ u4("div", { style: labelStyle, children: "Key Dates" }),
@@ -5252,20 +5798,47 @@ function ProjectDetail(props) {
               preset.name
             )) }),
             editKeyDates.value.map((kd, i5) => /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "3px", alignItems: "center" }, children: [
-              /* @__PURE__ */ u4(
-                "input",
-                {
-                  type: "color",
-                  value: kd.color ?? "#E5C07B",
-                  onInput: (e4) => {
-                    const next = [...editKeyDates.value];
-                    next[i5] = { ...next[i5], color: e4.target.value };
-                    editKeyDates.value = next;
-                  },
-                  title: "Marker color",
-                  style: { width: "22px", height: "22px", padding: "0", border: "none", borderRadius: "3px", cursor: "pointer", flexShrink: 0 }
-                }
-              ),
+              /* @__PURE__ */ u4("div", { style: { position: "relative", flexShrink: 0 }, children: [
+                /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: () => {
+                      colorPickerOpen.value = colorPickerOpen.value === i5 ? null : i5;
+                    },
+                    title: kd.color ?? "#E5C07B",
+                    style: {
+                      width: "22px",
+                      height: "22px",
+                      padding: 0,
+                      border: "none",
+                      borderRadius: "3px",
+                      cursor: "pointer",
+                      background: kd.color ?? "#E5C07B"
+                    }
+                  }
+                ),
+                colorPickerOpen.value === i5 && /* @__PURE__ */ u4("div", { style: {
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  zIndex: 100,
+                  background: "var(--background-primary, #fff)",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "4px",
+                  padding: "6px",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.15)"
+                }, children: /* @__PURE__ */ u4(
+                  ColorSwatchPicker,
+                  {
+                    value: kd.color ?? "#E5C07B",
+                    onChange: (c4) => {
+                      const next = [...editKeyDates.value];
+                      next[i5] = { ...next[i5], color: c4 };
+                      editKeyDates.value = next;
+                    }
+                  }
+                ) })
+              ] }),
               /* @__PURE__ */ u4("div", { style: { position: "relative", flexShrink: 0 }, children: [
                 /* @__PURE__ */ u4(
                   "button",
@@ -5385,9 +5958,9 @@ function ProjectDetail(props) {
                     editKeyDates.value = next;
                   },
                   style: {
-                    width: "110px",
+                    width: "130px",
                     fontSize: "11px",
-                    padding: "3px",
+                    padding: "3px 6px 3px 22px",
                     borderRadius: "3px",
                     flexShrink: 0,
                     border: "1px solid var(--background-modifier-border, #ccc)",
@@ -5435,7 +6008,7 @@ function ProjectDetail(props) {
                 children: "+ Custom Key Date"
               }
             )
-          ] }) : /* @__PURE__ */ u4("div", { children: keyDates.length > 0 ? keyDates.map((kd, i5) => /* @__PURE__ */ u4("div", { style: { fontSize: "12px", padding: "2px 0", display: "flex", gap: "6px", alignItems: "center" }, children: [
+          ] }) : /* @__PURE__ */ u4("div", { children: displayKeyDates.length > 0 ? [...displayKeyDates].sort((a4, b3) => a4.date.localeCompare(b3.date)).map((kd, i5) => /* @__PURE__ */ u4("div", { style: { fontSize: "12px", padding: "2px 0", display: "flex", gap: "6px", alignItems: "center" }, children: [
             /* @__PURE__ */ u4("span", { style: {
               display: "inline-block",
               width: "10px",
@@ -5538,7 +6111,7 @@ function ProjectDetail(props) {
                 children: "+ Add Link"
               }
             )
-          ] }) : /* @__PURE__ */ u4("div", { children: keyLinks.length > 0 ? keyLinks.map((kl, i5) => /* @__PURE__ */ u4("div", { style: { fontSize: "12px", padding: "2px 0", display: "flex", alignItems: "center", gap: "4px" }, children: [
+          ] }) : /* @__PURE__ */ u4("div", { children: displayKeyLinks.length > 0 ? displayKeyLinks.map((kl, i5) => /* @__PURE__ */ u4("div", { style: { fontSize: "12px", padding: "2px 0", display: "flex", alignItems: "center", gap: "4px" }, children: [
             /* @__PURE__ */ u4(
               "a",
               {
@@ -5547,7 +6120,7 @@ function ProjectDetail(props) {
                 rel: "noopener noreferrer",
                 onClick: (e4) => {
                   e4.preventDefault();
-                  const platform = store._platform;
+                  const platform = store2._platform;
                   if (platform?.openExternal) {
                     platform.openExternal(kl.url);
                   } else {
@@ -5617,28 +6190,59 @@ function ProjectDetail(props) {
             associatedTasks.length,
             ")"
           ] }),
-          associatedTasks.length > 0 ? /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "2px" }, children: associatedTasks.map((t4) => /* @__PURE__ */ u4(
-            "div",
-            {
-              onClick: () => store.selectEntity({ type: "task", id: t4.id }),
-              style: {
-                fontSize: "12px",
-                padding: "3px 6px",
-                cursor: "pointer",
-                borderRadius: "4px",
-                display: "flex",
-                alignItems: "center",
-                gap: "6px"
+          associatedTasks.length === 0 ? /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)", fontStyle: "italic" }, children: "No tasks" }) : /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: associatedTasks.map((t4) => {
+            const assignee = t4.personId.value ? store2.persons.value.find((p5) => p5.id === t4.personId.value) : null;
+            return /* @__PURE__ */ u4(
+              "div",
+              {
+                onClick: () => store2.selectEntity({ type: "task", id: t4.id }),
+                style: {
+                  padding: "6px 8px",
+                  border: "1px solid var(--background-modifier-border, #e0e0e0)",
+                  borderRadius: "4px",
+                  background: "var(--background-primary, #fff)",
+                  cursor: "pointer",
+                  fontSize: "12px"
+                },
+                children: [
+                  /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px", marginBottom: "2px" }, children: [
+                    /* @__PURE__ */ u4(StatusBadge, { status: t4.status.value }),
+                    /* @__PURE__ */ u4("span", { style: { fontWeight: 500, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: t4.title.value }),
+                    /* @__PURE__ */ u4(
+                      "button",
+                      {
+                        onClick: (e4) => {
+                          e4.stopPropagation();
+                          store2.locateTarget.value = { type: "task", id: t4.id };
+                        },
+                        title: "Locate task",
+                        style: {
+                          padding: "1px 3px",
+                          border: "none",
+                          borderRadius: "3px",
+                          background: "transparent",
+                          cursor: "pointer",
+                          color: "var(--text-muted, #999)",
+                          lineHeight: 1,
+                          flexShrink: 0
+                        },
+                        children: /* @__PURE__ */ u4(Icon, { name: "target", size: 12 })
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "12px", fontSize: "11px", color: "var(--text-muted, #999)" }, children: [
+                    t4.startDate.value && t4.endDate.value ? /* @__PURE__ */ u4("span", { children: [
+                      t4.startDate.value,
+                      " \u2192 ",
+                      t4.endDate.value
+                    ] }) : t4.startDate.value ? /* @__PURE__ */ u4("span", { children: t4.startDate.value }) : null,
+                    assignee && /* @__PURE__ */ u4("span", { style: { color: assignee.color }, children: assignee.name })
+                  ] })
+                ]
               },
-              class: "gantt-task-link-item",
-              title: "Click to view task details",
-              children: [
-                /* @__PURE__ */ u4(StatusBadge, { status: t4.status.value }),
-                /* @__PURE__ */ u4("span", { style: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: t4.title.value })
-              ]
-            },
-            t4.id
-          )) }) : /* @__PURE__ */ u4("div", { style: valueStyle, children: "No tasks" })
+              t4.id
+            );
+          }) })
         ] })
       ]
     }
@@ -5668,19 +6272,38 @@ function StatusBadge(props) {
   }, children: label });
 }
 function DetailPanel(props) {
-  const { store } = props;
-  const sel = store.selectedEntity.value;
+  const { store: store2 } = props;
+  const sel = store2.selectedEntity.value;
   if (!sel || sel.type !== "task")
     return null;
-  const task = store.mergedTasks.value.find((t4) => t4.id === sel.id);
+  const task = store2.mergedTasks.value.find((t4) => t4.id === sel.id);
   if (!task)
     return null;
-  const personName = task.personId.value ? store.persons.value.find((p5) => p5.id === task.personId.value)?.name ?? task.personId.value : null;
-  const project = task.projectId.value ? store.projects.value.find((p5) => p5.id === task.projectId.value) : null;
+  const personName = task.personId.value ? store2.persons.value.find((p5) => p5.id === task.personId.value)?.name ?? task.personId.value : null;
+  const project = task.projectId.value ? store2.projects.value.find((p5) => p5.id === task.projectId.value) : null;
   const editTitle = useSignal(false);
   const editTitleValue = useSignal(task.title.value);
   const copiedTask = useSignal(false);
   let titleInputRef = null;
+  const taskDetail = useSignal(null);
+  const taskDetailLoading = useSignal(false);
+  y2(() => {
+    const connectorId = task.connectorId;
+    if (!connectorId)
+      return;
+    let cancelled = false;
+    taskDetailLoading.value = true;
+    store2.fetchEntityDetail(task.upstreamId ?? task.id, "task", connectorId).then((data) => {
+      if (!cancelled && data)
+        taskDetail.value = data;
+    }).finally(() => {
+      if (!cancelled)
+        taskDetailLoading.value = false;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.id, task.connectorId]);
   const editing = useSignal(false);
   const editStartDate = useSignal(task.startDate.value ?? "");
   const editEndDate = useSignal(task.endDate.value ?? "");
@@ -5700,7 +6323,7 @@ function DetailPanel(props) {
   function saveTitle() {
     const newTitle = editTitleValue.value.trim();
     if (newTitle && newTitle !== task.title.value) {
-      store.persistEdit(task.id, "title", newTitle);
+      store2.persistEdit(task.id, "title", newTitle);
     }
     editTitle.value = false;
   }
@@ -5738,21 +6361,34 @@ function DetailPanel(props) {
     const t4 = task;
     const pid = t4.id;
     if (editStartDate.value !== (t4.startDate.value ?? ""))
-      store.persistEdit(pid, "startDate", editStartDate.value || null);
+      store2.persistEdit(pid, "startDate", editStartDate.value || null);
     if (editEndDate.value !== (t4.endDate.value ?? ""))
-      store.persistEdit(pid, "endDate", editEndDate.value || null);
+      store2.persistEdit(pid, "endDate", editEndDate.value || null);
     if (editProgress.value !== (t4.progress.value ?? 0))
-      store.persistEdit(pid, "progress", editProgress.value);
-    if (editPersonId.value !== (t4.personId.value ?? ""))
-      store.persistEdit(pid, "personId", editPersonId.value || null);
-    if (editProjectId.value !== (t4.projectId.value ?? ""))
-      store.persistEdit(pid, "projectId", editProjectId.value || null);
-    if (editUrl.value !== (t4.url.value ?? ""))
-      store.persistEdit(pid, "url", editUrl.value || null);
-    if (JSON.stringify(editDeps.value) !== JSON.stringify(t4.dependencies.value))
-      store.persistEdit(pid, "dependencies", editDeps.value);
-    if (JSON.stringify(editTags.value) !== JSON.stringify(t4.tags.value))
-      store.persistEdit(pid, "tags", editTags.value);
+      store2.persistEdit(pid, "progress", editProgress.value);
+    if (editPersonId.value !== (t4.personId.value ?? "")) {
+      store2.persistEdit(pid, "personId", editPersonId.value || null);
+      store2.saveFieldMemory("persons", editPersonId.value);
+    }
+    if (editProjectId.value !== (t4.projectId.value ?? "")) {
+      store2.persistEdit(pid, "projectId", editProjectId.value || null);
+      store2.saveFieldMemory("projects", editProjectId.value);
+    }
+    if (editUrl.value !== (t4.url.value ?? "")) {
+      store2.persistEdit(pid, "url", editUrl.value || null);
+      if (editUrl.value)
+        store2.saveFieldMemory("urls", editUrl.value);
+    }
+    if (JSON.stringify(editDeps.value) !== JSON.stringify(t4.dependencies.value)) {
+      store2.persistEdit(pid, "dependencies", editDeps.value);
+      for (const d4 of editDeps.value)
+        store2.saveFieldMemory("dependencies", d4);
+    }
+    if (JSON.stringify(editTags.value) !== JSON.stringify(t4.tags.value)) {
+      store2.persistEdit(pid, "tags", editTags.value);
+      for (const tag of editTags.value)
+        store2.saveFieldMemory("tags", tag);
+    }
     editing.value = false;
   }
   function addDep() {
@@ -5794,7 +6430,7 @@ function DetailPanel(props) {
     {
       class: "gantt-detail-panel",
       style: {
-        width: `${store.detailPanelWidth.value}px`,
+        width: `${store2.detailPanelWidth.value}px`,
         minWidth: "180px",
         maxHeight: "100%",
         borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
@@ -5881,7 +6517,7 @@ function DetailPanel(props) {
               color: "var(--text-error, #e00)"
             }, children: /* @__PURE__ */ u4(Icon, { name: "trash-2", size: 14 }) }),
             /* @__PURE__ */ u4("button", { onClick: () => {
-              store.locateTarget.value = { type: "task", id: task.id };
+              store2.locateTarget.value = { type: "task", id: task.id };
             }, title: "Scroll to task", style: {
               background: "none",
               border: "none",
@@ -5891,7 +6527,7 @@ function DetailPanel(props) {
               padding: "0 2px",
               color: "var(--text-muted, #999)"
             }, children: /* @__PURE__ */ u4(Icon, { name: "target", size: 14 }) }),
-            /* @__PURE__ */ u4("button", { onClick: () => store.selectEntity(null), title: "Close detail panel", style: {
+            /* @__PURE__ */ u4("button", { onClick: () => store2.selectEntity(null), title: "Close detail panel", style: {
               background: "none",
               border: "none",
               cursor: "pointer",
@@ -5909,7 +6545,7 @@ function DetailPanel(props) {
               "select",
               {
                 value: task.status.value,
-                onChange: (e4) => store.setTaskStatus(task.id, e4.target.value),
+                onChange: (e4) => store2.setTaskStatus(task.id, e4.target.value),
                 style: inputStyle,
                 children: STATUS_OPTIONS.map((opt) => /* @__PURE__ */ u4("option", { value: opt.value, children: opt.label }, opt.value))
               }
@@ -5985,23 +6621,26 @@ function DetailPanel(props) {
           ] }),
           /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
             /* @__PURE__ */ u4("div", { style: labelStyle, children: "Person" }),
-            editing.value ? /* @__PURE__ */ u4(
-              "select",
-              {
-                value: editPersonId.value,
-                onChange: (e4) => {
-                  editPersonId.value = e4.target.value;
-                },
-                style: inputStyle,
-                children: [
-                  /* @__PURE__ */ u4("option", { value: "", children: "\u2014 None \u2014" }),
-                  store.persons.value.map((p5) => /* @__PURE__ */ u4("option", { value: p5.id, children: [
-                    p5.name,
-                    p5.position ? ` (${p5.position})` : ""
-                  ] }, p5.id))
-                ]
-              }
-            ) : /* @__PURE__ */ u4("div", { style: { fontSize: "13px" }, children: personName ?? "\u2014" })
+            editing.value ? /* @__PURE__ */ u4(S, { children: [
+              /* @__PURE__ */ u4(
+                "select",
+                {
+                  value: editPersonId.value,
+                  onChange: (e4) => {
+                    editPersonId.value = e4.target.value;
+                  },
+                  style: inputStyle,
+                  children: [
+                    /* @__PURE__ */ u4("option", { value: "", children: "\u2014 None \u2014" }),
+                    store2.persons.value.map((p5) => /* @__PURE__ */ u4("option", { value: p5.id, children: [
+                      p5.name,
+                      p5.position ? ` (${p5.position})` : ""
+                    ] }, p5.id))
+                  ]
+                }
+              ),
+              /* @__PURE__ */ u4("datalist", { id: "person-memory-list", children: store2.fieldMemory.value.persons.map((p5) => /* @__PURE__ */ u4("option", { value: p5 }, p5)) })
+            ] }) : /* @__PURE__ */ u4("div", { style: { fontSize: "13px" }, children: personName ?? "\u2014" })
           ] }),
           /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
             /* @__PURE__ */ u4("div", { style: labelStyle, children: "Project" }),
@@ -6015,14 +6654,14 @@ function DetailPanel(props) {
                 style: inputStyle,
                 children: [
                   /* @__PURE__ */ u4("option", { value: "", children: "\u2014 None \u2014" }),
-                  store.projects.value.map((p5) => /* @__PURE__ */ u4("option", { value: p5.id, children: p5.name }, p5.id))
+                  store2.projects.value.map((p5) => /* @__PURE__ */ u4("option", { value: p5.id, children: p5.name }, p5.id))
                 ]
               }
             ) : project ? /* @__PURE__ */ u4(
               "div",
               {
                 style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" },
-                onClick: () => store.selectEntity({ type: "project", id: project.id }),
+                onClick: () => store2.selectEntity({ type: "project", id: project.id }),
                 title: "Click to view project details",
                 children: [
                   project.color && /* @__PURE__ */ u4("span", { style: { width: "12px", height: "12px", borderRadius: "3px", background: project.color, flexShrink: 0 } }),
@@ -6046,6 +6685,7 @@ function DetailPanel(props) {
                   editUrl.value = e4.target.value;
                 },
                 placeholder: "https://...",
+                list: "url-memory-list",
                 style: inputStyle
               }
             ) : task.url.value ? /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "4px" }, children: [
@@ -6057,7 +6697,7 @@ function DetailPanel(props) {
                   rel: "noopener noreferrer",
                   onClick: (e4) => {
                     e4.preventDefault();
-                    const platform = store._platform;
+                    const platform = store2._platform;
                     if (platform?.openExternal) {
                       platform.openExternal(task.url.value);
                     } else {
@@ -6153,6 +6793,7 @@ function DetailPanel(props) {
                       }
                     },
                     placeholder: "Task ID...",
+                    list: "dep-memory-list",
                     style: { ...inputStyle, flex: 1 }
                   }
                 ),
@@ -6207,6 +6848,7 @@ function DetailPanel(props) {
                       }
                     },
                     placeholder: "New tag...",
+                    list: "tag-memory-list",
                     style: { ...inputStyle, flex: 1 }
                   }
                 ),
@@ -6227,10 +6869,29 @@ function DetailPanel(props) {
               fontSize: "11px"
             }, children: tag }, tag)) }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px" }, children: "\u2014" })
           ] }),
+          (() => {
+            const manualDesc = store2.edits.value?.overrides?.[task.id]?.description;
+            const detailDesc = taskDetail.value?.description;
+            const effectiveDesc = manualDesc !== void 0 ? manualDesc : detailDesc;
+            if (taskDetailLoading.value) {
+              return /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+                /* @__PURE__ */ u4("div", { style: labelStyle, children: "Description" }),
+                /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", fontStyle: "italic" }, children: "Loading..." })
+              ] });
+            }
+            return /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+              /* @__PURE__ */ u4("div", { style: labelStyle, children: "Description" }),
+              /* @__PURE__ */ u4(DescriptionViewer, { description: effectiveDesc ?? "", store: store2, taskId: task.id })
+            ] });
+          })(),
           /* @__PURE__ */ u4("div", { style: { fontSize: "11px", color: "var(--text-muted, #999)", marginTop: "4px" }, children: [
             /* @__PURE__ */ u4("div", { style: { textDecoration: sourceStyle }, children: sourceLabel }),
             task.upstreamDeleted && /* @__PURE__ */ u4("div", { style: { color: "var(--text-error, #e00)", marginTop: "2px" }, children: "Deleted upstream" })
-          ] })
+          ] }),
+          /* @__PURE__ */ u4("datalist", { id: "url-memory-list", children: store2.fieldMemory.value.urls.map((u5) => /* @__PURE__ */ u4("option", { value: u5 }, u5)) }),
+          /* @__PURE__ */ u4("datalist", { id: "tag-memory-list", children: store2.fieldMemory.value.tags.map((t4) => /* @__PURE__ */ u4("option", { value: t4 }, t4)) }),
+          /* @__PURE__ */ u4("datalist", { id: "dep-memory-list", children: store2.fieldMemory.value.dependencies.map((d4) => /* @__PURE__ */ u4("option", { value: d4 }, d4)) }),
+          /* @__PURE__ */ u4("datalist", { id: "project-memory-list", children: store2.fieldMemory.value.projects.map((p5) => /* @__PURE__ */ u4("option", { value: p5 }, p5)) })
         ] })
       ]
     }
@@ -6321,9 +6982,9 @@ function ConfirmDialog(props) {
   );
 }
 function TagManagementPanel(props) {
-  const { store } = props;
+  const { store: store2 } = props;
   const newName = useSignal("");
-  const newColor = useSignal(PRESET_COLORS[0]);
+  const newColor = useSignal(PRESET_COLORS[1][0]);
   const editingTag = useSignal(null);
   const editName = useSignal("");
   const editColor = useSignal("");
@@ -6332,12 +6993,12 @@ function TagManagementPanel(props) {
   const errorMsg = useSignal("");
   const usageCounts = T2(() => {
     const counts = /* @__PURE__ */ new Map();
-    for (const p5 of store.mergedProjects.value) {
+    for (const p5 of store2.mergedProjects.value) {
       for (const t4 of p5.tags ?? []) {
         counts.set(t4, (counts.get(t4) ?? 0) + 1);
       }
     }
-    const overrides = store.edits.value?.projectOverrides ?? {};
+    const overrides = store2.edits.value?.projectOverrides ?? {};
     for (const [, o4] of Object.entries(overrides)) {
       if (o4.tags) {
         for (const t4 of o4.tags) {
@@ -6347,21 +7008,21 @@ function TagManagementPanel(props) {
       }
     }
     return counts;
-  }, [store.mergedProjects.value, store.edits.value]);
+  }, [store2.mergedProjects.value, store2.edits.value]);
   async function handleCreate() {
     const name = newName.value.trim();
     if (!name)
       return;
-    if (store.tagDefinitions.value.some((t4) => t4.name === name)) {
+    if (store2.tagDefinitions.value.some((t4) => t4.name === name)) {
       errorMsg.value = `Tag "${name}" already exists`;
       return;
     }
     errorMsg.value = "";
     creating.value = true;
     try {
-      await store.createTag(name, newColor.value);
+      await store2.createTag(name, newColor.value);
       newName.value = "";
-      newColor.value = PRESET_COLORS[0];
+      newColor.value = PRESET_COLORS[1][0];
     } catch (e4) {
       errorMsg.value = `Failed: ${e4 instanceof Error ? e4.message : String(e4)}`;
     } finally {
@@ -6385,13 +7046,13 @@ function TagManagementPanel(props) {
     const newNameVal = editName.value.trim();
     if (!oldName || !newNameVal)
       return;
-    if (newNameVal !== oldName && store.tagDefinitions.value.some((t4) => t4.name === newNameVal)) {
+    if (newNameVal !== oldName && store2.tagDefinitions.value.some((t4) => t4.name === newNameVal)) {
       errorMsg.value = `Tag "${newNameVal}" already exists`;
       return;
     }
     errorMsg.value = "";
     try {
-      await store.updateTag(oldName, newNameVal, editColor.value);
+      await store2.updateTag(oldName, newNameVal, editColor.value);
       editingTag.value = null;
     } catch (e4) {
       errorMsg.value = `Failed: ${e4 instanceof Error ? e4.message : String(e4)}`;
@@ -6422,12 +7083,12 @@ function TagManagementPanel(props) {
     deleteConfirmName.value = null;
     errorMsg.value = "";
     try {
-      await store.deleteTag(name);
+      await store2.deleteTag(name);
     } catch (e4) {
       errorMsg.value = `Failed: ${e4 instanceof Error ? e4.message : String(e4)}`;
     }
   }
-  const tagList = store.tagDefinitions.value;
+  const tagList = store2.tagDefinitions.value;
   return /* @__PURE__ */ u4(
     "div",
     {
@@ -6488,18 +7149,47 @@ function TagManagementPanel(props) {
             ] }),
             /* @__PURE__ */ u4("div", { style: { overflowY: "auto", padding: "16px 24px", flex: 1 }, children: [
               /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "6px", alignItems: "center", marginBottom: "16px" }, children: [
-                /* @__PURE__ */ u4(
-                  "input",
-                  {
-                    type: "color",
-                    value: newColor.value,
-                    onInput: (e4) => {
-                      newColor.value = e4.target.value;
-                    },
-                    title: "Tag color",
-                    style: { width: "28px", height: "28px", padding: "0", border: "none", borderRadius: "4px", cursor: "pointer", flexShrink: 0 }
-                  }
-                ),
+                /* @__PURE__ */ u4("div", { style: { position: "relative", flexShrink: 0 }, children: [
+                  /* @__PURE__ */ u4(
+                    "button",
+                    {
+                      onClick: () => {
+                        editingTag.value = editingTag.value === "__new__" ? null : "__new__";
+                      },
+                      title: "Tag color",
+                      style: {
+                        width: "28px",
+                        height: "28px",
+                        padding: 0,
+                        border: "1px solid var(--background-modifier-border, #ccc)",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                        background: newColor.value
+                      }
+                    }
+                  ),
+                  editingTag.value === "__new__" && /* @__PURE__ */ u4("div", { style: {
+                    position: "absolute",
+                    top: "100%",
+                    left: 0,
+                    zIndex: 100,
+                    background: "var(--background-primary, #fff)",
+                    border: "1px solid var(--background-modifier-border, #ccc)",
+                    borderRadius: "4px",
+                    padding: "6px",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+                    marginTop: "2px"
+                  }, children: /* @__PURE__ */ u4(
+                    ColorSwatchPicker,
+                    {
+                      value: newColor.value,
+                      onChange: (c4) => {
+                        newColor.value = c4;
+                        editingTag.value = null;
+                      }
+                    }
+                  ) })
+                ] }),
                 /* @__PURE__ */ u4(
                   "input",
                   {
@@ -6528,7 +7218,7 @@ function TagManagementPanel(props) {
                   "button",
                   {
                     onClick: handleCreate,
-                    disabled: creating.value || !newName.value.trim() || store.tagDefinitions.value.some((t4) => t4.name === newName.value.trim()),
+                    disabled: creating.value || !newName.value.trim() || store2.tagDefinitions.value.some((t4) => t4.name === newName.value.trim()),
                     style: {
                       padding: "4px 12px",
                       border: "none",
@@ -6558,17 +7248,15 @@ function TagManagementPanel(props) {
                     background: "var(--background-secondary, #f5f5f5)"
                   },
                   children: editingTag.value === tag.name ? /* @__PURE__ */ u4(S, { children: [
-                    /* @__PURE__ */ u4(
-                      "input",
+                    /* @__PURE__ */ u4("div", { style: { flexShrink: 0 }, children: /* @__PURE__ */ u4(
+                      ColorSwatchPicker,
                       {
-                        type: "color",
                         value: editColor.value,
-                        onInput: (e4) => {
-                          editColor.value = e4.target.value;
-                        },
-                        style: { width: "24px", height: "24px", padding: "0", border: "none", borderRadius: "4px", cursor: "pointer", flexShrink: 0 }
+                        onChange: (c4) => {
+                          editColor.value = c4;
+                        }
                       }
-                    ),
+                    ) }),
                     /* @__PURE__ */ u4(
                       "input",
                       {
@@ -6658,11 +7346,12 @@ function TagManagementPanel(props) {
   );
 }
 function PendingChangesPanel(props) {
-  const { store } = props;
-  const changes = store.pendingChanges.value;
+  const { store: store2 } = props;
+  const changes = store2.pendingChanges.value;
   const pushing = useSignal(false);
   const pushResults = useSignal(null);
   const dismissConfirm = useSignal(false);
+  const progress = store2.pushProgress;
   const selectedIds = useSignal(new Set(changes.map((c4) => `${c4.entityType}:${c4.entityId}`)));
   function selectedEntityIds() {
     const ids = /* @__PURE__ */ new Set();
@@ -6694,7 +7383,7 @@ function PendingChangesPanel(props) {
     pushing.value = true;
     pushResults.value = null;
     try {
-      const results = await store.pushChanges(ids);
+      const results = await store2.pushChanges(ids);
       pushResults.value = results;
     } finally {
       pushing.value = false;
@@ -6708,7 +7397,7 @@ function PendingChangesPanel(props) {
     const ids = selectedEntityIds();
     if (ids.size === 0)
       return;
-    await store.dismissChanges(ids);
+    await store2.dismissChanges(ids);
     dismissConfirm.value = false;
     selectedIds.value = /* @__PURE__ */ new Set();
   }
@@ -6897,77 +7586,114 @@ function PendingChangesPanel(props) {
               padding: "12px 24px",
               borderTop: "1px solid var(--background-modifier-border, #eee)",
               display: "flex",
-              alignItems: "center",
-              gap: "12px"
+              flexDirection: "column",
+              gap: "8px"
             }, children: [
-              /* @__PURE__ */ u4("button", { onClick: selectAll, style: {
-                padding: "4px 8px",
-                border: "1px solid var(--background-modifier-border, #ccc)",
-                borderRadius: "3px",
-                background: "transparent",
-                cursor: "pointer",
-                fontSize: "11px"
-              }, children: "All" }),
-              /* @__PURE__ */ u4("button", { onClick: deselectAll, style: {
-                padding: "4px 8px",
-                border: "1px solid var(--background-modifier-border, #ccc)",
-                borderRadius: "3px",
-                background: "transparent",
-                cursor: "pointer",
-                fontSize: "11px"
-              }, children: "None" }),
-              /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--text-muted, #999)" }, children: [
-                selectedCount,
-                " of ",
-                totalCount,
-                " selected"
-              ] }),
-              /* @__PURE__ */ u4("div", { style: { flex: 1 } }),
-              /* @__PURE__ */ u4(
-                "button",
-                {
-                  onClick: handleDismiss,
-                  disabled: selectedCount === 0,
-                  class: "gantt-btn",
-                  style: {
-                    padding: "6px 14px",
-                    border: "1px solid var(--text-error, #e00)",
-                    borderRadius: "4px",
-                    background: dismissConfirm.value ? "var(--text-error, #e53935)" : "transparent",
-                    color: dismissConfirm.value ? "#fff" : "var(--text-error, #e00)",
-                    cursor: selectedCount === 0 ? "not-allowed" : "pointer",
-                    fontSize: "12px",
-                    opacity: selectedCount === 0 ? 0.5 : 1
-                  },
-                  children: dismissConfirm.value ? "Click again to confirm" : `Dismiss (${selectedCount})`
-                }
-              ),
-              /* @__PURE__ */ u4(
-                "button",
-                {
-                  onClick: handlePush,
-                  disabled: pushing.value || selectedCount === 0,
-                  class: "gantt-btn",
-                  style: {
-                    padding: "8px 20px",
-                    border: "none",
-                    borderRadius: "4px",
-                    background: pushing.value || selectedCount === 0 ? "var(--background-modifier-border, #ccc)" : "var(--interactive-accent, #4A90D9)",
-                    color: "#fff",
-                    cursor: pushing.value || selectedCount === 0 ? "not-allowed" : "pointer",
-                    fontSize: "13px",
-                    fontWeight: 500,
-                    opacity: selectedCount === 0 ? 0.5 : 1
-                  },
-                  children: pushing.value ? "Pushing..." : `Push (${selectedCount})`
-                }
-              ),
-              pushResults.value && /* @__PURE__ */ u4("span", { style: { fontSize: "12px" }, children: [
-                pushResults.value.some((r4) => r4.success) ? `Pushed to ${pushResults.value.filter((r4) => r4.success).map((r4) => r4.connectorId).join(", ")}` : "Push failed",
-                pushResults.value.some((r4) => !r4.success) && /* @__PURE__ */ u4("span", { style: { color: "var(--text-error, #e00)" }, children: [
-                  " \xB7 ",
-                  pushResults.value.filter((r4) => !r4.success).map((r4) => r4.error).join("; ")
+              pushing.value && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: progress.value ? /* @__PURE__ */ u4(S, { children: [
+                /* @__PURE__ */ u4("div", { style: {
+                  height: "6px",
+                  borderRadius: "3px",
+                  background: "var(--background-modifier-border, #e0e0e0)",
+                  overflow: "hidden"
+                }, children: /* @__PURE__ */ u4("div", { style: {
+                  height: "100%",
+                  width: `${Math.round(progress.value.current / progress.value.total * 100)}%`,
+                  borderRadius: "3px",
+                  background: "var(--interactive-accent, #4A90D9)",
+                  transition: "width 0.2s"
+                } }) }),
+                /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "11px", color: "var(--text-muted, #999)" }, children: [
+                  /* @__PURE__ */ u4("span", { children: progress.value.message }),
+                  /* @__PURE__ */ u4("span", { children: [
+                    progress.value.current,
+                    " / ",
+                    progress.value.total
+                  ] })
                 ] })
+              ] }) : /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)", textAlign: "center" }, children: "Pushing changes..." }) }),
+              pushResults.value && !pushing.value && /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "4px", fontSize: "12px" }, children: (() => {
+                const succeeded = pushResults.value.filter((r4) => r4.success);
+                const failed = pushResults.value.filter((r4) => !r4.success);
+                return /* @__PURE__ */ u4(S, { children: [
+                  succeeded.length > 0 && /* @__PURE__ */ u4("div", { style: { color: "#4caf50" }, children: [
+                    "Successful: ",
+                    succeeded.map((r4) => r4.connectorId).join(", ")
+                  ] }),
+                  failed.length > 0 && /* @__PURE__ */ u4("div", { style: { color: "var(--text-error, #e00)" }, children: [
+                    "Failed: ",
+                    failed.map((r4) => `${r4.connectorId} (${r4.error || "unknown error"})`).join("; ")
+                  ] }),
+                  succeeded.length > 0 && failed.length === 0 && /* @__PURE__ */ u4("div", { style: { color: "#4caf50", fontWeight: 500 }, children: "All changes pushed successfully." }),
+                  succeeded.length === 0 && failed.length > 0 && /* @__PURE__ */ u4("div", { style: { color: "var(--text-error, #e00)", fontWeight: 500 }, children: "Push failed \u2014 no changes cleared." })
+                ] });
+              })() }),
+              !pushing.value && /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "12px" }, children: [
+                /* @__PURE__ */ u4("button", { onClick: selectAll, style: {
+                  padding: "4px 8px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "3px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "11px"
+                }, children: "All" }),
+                /* @__PURE__ */ u4("button", { onClick: deselectAll, style: {
+                  padding: "4px 8px",
+                  border: "1px solid var(--background-modifier-border, #ccc)",
+                  borderRadius: "3px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "11px"
+                }, children: "None" }),
+                /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--text-muted, #999)" }, children: [
+                  selectedCount,
+                  " of ",
+                  totalCount,
+                  " selected"
+                ] }),
+                /* @__PURE__ */ u4("div", { style: { flex: 1 } }),
+                /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: handleDismiss,
+                    disabled: selectedCount === 0,
+                    class: "gantt-btn",
+                    style: {
+                      padding: "6px 14px",
+                      border: "1px solid var(--text-error, #e00)",
+                      borderRadius: "4px",
+                      background: dismissConfirm.value ? "var(--text-error, #e53935)" : "transparent",
+                      color: dismissConfirm.value ? "#fff" : "var(--text-error, #e00)",
+                      cursor: selectedCount === 0 ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                      opacity: selectedCount === 0 ? 0.5 : 1
+                    },
+                    children: dismissConfirm.value ? "Click again to confirm" : `Dismiss (${selectedCount})`
+                  }
+                ),
+                /* @__PURE__ */ u4(
+                  "button",
+                  {
+                    onClick: handlePush,
+                    disabled: selectedCount === 0,
+                    class: "gantt-btn",
+                    style: {
+                      padding: "8px 20px",
+                      border: "none",
+                      borderRadius: "4px",
+                      background: selectedCount === 0 ? "var(--background-modifier-border, #ccc)" : "var(--interactive-accent, #4A90D9)",
+                      color: "#fff",
+                      cursor: selectedCount === 0 ? "not-allowed" : "pointer",
+                      fontSize: "13px",
+                      fontWeight: 500,
+                      opacity: selectedCount === 0 ? 0.5 : 1
+                    },
+                    children: [
+                      "Push (",
+                      selectedCount,
+                      ")"
+                    ]
+                  }
+                )
               ] })
             ] })
           ]
@@ -6976,8 +7702,285 @@ function PendingChangesPanel(props) {
     }
   );
 }
+function PersonDetail(props) {
+  const { store: store2 } = props;
+  const sel = store2.selectedEntity.value;
+  if (!sel || sel.type !== "person")
+    return null;
+  const person = store2.persons.value.find((p5) => p5.id === sel.id);
+  const personOverrides = store2.edits.value?.personOverrides?.[sel.id];
+  const displayName = personOverrides?.name ?? person?.name ?? (sel.id === "__unassigned__" ? "Unassigned" : sel.id);
+  const displayPosition = personOverrides?.position ?? person?.position;
+  const personTasks = store2.mergedTasks.value.filter(
+    (t4) => sel.id === "__unassigned__" ? !t4.personId.value : t4.personId.value === sel.id
+  );
+  const editName = useSignal(false);
+  const editNameValue = useSignal(displayName);
+  const editPosition = useSignal(false);
+  const editPositionValue = useSignal(displayPosition ?? "");
+  let nameInputRef = null;
+  let positionInputRef = null;
+  function startEditName() {
+    editNameValue.value = displayName;
+    editName.value = true;
+    requestAnimationFrame(() => nameInputRef?.focus());
+  }
+  function saveName() {
+    const newName = editNameValue.value.trim();
+    if (newName && newName !== displayName && sel) {
+      store2.persistPersonEdit(sel.id, "name", newName);
+    }
+    editName.value = false;
+  }
+  function cancelName() {
+    editNameValue.value = displayName;
+    editName.value = false;
+  }
+  function handleNameKeyDown(e4) {
+    if (e4.key === "Enter") {
+      e4.preventDefault();
+      e4.stopPropagation();
+      saveName();
+    }
+    if (e4.key === "Escape") {
+      e4.preventDefault();
+      e4.stopPropagation();
+      cancelName();
+    }
+  }
+  function startEditPosition() {
+    editPositionValue.value = displayPosition ?? "";
+    editPosition.value = true;
+    requestAnimationFrame(() => positionInputRef?.focus());
+  }
+  function savePosition() {
+    const newPos = editPositionValue.value.trim();
+    if (newPos !== (displayPosition ?? "") && sel) {
+      store2.persistPersonEdit(sel.id, "position", newPos || void 0);
+    }
+    editPosition.value = false;
+  }
+  function cancelPosition() {
+    editPositionValue.value = displayPosition ?? "";
+    editPosition.value = false;
+  }
+  function handlePositionKeyDown(e4) {
+    if (e4.key === "Enter") {
+      e4.preventDefault();
+      e4.stopPropagation();
+      savePosition();
+    }
+    if (e4.key === "Escape") {
+      e4.preventDefault();
+      e4.stopPropagation();
+      cancelPosition();
+    }
+  }
+  const fieldStyle = { marginBottom: "12px" };
+  const labelStyle = { fontSize: "11px", color: "var(--text-muted, #999)", marginBottom: "2px" };
+  return /* @__PURE__ */ u4(
+    "div",
+    {
+      class: "gantt-detail-panel",
+      style: {
+        width: `${store2.detailPanelWidth.value}px`,
+        minWidth: "180px",
+        maxHeight: "100%",
+        borderLeft: "1px solid var(--gantt-grid-line-week, #c0c0c0)",
+        padding: "12px",
+        fontSize: "13px",
+        color: "var(--text-normal, #333)",
+        overflowY: "auto",
+        background: "var(--background-secondary, #f5f5f5)"
+      },
+      children: [
+        /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }, children: [
+          /* @__PURE__ */ u4("div", { style: { flex: 1 }, children: sel.id !== "__unassigned__" ? /* @__PURE__ */ u4(S, { children: [
+            editName.value ? /* @__PURE__ */ u4(
+              "input",
+              {
+                ref: (el) => {
+                  nameInputRef = el;
+                },
+                type: "text",
+                value: editNameValue.value,
+                onInput: (e4) => {
+                  editNameValue.value = e4.target.value;
+                },
+                onBlur: saveName,
+                onKeyDown: handleNameKeyDown,
+                onKeyUp: (e4) => {
+                  e4.stopPropagation();
+                },
+                class: "gantt-inline-edit-input",
+                style: {
+                  fontSize: "14px",
+                  fontWeight: "bold",
+                  padding: "2px 6px",
+                  border: "1px solid var(--interactive-accent, #4A90D9)",
+                  borderRadius: "4px",
+                  background: "var(--background-primary, #fff)",
+                  color: "var(--text-normal, #333)",
+                  width: "100%",
+                  boxSizing: "border-box"
+                }
+              }
+            ) : /* @__PURE__ */ u4(
+              "div",
+              {
+                style: { fontWeight: "bold", fontSize: "14px", wordBreak: "break-word", cursor: "text" },
+                onClick: startEditName,
+                title: "Click to edit name",
+                children: displayName
+              }
+            ),
+            /* @__PURE__ */ u4("div", { style: { marginTop: "4px" }, children: editPosition.value ? /* @__PURE__ */ u4(
+              "input",
+              {
+                ref: (el) => {
+                  positionInputRef = el;
+                },
+                type: "text",
+                value: editPositionValue.value,
+                onInput: (e4) => {
+                  editPositionValue.value = e4.target.value;
+                },
+                onBlur: savePosition,
+                onKeyDown: handlePositionKeyDown,
+                onKeyUp: (e4) => {
+                  e4.stopPropagation();
+                },
+                class: "gantt-inline-edit-input",
+                placeholder: "Position...",
+                style: {
+                  fontSize: "12px",
+                  padding: "2px 6px",
+                  border: "1px solid var(--interactive-accent, #4A90D9)",
+                  borderRadius: "4px",
+                  background: "var(--background-primary, #fff)",
+                  color: "var(--text-normal, #333)",
+                  width: "100%",
+                  boxSizing: "border-box"
+                }
+              }
+            ) : /* @__PURE__ */ u4(
+              "span",
+              {
+                style: { fontSize: "12px", color: "var(--text-muted, #999)", cursor: "text" },
+                onClick: startEditPosition,
+                title: "Click to edit position",
+                children: displayPosition || "No position"
+              }
+            ) })
+          ] }) : /* @__PURE__ */ u4("div", { style: { fontWeight: "bold", fontSize: "14px" }, children: "Unassigned" }) }),
+          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "2px", flexShrink: 0 }, children: [
+            sel.id !== "__unassigned__" && person && /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => {
+                  store2.locateTarget.value = { type: "task", id: personTasks[0]?.id ?? "" };
+                },
+                title: "Locate person row",
+                style: {
+                  padding: "2px 4px",
+                  border: "none",
+                  borderRadius: "3px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "13px",
+                  color: "var(--text-muted, #999)",
+                  lineHeight: 1
+                },
+                children: /* @__PURE__ */ u4(Icon, { name: "target", size: 13 })
+              }
+            ),
+            /* @__PURE__ */ u4(
+              "button",
+              {
+                onClick: () => store2.selectEntity(null),
+                title: "Close detail panel",
+                style: {
+                  padding: "2px 4px",
+                  border: "none",
+                  borderRadius: "3px",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: "14px",
+                  color: "var(--text-muted, #999)",
+                  lineHeight: 1
+                },
+                children: /* @__PURE__ */ u4(Icon, { name: "x", size: 14 })
+              }
+            )
+          ] })
+        ] }),
+        person?.avatar && /* @__PURE__ */ u4("div", { style: fieldStyle, children: /* @__PURE__ */ u4("img", { src: person.avatar, alt: displayName, style: { width: "48px", height: "48px", borderRadius: "50%", objectFit: "cover" } }) }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: "Tasks" }),
+          /* @__PURE__ */ u4("div", { style: { fontSize: "13px", fontWeight: 500 }, children: personTasks.length })
+        ] }),
+        /* @__PURE__ */ u4("div", { style: fieldStyle, children: [
+          /* @__PURE__ */ u4("div", { style: labelStyle, children: "Assigned Tasks" }),
+          personTasks.length === 0 ? /* @__PURE__ */ u4("div", { style: { fontSize: "12px", color: "var(--text-muted, #999)", fontStyle: "italic" }, children: "No tasks assigned" }) : /* @__PURE__ */ u4("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: personTasks.map((task) => {
+            const project = task.projectId.value ? store2.projects.value.find((p5) => p5.id === task.projectId.value) : null;
+            return /* @__PURE__ */ u4(
+              "div",
+              {
+                onClick: () => store2.selectEntity({ type: "task", id: task.id }),
+                style: {
+                  padding: "6px 8px",
+                  border: "1px solid var(--background-modifier-border, #e0e0e0)",
+                  borderRadius: "4px",
+                  background: "var(--background-primary, #fff)",
+                  cursor: "pointer",
+                  fontSize: "12px"
+                },
+                children: [
+                  /* @__PURE__ */ u4("div", { style: { display: "flex", alignItems: "center", gap: "6px", marginBottom: "2px" }, children: [
+                    /* @__PURE__ */ u4(StatusBadge, { status: task.status.value }),
+                    /* @__PURE__ */ u4("span", { style: { fontWeight: 500, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: task.title.value }),
+                    /* @__PURE__ */ u4(
+                      "button",
+                      {
+                        onClick: (e4) => {
+                          e4.stopPropagation();
+                          store2.locateTarget.value = { type: "task", id: task.id };
+                        },
+                        title: "Locate task",
+                        style: {
+                          padding: "1px 3px",
+                          border: "none",
+                          borderRadius: "3px",
+                          background: "transparent",
+                          cursor: "pointer",
+                          color: "var(--text-muted, #999)",
+                          lineHeight: 1,
+                          flexShrink: 0
+                        },
+                        children: /* @__PURE__ */ u4(Icon, { name: "target", size: 12 })
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "12px", fontSize: "11px", color: "var(--text-muted, #999)" }, children: [
+                    task.startDate.value && task.endDate.value ? /* @__PURE__ */ u4("span", { children: [
+                      task.startDate.value,
+                      " \u2192 ",
+                      task.endDate.value
+                    ] }) : task.startDate.value ? /* @__PURE__ */ u4("span", { children: task.startDate.value }) : null,
+                    project && /* @__PURE__ */ u4("span", { style: { color: project.color }, children: project.name })
+                  ] })
+                ]
+              },
+              task.id
+            );
+          }) })
+        ] })
+      ]
+    }
+  );
+}
 function DualPane(props) {
-  const { store } = props;
+  const { store: store2 } = props;
   let personVGuardActive = false;
   let personVGuardTimer = null;
   let projectVGuardActive = false;
@@ -6987,7 +7990,7 @@ function DualPane(props) {
   const isResizingPanel = useSignal(false);
   const didInitialScroll = A2(false);
   y2(() => {
-    if (didInitialScroll.current || store.mergedTasks.value.length === 0)
+    if (didInitialScroll.current || store2.mergedTasks.value.length === 0)
       return;
     didInitialScroll.current = true;
     requestAnimationFrame(() => {
@@ -6995,7 +7998,7 @@ function DualPane(props) {
       if (!timelineEl)
         return;
       let minAbsPx = dateToPx2(todayString());
-      for (const t4 of store.mergedTasks.value) {
+      for (const t4 of store2.mergedTasks.value) {
         const sd = t4.startDate.value;
         const ed = t4.endDate.value;
         if (sd) {
@@ -7012,16 +8015,16 @@ function DualPane(props) {
       const bodyOriginPx = Math.floor(minAbsPx - 730 * DAY_WIDTH2);
       const todayBodyPx = dateToPx2(todayString()) - bodyOriginPx;
       const targetScroll = Math.max(0, todayBodyPx - timelineEl.clientWidth / 2);
-      store.sharedScrollLeft.value = targetScroll;
+      store2.sharedScrollLeft.value = targetScroll;
     });
   }, []);
   y2(() => {
-    const target = store.locateTarget.value;
+    const target = store2.locateTarget.value;
     if (!target)
       return;
     requestAnimationFrame(() => {
       let minAbsPx = dateToPx2(todayString());
-      for (const t4 of store.mergedTasks.value) {
+      for (const t4 of store2.mergedTasks.value) {
         const sd = t4.startDate.value;
         const ed = t4.endDate.value;
         if (sd) {
@@ -7037,9 +8040,9 @@ function DualPane(props) {
       }
       const bodyOriginPx = Math.floor(minAbsPx - 730 * DAY_WIDTH2);
       if (target.type === "task") {
-        const task = store.mergedTasks.value.find((t4) => t4.id === target.id);
+        const task = store2.mergedTasks.value.find((t4) => t4.id === target.id);
         if (!task) {
-          store.locateTarget.value = null;
+          store2.locateTarget.value = null;
           return;
         }
         const startVal = task.startDate.value;
@@ -7047,12 +8050,12 @@ function DualPane(props) {
           const timelineEl = document.querySelector(".gantt-timeline");
           const viewportW = timelineEl ? timelineEl.clientWidth : 800;
           const targetBodyPx = dateToPx2(startVal) - bodyOriginPx;
-          store.sharedScrollLeft.value = Math.max(0, targetBodyPx - viewportW / 4);
+          store2.sharedScrollLeft.value = Math.max(0, targetBodyPx - viewportW / 4);
         }
         const personKey = task.personId.value || "__unassigned__";
         let personRowY = 0;
         let accY = 0;
-        for (const group of store.personGroups.value) {
+        for (const group of store2.personGroups.value) {
           const taskCount = group.tasks.length || 1;
           const lanes = Math.min(taskCount, 3);
           const h4 = ROW_HEIGHT2 + (lanes - 1) * LANE_OFFSET2;
@@ -7064,11 +8067,11 @@ function DualPane(props) {
         }
         const personPaneEl = document.querySelector(".gantt-pane");
         const personViewH = personPaneEl ? personPaneEl.clientHeight / 2 : 300;
-        store.personScrollTop.value = Math.max(0, personRowY - personViewH / 3);
+        store2.personScrollTop.value = Math.max(0, personRowY - personViewH / 3);
         const projectKey = task.projectId.value || "__no_project__";
         let projectRowY = 0;
         accY = 0;
-        for (const group of store.projectGroups.value) {
+        for (const group of store2.projectGroups.value) {
           const taskCount = group.tasks.length || 1;
           const lanes = Math.min(taskCount, 3);
           const h4 = ROW_HEIGHT2 + (lanes - 1) * LANE_OFFSET2;
@@ -7080,10 +8083,10 @@ function DualPane(props) {
         }
         const projectPaneEl = document.querySelectorAll(".gantt-pane")[1];
         const projectViewH = projectPaneEl ? projectPaneEl.clientHeight : 300;
-        store.projectScrollTop.value = Math.max(0, projectRowY - projectViewH / 3);
+        store2.projectScrollTop.value = Math.max(0, projectRowY - projectViewH / 3);
       }
       if (target.type === "project") {
-        const projectTasks = store.mergedTasks.value.filter((t4) => t4.projectId.value === target.id);
+        const projectTasks = store2.mergedTasks.value.filter((t4) => t4.projectId.value === target.id);
         let earliest = null;
         let latest = null;
         for (const t4 of projectTasks) {
@@ -7102,12 +8105,12 @@ function DualPane(props) {
             const timelineEl = document.querySelector(".gantt-timeline");
             const viewportW = timelineEl ? timelineEl.clientWidth : 800;
             const targetBodyPx = dateToPx2(projectMidDate) - bodyOriginPx;
-            store.sharedScrollLeft.value = Math.max(0, targetBodyPx - viewportW / 4);
+            store2.sharedScrollLeft.value = Math.max(0, targetBodyPx - viewportW / 4);
           }
         }
         let projectRowY = 0;
         let accY = 0;
-        for (const group of store.projectGroups.value) {
+        for (const group of store2.projectGroups.value) {
           const taskCount = group.tasks.length || 1;
           const lanes = Math.min(taskCount, 3);
           const h4 = ROW_HEIGHT2 + (lanes - 1) * LANE_OFFSET2;
@@ -7119,11 +8122,11 @@ function DualPane(props) {
         }
         const projectPaneEl = document.querySelectorAll(".gantt-pane")[1];
         const projectViewH = projectPaneEl ? projectPaneEl.clientHeight : 300;
-        store.projectScrollTop.value = Math.max(0, projectRowY - projectViewH / 3);
+        store2.projectScrollTop.value = Math.max(0, projectRowY - projectViewH / 3);
       }
-      store.locateTarget.value = null;
+      store2.locateTarget.value = null;
     });
-  }, [store.locateTarget.value]);
+  }, [store2.locateTarget.value]);
   function handleResizePointerDown(e4) {
     e4.preventDefault();
     isResizing.value = true;
@@ -7148,39 +8151,40 @@ function DualPane(props) {
     e4.preventDefault();
     isResizingPanel.value = true;
     const startX = e4.clientX;
-    const startWidth = store.detailPanelWidth.value;
+    const startWidth = store2.detailPanelWidth.value;
     function onMove(ev) {
       const dx = startX - ev.clientX;
       const newWidth = Math.min(500, Math.max(180, startWidth + dx));
-      store.detailPanelWidth.value = newWidth;
+      store2.detailPanelWidth.value = newWidth;
     }
     function onUp() {
       isResizingPanel.value = false;
-      store.saveSettings();
+      store2.saveSettings();
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
     }
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
   }
-  const sel = store.selectedEntity.value;
+  const sel = store2.selectedEntity.value;
   const showTaskDetail = sel?.type === "task";
   const showProjectDetail = sel?.type === "project";
+  const showPersonDetail = sel?.type === "person";
   return /* @__PURE__ */ u4("div", { class: "gantt-dual-pane", style: { display: "flex", flexDirection: "column", height: "100%", width: "100%" }, children: /* @__PURE__ */ u4("div", { style: { display: "flex", flex: 1, overflow: "hidden" }, children: [
     /* @__PURE__ */ u4("div", { style: { flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }, children: [
       /* @__PURE__ */ u4("div", { style: { flex: `0 0 ${paneRatio.value * 100}%`, display: "flex", overflow: "hidden" }, children: [
         /* @__PURE__ */ u4(
           GanttPane,
           {
-            store,
+            store: store2,
             type: "person",
-            scrollLeft: store.sharedScrollLeft.value,
-            scrollTop: store.personScrollTop.value,
+            scrollLeft: store2.sharedScrollLeft.value,
+            scrollTop: store2.personScrollTop.value,
             onScroll: (sl, st) => {
-              store.sharedScrollLeft.value = sl;
+              store2.sharedScrollLeft.value = sl;
               if (!personVGuardActive) {
                 personVGuardActive = true;
-                store.personScrollTop.value = st;
+                store2.personScrollTop.value = st;
                 if (personVGuardTimer)
                   clearTimeout(personVGuardTimer);
                 personVGuardTimer = setTimeout(() => {
@@ -7193,7 +8197,7 @@ function DualPane(props) {
             onDragOver: props.onDragOver
           }
         ),
-        !showTaskDetail && !showProjectDetail && /* @__PURE__ */ u4(UnassignedPanel, { store, onDragStart: () => {
+        !showTaskDetail && !showProjectDetail && !showPersonDetail && /* @__PURE__ */ u4(UnassignedPanel, { store: store2, onDragStart: () => {
         } })
       ] }),
       /* @__PURE__ */ u4(
@@ -7213,15 +8217,15 @@ function DualPane(props) {
       /* @__PURE__ */ u4("div", { style: { flex: 1, display: "flex", overflow: "hidden" }, children: /* @__PURE__ */ u4(
         GanttPane,
         {
-          store,
+          store: store2,
           type: "project",
-          scrollLeft: store.sharedScrollLeft.value,
-          scrollTop: store.projectScrollTop.value,
+          scrollLeft: store2.sharedScrollLeft.value,
+          scrollTop: store2.projectScrollTop.value,
           onScroll: (sl, st) => {
-            store.sharedScrollLeft.value = sl;
+            store2.sharedScrollLeft.value = sl;
             if (!projectVGuardActive) {
               projectVGuardActive = true;
-              store.projectScrollTop.value = st;
+              store2.projectScrollTop.value = st;
               if (projectVGuardTimer)
                 clearTimeout(projectVGuardTimer);
               projectVGuardTimer = setTimeout(() => {
@@ -7251,339 +8255,11 @@ function DualPane(props) {
           onPointerDown: handlePanelResizePointerDown
         }
       ),
-      showTaskDetail && /* @__PURE__ */ u4(DetailPanel, { store, onDelete: props.onDeleteTask }),
-      showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store, onDelete: props.onDeleteProject })
+      showTaskDetail && /* @__PURE__ */ u4(DetailPanel, { store: store2, onDelete: props.onDeleteTask }),
+      showProjectDetail && /* @__PURE__ */ u4(ProjectDetail, { store: store2, onDelete: props.onDeleteProject }),
+      showPersonDetail && /* @__PURE__ */ u4(PersonDetail, { store: store2 })
     ] })
   ] }) });
-}
-function HolidaySettingsPanel(props) {
-  const { store, onClose } = props;
-  const hc = store.holidayConfig.value;
-  const importing = useSignal(false);
-  const importError = useSignal(null);
-  const urlInput = useSignal("");
-  async function mergeClassified(holidays, makeup) {
-    if (holidays.length === 0 && makeup.length === 0) {
-      importError.value = "No events found in the .ics data";
-      return;
-    }
-    const existingHolidays = new Set(store.holidayConfig.value.holidayDates);
-    const existingMakeup = new Set(store.holidayConfig.value.makeupWorkdays);
-    for (const d4 of holidays)
-      existingHolidays.add(d4);
-    for (const d4 of makeup) {
-      existingMakeup.add(d4);
-      existingHolidays.delete(d4);
-    }
-    await store.saveHolidayConfig({
-      ...store.holidayConfig.value,
-      holidayDates: [...existingHolidays].sort(),
-      makeupWorkdays: [...existingMakeup].sort()
-    });
-    urlInput.value = "";
-    importError.value = null;
-  }
-  async function handleImportFile() {
-    const platform = store._platform;
-    if (!platform?.pickFile) {
-      importError.value = "File picker not available";
-      return;
-    }
-    importing.value = true;
-    importError.value = null;
-    try {
-      const file = await platform.pickFile(".ics");
-      if (!file) {
-        importing.value = false;
-        return;
-      }
-      const events = parseICS(file.content);
-      const { holidayDates, makeupWorkdays } = classifyICSEvents(events);
-      await mergeClassified(holidayDates, makeupWorkdays);
-    } catch (e4) {
-      importError.value = e4 instanceof Error ? e4.message : String(e4);
-    } finally {
-      importing.value = false;
-    }
-  }
-  async function handleFetchUrl() {
-    const url = urlInput.value.trim();
-    if (!url)
-      return;
-    importing.value = true;
-    importError.value = null;
-    try {
-      const platform = store._platform;
-      const response = await (platform?.fetch ?? globalThis.fetch)(url);
-      if (!response.ok) {
-        importError.value = `Failed to fetch: ${response.status} ${response.statusText}`;
-        return;
-      }
-      const text = await response.text();
-      const events = parseICS(text);
-      const { holidayDates, makeupWorkdays } = classifyICSEvents(events);
-      await mergeClassified(holidayDates, makeupWorkdays);
-    } catch (e4) {
-      importError.value = e4 instanceof Error ? e4.message : String(e4);
-    } finally {
-      importing.value = false;
-    }
-  }
-  async function removeHoliday(date) {
-    const cfg = store.holidayConfig.value;
-    await store.saveHolidayConfig({ ...cfg, holidayDates: cfg.holidayDates.filter((d4) => d4 !== date) });
-  }
-  async function removeMakeup(date) {
-    const cfg = store.holidayConfig.value;
-    await store.saveHolidayConfig({ ...cfg, makeupWorkdays: cfg.makeupWorkdays.filter((d4) => d4 !== date) });
-  }
-  async function clearAll() {
-    await store.saveHolidayConfig({ ...store.holidayConfig.value, holidayDates: [], makeupWorkdays: [] });
-  }
-  const holidayCount = hc.holidayDates.length;
-  const makeupCount = hc.makeupWorkdays.length;
-  const totalCount = holidayCount + makeupCount;
-  return /* @__PURE__ */ u4(
-    "div",
-    {
-      style: {
-        position: "fixed",
-        top: "50%",
-        left: "50%",
-        transform: "translate(-50%, -50%)",
-        zIndex: 100,
-        background: "var(--background-primary, #fff)",
-        border: "1px solid var(--background-modifier-border, #ccc)",
-        borderRadius: "8px",
-        padding: "20px",
-        width: "360px",
-        maxHeight: "80vh",
-        overflowY: "auto",
-        boxShadow: "0 4px 20px rgba(0,0,0,0.15)"
-      },
-      children: [
-        /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }, children: [
-          /* @__PURE__ */ u4("h3", { style: { margin: 0, fontSize: "16px", fontWeight: 600 }, children: "Non-working Days" }),
-          /* @__PURE__ */ u4(
-            "button",
-            {
-              onClick: onClose,
-              style: {
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                fontSize: "18px",
-                color: "var(--text-muted, #999)",
-                padding: "0 4px",
-                lineHeight: 1
-              },
-              children: "x"
-            }
-          )
-        ] }),
-        /* @__PURE__ */ u4("label", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", cursor: "pointer", fontSize: "13px" }, children: [
-          /* @__PURE__ */ u4(
-            "input",
-            {
-              type: "checkbox",
-              checked: hc.weekendsEnabled,
-              onChange: (e4) => {
-                store.saveHolidayConfig({ ...store.holidayConfig.value, weekendsEnabled: e4.target.checked });
-              }
-            }
-          ),
-          "Show weekends as non-working"
-        ] }),
-        /* @__PURE__ */ u4("label", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px", cursor: "pointer", fontSize: "13px" }, children: [
-          /* @__PURE__ */ u4(
-            "input",
-            {
-              type: "checkbox",
-              checked: hc.holidaysEnabled,
-              onChange: (e4) => {
-                store.saveHolidayConfig({ ...store.holidayConfig.value, holidaysEnabled: e4.target.checked });
-              }
-            }
-          ),
-          "Show imported holidays as non-working"
-        ] }),
-        /* @__PURE__ */ u4("div", { style: { borderTop: "1px solid var(--background-modifier-border, #ddd)", paddingTop: "12px", marginBottom: "12px" }, children: [
-          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "8px", marginBottom: "8px" }, children: [
-            /* @__PURE__ */ u4(
-              "button",
-              {
-                onClick: handleImportFile,
-                disabled: importing.value,
-                style: {
-                  padding: "6px 14px",
-                  border: "1px solid var(--interactive-accent, #4A90D9)",
-                  borderRadius: "4px",
-                  background: "var(--interactive-accent, #4A90D9)",
-                  color: "#fff",
-                  cursor: "pointer",
-                  fontSize: "12px",
-                  fontWeight: 500,
-                  opacity: importing.value ? 0.6 : 1,
-                  whiteSpace: "nowrap"
-                },
-                children: importing.value ? "Importing..." : "Import .ics file"
-              }
-            ),
-            /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--text-muted, #999)", alignSelf: "center" }, children: "or" })
-          ] }),
-          /* @__PURE__ */ u4("div", { style: { display: "flex", gap: "6px" }, children: [
-            /* @__PURE__ */ u4(
-              "input",
-              {
-                type: "url",
-                placeholder: "https://...ics URL",
-                value: urlInput.value,
-                onInput: (e4) => {
-                  urlInput.value = e4.target.value;
-                },
-                onKeyDown: (e4) => {
-                  if (e4.key === "Enter")
-                    handleFetchUrl();
-                },
-                style: {
-                  flex: 1,
-                  padding: "5px 8px",
-                  fontSize: "11px",
-                  borderRadius: "3px",
-                  border: "1px solid var(--background-modifier-border, #ccc)",
-                  background: "var(--background-primary, #fff)",
-                  color: "var(--text-normal, #333)"
-                }
-              }
-            ),
-            /* @__PURE__ */ u4(
-              "button",
-              {
-                onClick: handleFetchUrl,
-                disabled: importing.value || !urlInput.value.trim(),
-                style: {
-                  padding: "5px 12px",
-                  border: "1px solid var(--background-modifier-border, #ccc)",
-                  borderRadius: "3px",
-                  background: "var(--background-secondary, #f5f5f5)",
-                  cursor: importing.value || !urlInput.value.trim() ? "default" : "pointer",
-                  fontSize: "11px",
-                  opacity: importing.value || !urlInput.value.trim() ? 0.5 : 1,
-                  whiteSpace: "nowrap"
-                },
-                children: "Fetch"
-              }
-            )
-          ] }),
-          importError.value && /* @__PURE__ */ u4("div", { style: { color: "var(--text-error, #e53935)", fontSize: "11px", marginTop: "6px" }, children: importError.value })
-        ] }),
-        totalCount > 0 && /* @__PURE__ */ u4("div", { style: { borderTop: "1px solid var(--background-modifier-border, #ddd)", paddingTop: "12px" }, children: [
-          /* @__PURE__ */ u4("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }, children: [
-            /* @__PURE__ */ u4("span", { style: { fontSize: "12px", fontWeight: 500 }, children: [
-              totalCount,
-              " date",
-              totalCount !== 1 ? "s" : ""
-            ] }),
-            /* @__PURE__ */ u4(
-              "button",
-              {
-                onClick: clearAll,
-                style: {
-                  padding: "2px 8px",
-                  border: "1px solid var(--text-error, #e53935)",
-                  borderRadius: "3px",
-                  background: "transparent",
-                  color: "var(--text-error, #e53935)",
-                  cursor: "pointer",
-                  fontSize: "11px"
-                },
-                children: "Clear all"
-              }
-            )
-          ] }),
-          holidayCount > 0 && /* @__PURE__ */ u4("div", { style: { marginBottom: makeupCount > 0 ? "12px" : "0" }, children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", fontWeight: 500, color: "var(--gantt-holiday-text, #c62828)", marginBottom: "4px" }, children: [
-              "Holidays \u4F11 (",
-              holidayCount,
-              ")"
-            ] }),
-            /* @__PURE__ */ u4("div", { style: { maxHeight: "140px", overflowY: "auto", fontSize: "12px" }, children: store.holidayConfig.value.holidayDates.map((date) => /* @__PURE__ */ u4(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "3px 0",
-                  borderBottom: "1px solid var(--background-modifier-border, #eee)"
-                },
-                children: [
-                  /* @__PURE__ */ u4("span", { children: date }),
-                  /* @__PURE__ */ u4(
-                    "button",
-                    {
-                      onClick: () => removeHoliday(date),
-                      style: {
-                        background: "none",
-                        border: "none",
-                        cursor: "pointer",
-                        color: "var(--text-muted, #999)",
-                        fontSize: "14px",
-                        padding: "0 4px"
-                      },
-                      title: "Remove",
-                      children: "x"
-                    }
-                  )
-                ]
-              },
-              date
-            )) })
-          ] }),
-          makeupCount > 0 && /* @__PURE__ */ u4("div", { children: [
-            /* @__PURE__ */ u4("div", { style: { fontSize: "11px", fontWeight: 500, color: "var(--gantt-makeup-text, #1565c0)", marginBottom: "4px" }, children: [
-              "Makeup workdays \u73ED (",
-              makeupCount,
-              ")"
-            ] }),
-            /* @__PURE__ */ u4("div", { style: { maxHeight: "140px", overflowY: "auto", fontSize: "12px" }, children: store.holidayConfig.value.makeupWorkdays.map((date) => /* @__PURE__ */ u4(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "3px 0",
-                  borderBottom: "1px solid var(--background-modifier-border, #eee)"
-                },
-                children: [
-                  /* @__PURE__ */ u4("span", { children: date }),
-                  /* @__PURE__ */ u4(
-                    "button",
-                    {
-                      onClick: () => removeMakeup(date),
-                      style: {
-                        background: "none",
-                        border: "none",
-                        cursor: "pointer",
-                        color: "var(--text-muted, #999)",
-                        fontSize: "14px",
-                        padding: "0 4px"
-                      },
-                      title: "Remove",
-                      children: "x"
-                    }
-                  )
-                ]
-              },
-              date
-            )) })
-          ] })
-        ] }),
-        totalCount === 0 && /* @__PURE__ */ u4("div", { style: { color: "var(--text-muted, #999)", fontSize: "12px", textAlign: "center", padding: "8px 0" }, children: "No imported dates. Import an .ics calendar file or fetch from URL." })
-      ]
-    }
-  );
 }
 function FilterMultiSelect(props) {
   const open = useSignal(false);
@@ -7671,33 +8347,32 @@ function FilterMultiSelect(props) {
   ] });
 }
 function GanttChart(props) {
-  const { store } = props;
-  const dragHandler = createDragHandler(store);
+  const { store: store2 } = props;
+  const dragHandler = createDragHandler(store2);
   const confirmState = useSignal(null);
   const showPendingPanel = useSignal(false);
   const showTagPanel = useSignal(false);
-  const showHolidayPanel = useSignal(false);
   let saveTimer = null;
   function scheduleSave() {
     if (saveTimer)
       clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => store.saveSettings(), 500);
+    saveTimer = setTimeout(() => store2.saveSettings(), 500);
   }
   function handleDeleteTask(taskId, title) {
     confirmState.value = {
       message: `Are you sure you want to delete task "${title}"? This action can be undone until changes are pushed upstream.`,
       onConfirm: () => {
-        store.deleteTask(taskId);
+        store2.deleteTask(taskId);
         confirmState.value = null;
       }
     };
   }
   function handleDeleteProject(projectId, name) {
-    const taskCount = store.mergedTasks.value.filter((t4) => t4.projectId.value === projectId).length;
+    const taskCount = store2.mergedTasks.value.filter((t4) => t4.projectId.value === projectId).length;
     confirmState.value = {
       message: `Are you sure you want to delete project "${name}"?${taskCount > 0 ? ` This will also delete ${taskCount} associated task(s).` : ""} This action can be undone until changes are pushed upstream.`,
       onConfirm: () => {
-        store.deleteProject(projectId);
+        store2.deleteProject(projectId);
         confirmState.value = null;
       }
     };
@@ -7717,11 +8392,7 @@ function GanttChart(props) {
           showTagPanel.value = false;
           return;
         }
-        if (showHolidayPanel.value) {
-          showHolidayPanel.value = false;
-          return;
-        }
-        store.selectEntity(null);
+        store2.selectEntity(null);
       }
       if (e4.key === "z" && (e4.ctrlKey || e4.metaKey)) {
         e4.preventDefault();
@@ -7743,16 +8414,16 @@ function GanttChart(props) {
   function handleDragOver(e4) {
     dragHandler.handleTimelineDragOver(e4);
   }
-  if (store.isLoading.value) {
+  if (store2.isLoading.value) {
     return /* @__PURE__ */ u4("div", { class: "gantt-loading", style: { padding: "24px", textAlign: "center", color: "var(--text-muted, #999)" }, children: "Loading..." });
   }
-  if (store.error.value) {
+  if (store2.error.value) {
     return /* @__PURE__ */ u4("div", { class: "gantt-error", style: { padding: "24px", textAlign: "center", color: "var(--text-error, #e00)" }, children: [
       "Error: ",
-      store.error.value
+      store2.error.value
     ] });
   }
-  if (!store.currentViewId.value) {
+  if (!store2.currentViewId.value) {
     return /* @__PURE__ */ u4("div", { class: "gantt-empty", style: { padding: "24px", textAlign: "center", color: "var(--text-muted, #999)" }, children: "No view selected. Create a view to get started." });
   }
   return /* @__PURE__ */ u4("div", { class: "gantt-chart", style: { width: "100%", height: "100%", display: "flex", flexDirection: "column" }, children: [
@@ -7781,7 +8452,7 @@ function GanttChart(props) {
                 cursor: "pointer",
                 fontSize: "12px"
               },
-              onClick: () => store.selectEntity(null),
+              onClick: () => store2.selectEntity(null),
               children: "Clear Selection"
             }
           ),
@@ -7799,11 +8470,11 @@ function GanttChart(props) {
                 fontSize: "12px"
               },
               onClick: async () => {
-                const view = store.views.value.find((v5) => v5.id === store.currentViewId.value);
+                const view = store2.views.value.find((v5) => v5.id === store2.currentViewId.value);
                 if (!view)
                   return;
                 for (const cid of view.connectors) {
-                  await store.refreshConnector(cid);
+                  await store2.refreshConnector(cid);
                 }
               },
               children: "Refresh"
@@ -7818,18 +8489,18 @@ function GanttChart(props) {
                 padding: "4px 12px",
                 border: "1px solid var(--interactive-accent, #4A90D9)",
                 borderRadius: "4px",
-                background: store.pendingChanges.value.length > 0 ? "var(--interactive-accent, #4A90D9)" : "var(--background-secondary, #f5f5f5)",
-                color: store.pendingChanges.value.length > 0 ? "#fff" : "var(--text-normal, #333)",
+                background: store2.pendingChanges.value.length > 0 ? "var(--interactive-accent, #4A90D9)" : "var(--background-secondary, #f5f5f5)",
+                color: store2.pendingChanges.value.length > 0 ? "#fff" : "var(--text-normal, #333)",
                 cursor: "pointer",
                 fontSize: "12px",
-                fontWeight: store.pendingChanges.value.length > 0 ? 500 : "normal"
+                fontWeight: store2.pendingChanges.value.length > 0 ? 500 : "normal"
               },
               onClick: () => {
                 showPendingPanel.value = true;
               },
               children: [
                 "Pending (",
-                store.pendingChanges.value.length,
+                store2.pendingChanges.value.length,
                 ")"
               ]
             }
@@ -7853,31 +8524,12 @@ function GanttChart(props) {
               children: "Tags"
             }
           ),
-          /* @__PURE__ */ u4(
-            "button",
-            {
-              class: "gantt-btn",
-              title: "Non-working day settings",
-              style: {
-                padding: "4px 12px",
-                border: "1px solid var(--background-modifier-border, #ccc)",
-                borderRadius: "4px",
-                background: "var(--background-secondary, #f5f5f5)",
-                cursor: "pointer",
-                fontSize: "12px"
-              },
-              onClick: () => {
-                showHolidayPanel.value = true;
-              },
-              children: "Calendar"
-            }
-          ),
           /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", fontSize: "12px" }, children: [
-            store.mergedTasks.value.length,
+            store2.mergedTasks.value.length,
             " tasks \xB7 ",
-            store.personGroups.value.length,
+            store2.personGroups.value.length,
             " people \xB7 ",
-            store.projectGroups.value.length,
+            store2.projectGroups.value.length,
             " projects"
           ] }),
           /* @__PURE__ */ u4("span", { style: { color: "var(--text-muted, #999)", fontSize: "12px", marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px" }, children: [
@@ -7885,17 +8537,17 @@ function GanttChart(props) {
               "input",
               {
                 type: "date",
-                value: store.filterTimeStart.value,
+                value: store2.filterTimeStart.value,
                 onInput: (e4) => {
-                  store.filterTimeStart.value = e4.target.value;
+                  store2.filterTimeStart.value = e4.target.value;
                   scheduleSave();
                 },
                 title: "Filter start date",
                 style: {
-                  padding: "2px 4px",
+                  padding: "2px 6px",
                   fontSize: "11px",
                   borderRadius: "3px",
-                  width: "110px",
+                  width: "120px",
                   border: "1px solid var(--background-modifier-border, #ccc)",
                   background: "var(--background-primary, #fff)",
                   color: "var(--text-normal, #333)"
@@ -7907,17 +8559,17 @@ function GanttChart(props) {
               "input",
               {
                 type: "date",
-                value: store.filterTimeEnd.value,
+                value: store2.filterTimeEnd.value,
                 onInput: (e4) => {
-                  store.filterTimeEnd.value = e4.target.value;
+                  store2.filterTimeEnd.value = e4.target.value;
                   scheduleSave();
                 },
                 title: "Filter end date",
                 style: {
-                  padding: "2px 4px",
+                  padding: "2px 6px",
                   fontSize: "11px",
                   borderRadius: "3px",
-                  width: "110px",
+                  width: "120px",
                   border: "1px solid var(--background-modifier-border, #ccc)",
                   background: "var(--background-primary, #fff)",
                   color: "var(--text-normal, #333)"
@@ -7929,9 +8581,9 @@ function GanttChart(props) {
               {
                 label: "Status",
                 options: STATUS_OPTIONS.map((o4) => ({ value: o4.value, label: o4.label })),
-                selected: store.filterStatuses.value,
+                selected: store2.filterStatuses.value,
                 onChange: (s5) => {
-                  store.filterStatuses.value = s5;
+                  store2.filterStatuses.value = s5;
                   scheduleSave();
                 }
               }
@@ -7940,16 +8592,16 @@ function GanttChart(props) {
               FilterMultiSelect,
               {
                 label: "Tags",
-                options: store.availableFilterTags.value,
-                selected: store.filterTags.value,
+                options: store2.availableFilterTags.value,
+                selected: store2.filterTags.value,
                 onChange: (s5) => {
-                  store.filterTags.value = s5;
+                  store2.filterTags.value = s5;
                   scheduleSave();
                 }
               }
             ),
-            store.filteredProjectGroupKeys.value !== null && /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--interactive-accent, #4A90D9)", fontWeight: 500 }, children: [
-              store.filteredProjectGroupKeys.value.size,
+            store2.filteredProjectGroupKeys.value !== null && /* @__PURE__ */ u4("span", { style: { fontSize: "11px", color: "var(--interactive-accent, #4A90D9)", fontWeight: 500 }, children: [
+              store2.filteredProjectGroupKeys.value.size,
               " matching"
             ] })
           ] })
@@ -7959,7 +8611,7 @@ function GanttChart(props) {
     /* @__PURE__ */ u4(
       DualPane,
       {
-        store,
+        store: store2,
         onTaskPointerDown: handleTaskPointerDown,
         onKeyDatePointerDown: handleKeyDatePointerDown,
         onDrop: handleDrop,
@@ -7981,7 +8633,7 @@ function GanttChart(props) {
     showPendingPanel.value && /* @__PURE__ */ u4(
       PendingChangesPanel,
       {
-        store,
+        store: store2,
         onClose: () => {
           showPendingPanel.value = false;
         }
@@ -7990,18 +8642,9 @@ function GanttChart(props) {
     showTagPanel.value && /* @__PURE__ */ u4(
       TagManagementPanel,
       {
-        store,
+        store: store2,
         onClose: () => {
           showTagPanel.value = false;
-        }
-      }
-    ),
-    showHolidayPanel.value && /* @__PURE__ */ u4(
-      HolidaySettingsPanel,
-      {
-        store,
-        onClose: () => {
-          showHolidayPanel.value = false;
         }
       }
     )
@@ -8009,7 +8652,7 @@ function GanttChart(props) {
 }
 
 // src/view.tsx
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/storage.ts
 var BASE = "obsidian-gantt-data";
@@ -8088,6 +8731,155 @@ function createObsidianStorage(adapter) {
   };
 }
 
+// src/logger.ts
+var LOG_DIR = "logs";
+var FLUSH_INTERVAL_MS = 5e3;
+var LogStore = class {
+  constructor() {
+    this.entries = [];
+    this.settings = { ...DEFAULT_LOG_SETTINGS };
+    this.flushTimer = null;
+    this.storage = null;
+  }
+  /** Initialise the store with an IStorage and optional settings. */
+  async init(storage, settings) {
+    this.storage = storage;
+    if (settings) {
+      this.settings = { ...this.settings, ...settings };
+    }
+    if (this.settings.enabled) {
+      this.startFlushTimer();
+      this.push(createLogEntry("info", "plugin", "Logging initialized", {
+        level: this.settings.level,
+        retentionDays: this.settings.retentionDays
+      }));
+    }
+    this.pruneOldLogs();
+  }
+  /** Update settings at runtime (e.g. from settings tab). */
+  updateSettings(settings) {
+    const previous = { ...this.settings };
+    this.settings = { ...this.settings, ...settings };
+    if (!this.settings.enabled && this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    } else if (this.settings.enabled && !this.flushTimer && this.storage) {
+      this.startFlushTimer();
+    }
+    if (this.settings.enabled) {
+      const changed = [];
+      if (settings.enabled !== void 0 && settings.enabled !== previous.enabled) {
+        changed.push(`enabled: ${previous.enabled} -> ${settings.enabled}`);
+      }
+      if (settings.level !== void 0 && settings.level !== previous.level) {
+        changed.push(`level: ${previous.level} -> ${settings.level}`);
+      }
+      if (settings.retentionDays !== void 0 && settings.retentionDays !== previous.retentionDays) {
+        changed.push(`retention: ${previous.retentionDays}d -> ${settings.retentionDays}d`);
+      }
+      if (changed.length > 0) {
+        this.push(createLogEntry("info", "plugin", "Log settings updated", { changes: changed }));
+      }
+    }
+  }
+  getSettings() {
+    return { ...this.settings };
+  }
+  /** Push an entry to the buffer. No-op if logging is disabled or level too low. */
+  push(entry) {
+    if (!this.settings.enabled)
+      return;
+    if (!meetsLevel(entry.level, this.settings.level))
+      return;
+    this.entries.push(entry);
+  }
+  /** Flush buffered entries to disk via IStorage. */
+  async flush() {
+    if (!this.storage || this.entries.length === 0)
+      return;
+    const toWrite = this.entries.splice(0);
+    const today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+    const filePath = `${LOG_DIR}/gantt-${today}.json`;
+    try {
+      let existing = [];
+      const raw = await this.storage.read(filePath);
+      if (raw) {
+        try {
+          existing = JSON.parse(raw);
+        } catch {
+          existing = [];
+        }
+      }
+      const merged = [...existing, ...toWrite];
+      const serialized = JSON.stringify(merged, null, 2);
+      await this.storage.write(filePath, serialized);
+      console.log(`[Gantt] Log flushed: ${toWrite.length} entries -> ${filePath} (${serialized.length} bytes)`);
+    } catch (err) {
+      console.error("[Gantt] Log flush failed:", err);
+    }
+  }
+  /** Clean up log files older than retentionDays. */
+  async pruneOldLogs() {
+    if (!this.storage)
+      return;
+    const cutoff = Date.now() - this.settings.retentionDays * 24 * 60 * 60 * 1e3;
+    try {
+      const files = await this.storage.list(LOG_DIR);
+      for (const f5 of files) {
+        const match = f5.match(/gantt-(\d{4}-\d{2}-\d{2})\.json$/);
+        if (match) {
+          const fileDate = new Date(match[1]).getTime();
+          if (fileDate < cutoff) {
+            await this.storage.delete(`${LOG_DIR}/${f5}`).catch(() => {
+            });
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  /** Destroy the store: flush and stop timer. */
+  async destroy() {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    await this.flush();
+  }
+  startFlushTimer() {
+    this.flushTimer = setInterval(() => {
+      this.flush().catch(() => {
+      });
+    }, FLUSH_INTERVAL_MS);
+  }
+};
+var store = new LogStore();
+function createObsidianLogger(source) {
+  return {
+    debug(message, data) {
+      store.push(createLogEntry("debug", source, message, data));
+    },
+    info(message, data) {
+      store.push(createLogEntry("info", source, message, data));
+    },
+    warn(message, data) {
+      store.push(createLogEntry("warn", source, message, data));
+    },
+    error(message, data) {
+      store.push(createLogEntry("error", source, message, data));
+    }
+  };
+}
+async function initLogStore(storage, settings) {
+  await store.init(storage, settings);
+}
+function updateLogSettings(settings) {
+  store.updateSettings(settings);
+}
+function destroyLogStore() {
+  return store.destroy();
+}
+
 // src/connector-loader.ts
 function createObsidianConnectorLoader(adapter, requestUrl2) {
   return {
@@ -8114,6 +8906,14 @@ function createObsidianConnectorLoader(adapter, requestUrl2) {
             "CONNECTOR_SCRIPT_ERROR"
           );
         }
+        const hasFetchDetail = typeof mod.fetchDetail === "function";
+        const hasTransformDetail = typeof mod.transformDetail === "function";
+        if (hasFetchDetail !== hasTransformDetail) {
+          throw new PlatformError(
+            `Connector script must export both fetchDetail() and transformDetail() together, or neither. Found: fetchDetail=${hasFetchDetail}, transformDetail=${hasTransformDetail}`,
+            "CONNECTOR_SCRIPT_ERROR"
+          );
+        }
         return mod;
       } catch (e4) {
         if (e4 instanceof PlatformError)
@@ -8127,11 +8927,14 @@ function createObsidianConnectorLoader(adapter, requestUrl2) {
     }
   };
 }
-function createObsidianConnectorContext(config, vaultAdapter, requestUrl2, viewState) {
+function createObsidianConnectorContext(connectorCfg, vaultAdapter, requestUrl2, viewState, connectorId) {
+  const logger = createObsidianLogger(connectorId ? `connector:${connectorId}` : "connector");
+  const innerConfig = connectorCfg.config ?? connectorCfg;
   return {
-    config,
+    config: innerConfig,
     viewState,
-    log: (...args) => console.log("[Gantt Connector]", ...args),
+    log: (message) => logger.info(message),
+    logger,
     request: async (url, opts) => {
       const result = await requestUrl2({
         url,
@@ -8170,7 +8973,7 @@ function createObsidianPlatform(app) {
     }
   };
   const connectorLoader = createObsidianConnectorLoader(adapter, (...args) => fetchRef.requestUrl(...args));
-  const createConnectorContext = (config, viewState) => createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args), viewState);
+  const createConnectorContext = (config, viewState, connectorId) => createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args), viewState, connectorId);
   const theme = {
     isDark: () => {
       const body = document.body;
@@ -8192,6 +8995,7 @@ function createObsidianPlatform(app) {
     fetch: globalThis.fetch.bind(globalThis),
     connectorLoader,
     createConnectorContext,
+    createLogger: (source) => createObsidianLogger(source),
     watcher: null,
     // File watching handled by Obsidian's vault events
     theme,
@@ -8262,9 +9066,507 @@ function bindObsidianFetch(platform, requestUrl2) {
   }
 }
 
+// src/settings.ts
+var import_obsidian2 = require("obsidian");
+var DEFAULT_SETTINGS = {
+  holidayConfig: {
+    weekendsEnabled: true,
+    holidaysEnabled: true,
+    holidayDates: [],
+    makeupWorkdays: []
+  },
+  logSettings: { ...DEFAULT_LOG_SETTINGS }
+};
+var pluginSettings = { ...DEFAULT_SETTINGS };
+function getSettings() {
+  return pluginSettings;
+}
+async function saveSettings(plugin, update) {
+  pluginSettings = { ...pluginSettings, ...update };
+  if (update.logSettings) {
+    updateLogSettings(update.logSettings);
+  }
+  await plugin.saveData(pluginSettings);
+}
+async function migrateHolidayConfig(plugin, vault) {
+  const settingsDir = "obsidian-gantt-data/settings";
+  try {
+    const listResult = await vault.adapter.list(settingsDir);
+    const files = listResult?.files ?? [];
+    const merged = {
+      weekendsEnabled: true,
+      holidaysEnabled: true,
+      holidayDates: [],
+      makeupWorkdays: []
+    };
+    let found = false;
+    for (const filePath of files) {
+      try {
+        const exists = await vault.adapter.exists(filePath);
+        if (!exists)
+          continue;
+        const raw = await vault.adapter.read(filePath);
+        const data = JSON.parse(raw);
+        if (!data.holidayConfig)
+          continue;
+        found = true;
+        const hc = data.holidayConfig;
+        if (hc.holidayDates) {
+          for (const d4 of hc.holidayDates) {
+            if (!merged.holidayDates.includes(d4))
+              merged.holidayDates.push(d4);
+          }
+        }
+        if (hc.makeupWorkdays) {
+          for (const d4 of hc.makeupWorkdays) {
+            if (!merged.makeupWorkdays.includes(d4))
+              merged.makeupWorkdays.push(d4);
+          }
+        }
+        if (hc.weekendsEnabled !== void 0 && found) {
+          merged.weekendsEnabled = hc.weekendsEnabled;
+        }
+        if (hc.holidaysEnabled !== void 0) {
+          merged.holidaysEnabled = hc.holidaysEnabled;
+        }
+        delete data.holidayConfig;
+        await vault.adapter.write(filePath, JSON.stringify(data, null, 2));
+      } catch {
+      }
+    }
+    return found ? merged : null;
+  } catch {
+    return null;
+  }
+}
+var TAB_DEFS = [
+  { id: "holidays", label: "Holidays" },
+  { id: "connectors", label: "Connectors" },
+  { id: "logging", label: "Logging" }
+];
+function injectStyles(container) {
+  if (container.querySelector("#gantt-settings-styles"))
+    return;
+  const style = document.createElement("style");
+  style.id = "gantt-settings-styles";
+  style.textContent = `
+    .gantt-tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--background-modifier-border); margin-bottom: 20px; padding: 0 4px; }
+    .gantt-tab-btn { padding: 8px 20px; font-size: 13px; font-weight: 500; border: none; border-bottom: 2px solid transparent; background: none; color: var(--text-muted); cursor: pointer; border-radius: 0; transition: color 0.15s, border-color 0.15s; }
+    .gantt-tab-btn:hover { color: var(--text-normal); background: none; }
+    .gantt-tab-btn.active { color: var(--text-accent); border-bottom-color: var(--text-accent); }
+    .gantt-tab-content { display: none; }
+    .gantt-tab-content.active { display: block; }
+    .gantt-date-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px 0; }
+    .gantt-date-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 12px; border-radius: 12px; background: var(--background-modifier-hover); border: 1px solid var(--background-modifier-border); }
+    .gantt-date-chip .gantt-chip-remove { cursor: pointer; opacity: 0.5; font-size: 14px; line-height: 1; padding: 0 2px; }
+    .gantt-date-chip .gantt-chip-remove:hover { opacity: 1; color: var(--text-error); }
+    .gantt-date-chip.holiday { border-color: var(--text-error); background: rgba(var(--color-red-rgb), 0.08); }
+    .gantt-date-chip.makeup { border-color: var(--text-accent); background: rgba(var(--color-blue-rgb), 0.08); }
+    .gantt-connector-card { padding: 10px 12px; margin-bottom: 8px; border: 1px solid var(--background-modifier-border); border-radius: 6px; background: var(--background-secondary); }
+    .gantt-connector-card .gantt-connector-header { display: flex; align-items: center; gap: 10px; }
+    .gantt-connector-card .gantt-connector-name { font-weight: 600; font-size: 13px; flex: 1; }
+    .gantt-connector-card .gantt-connector-meta { font-size: 11px; color: var(--text-muted); }
+    .gantt-connector-card .gantt-connector-actions { display: flex; gap: 6px; }
+    .gantt-inline-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .gantt-inline-row label { font-size: 12px; color: var(--text-muted); min-width: 80px; white-space: nowrap; }
+    .gantt-inline-row input[type="text"], .gantt-inline-row input[type="number"] { flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); }
+    .gantt-inline-row textarea { width: 100%; font-family: var(--font-monospace); font-size: 12px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); resize: vertical; }
+    .gantt-section-label { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-faint); margin: 16px 0 6px 0; letter-spacing: 0.5px; }
+    .gantt-empty-hint { font-size: 12px; color: var(--text-faint); font-style: italic; }
+    .gantt-view-selector { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+    .gantt-view-selector label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+    .gantt-view-selector select { flex: 1; padding: 4px 8px; font-size: 12px; border: 1px solid var(--background-modifier-border); border-radius: 4px; background: var(--background-primary); color: var(--text-normal); }
+    .gantt-toggle-icon { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 3px; border: 1px solid var(--background-modifier-border); cursor: pointer; font-size: 14px; line-height: 1; flex-shrink: 0; }
+    .gantt-toggle-icon.on { background: var(--text-accent); color: var(--text-on-accent); border-color: var(--text-accent); }
+    .gantt-toggle-icon.off { background: transparent; color: transparent; }
+  `;
+  container.appendChild(style);
+}
+var GanttSettingTab = class extends import_obsidian2.PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.activeTab = "holidays";
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    injectStyles(containerEl);
+    containerEl.createEl("h2", { text: "Gantt Chart" });
+    const tabBar = containerEl.createDiv("gantt-tab-bar");
+    const contentArea = containerEl.createDiv();
+    for (const tab of TAB_DEFS) {
+      const btn = tabBar.createEl("button", {
+        text: tab.label,
+        cls: `gantt-tab-btn${tab.id === this.activeTab ? " active" : ""}`
+      });
+      btn.onclick = () => {
+        this.activeTab = tab.id;
+        this.display();
+      };
+      const panel = contentArea.createDiv(
+        `gantt-tab-content${tab.id === this.activeTab ? " active" : ""}`
+      );
+      switch (tab.id) {
+        case "holidays":
+          this.renderHolidaysTab(panel);
+          break;
+        case "connectors":
+          this.renderConnectorsTab(panel);
+          break;
+        case "logging":
+          this.renderLoggingTab(panel);
+          break;
+      }
+    }
+  }
+  // ═══════════════════════════════════════════════════════════
+  // Holidays Tab
+  // ═══════════════════════════════════════════════════════════
+  renderHolidaysTab(el) {
+    const hc = pluginSettings.holidayConfig;
+    new import_obsidian2.Setting(el).setName("Weekend shading").setDesc("Mark Sat/Sun as non-working").addToggle((t4) => t4.setValue(hc.weekendsEnabled).onChange(async (v5) => {
+      hc.weekendsEnabled = v5;
+      await saveSettings(this.plugin, { holidayConfig: hc });
+    }));
+    new import_obsidian2.Setting(el).setName("Holiday markers").setDesc("Show \u4F11/\u73ED indicators on holiday dates").addToggle((t4) => t4.setValue(hc.holidaysEnabled).onChange(async (v5) => {
+      hc.holidaysEnabled = v5;
+      await saveSettings(this.plugin, { holidayConfig: hc });
+    }));
+    el.createEl("div", { cls: "gantt-section-label", text: "Holiday Dates (\u4F11)" });
+    const holidayChips = el.createDiv("gantt-date-chips");
+    if (hc.holidayDates.length === 0) {
+      holidayChips.createEl("span", { cls: "gantt-empty-hint", text: "No holiday dates" });
+    } else {
+      for (const date of [...hc.holidayDates].sort()) {
+        const chip = holidayChips.createDiv("gantt-date-chip holiday");
+        chip.createEl("span", { text: "\u4F11" });
+        chip.createEl("span", { text: date });
+        const rm = chip.createEl("span", { cls: "gantt-chip-remove", text: "\xD7" });
+        rm.onclick = async () => {
+          const idx = hc.holidayDates.indexOf(date);
+          if (idx >= 0)
+            hc.holidayDates.splice(idx, 1);
+          await saveSettings(this.plugin, { holidayConfig: hc });
+          this.display();
+        };
+      }
+    }
+    el.createEl("div", { cls: "gantt-section-label", text: "Makeup Workdays (\u73ED)" });
+    const makeupChips = el.createDiv("gantt-date-chips");
+    if (hc.makeupWorkdays.length === 0) {
+      makeupChips.createEl("span", { cls: "gantt-empty-hint", text: "No makeup workdays" });
+    } else {
+      for (const date of [...hc.makeupWorkdays].sort()) {
+        const chip = makeupChips.createDiv("gantt-date-chip makeup");
+        chip.createEl("span", { text: "\u73ED" });
+        chip.createEl("span", { text: date });
+        const rm = chip.createEl("span", { cls: "gantt-chip-remove", text: "\xD7" });
+        rm.onclick = async () => {
+          const idx = hc.makeupWorkdays.indexOf(date);
+          if (idx >= 0)
+            hc.makeupWorkdays.splice(idx, 1);
+          await saveSettings(this.plugin, { holidayConfig: hc });
+          this.display();
+        };
+      }
+    }
+    el.createEl("div", { cls: "gantt-section-label", text: "Import from Calendar" });
+    const fileRow = el.createDiv("gantt-inline-row");
+    fileRow.createEl("label", { text: ".ics file" });
+    const fileBtn = fileRow.createEl("button", { text: "Choose file..." });
+    fileBtn.onclick = () => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".ics,.ical,.icalendar,text/calendar";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file)
+          return;
+        const text = await file.text();
+        this.mergeICS(text);
+      };
+      input.click();
+    };
+    const urlRow = el.createDiv("gantt-inline-row");
+    urlRow.createEl("label", { text: "URL" });
+    const urlInput = urlRow.createEl("input", {
+      type: "text",
+      attr: { placeholder: "https://example.com/holidays.ics" }
+    });
+    const fetchBtn = urlRow.createEl("button", { text: "Fetch" });
+    fetchBtn.onclick = async () => {
+      const url = urlInput.value.trim();
+      if (!url)
+        return;
+      try {
+        const resp = await fetch(url);
+        const text = await resp.text();
+        await this.mergeICS(text);
+      } catch {
+      }
+    };
+  }
+  async mergeICS(text) {
+    const hc = pluginSettings.holidayConfig;
+    const events = parseICS(text);
+    const classified = classifyICSEvents(events);
+    for (const d4 of classified.holidayDates) {
+      if (!hc.holidayDates.includes(d4))
+        hc.holidayDates.push(d4);
+    }
+    for (const d4 of classified.makeupWorkdays) {
+      if (!hc.makeupWorkdays.includes(d4))
+        hc.makeupWorkdays.push(d4);
+    }
+    await saveSettings(this.plugin, { holidayConfig: hc });
+    this.display();
+  }
+  // ═══════════════════════════════════════════════════════════
+  // Connectors Tab
+  // ═══════════════════════════════════════════════════════════
+  async renderConnectorsTab(el) {
+    const vault = this.app.vault;
+    const adapter = vault.adapter;
+    let viewFiles = [];
+    let viewMap = /* @__PURE__ */ new Map();
+    try {
+      const listResult = await adapter.list("obsidian-gantt-data/views");
+      viewFiles = (listResult?.files ?? []).map((f5) => {
+        const parts = f5.split("/");
+        return parts[parts.length - 1];
+      }).filter((f5) => f5.endsWith(".json"));
+    } catch {
+    }
+    for (const f5 of viewFiles) {
+      try {
+        const raw = await adapter.read(`obsidian-gantt-data/views/${f5}`);
+        if (raw) {
+          const v5 = JSON.parse(raw);
+          viewMap.set(v5.id, { id: v5.id, name: v5.name ?? v5.id, connectors: v5.connectors ?? [] });
+        }
+      } catch {
+      }
+    }
+    if (viewMap.size === 0) {
+      el.createEl("p", { cls: "gantt-empty-hint", text: "No views found. Open a Gantt chart view first." });
+      return;
+    }
+    let selectedViewId = viewMap.values().next().value?.id ?? "";
+    const selectorRow = el.createDiv("gantt-view-selector");
+    selectorRow.createEl("label", { text: "Configure connectors for:" });
+    const selectEl = selectorRow.createEl("select");
+    for (const [id, v5] of viewMap) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = v5.name;
+      selectEl.appendChild(opt);
+    }
+    const connectorList = el.createDiv();
+    const renderList = () => this.renderConnectorList(connectorList, selectedViewId, viewMap);
+    selectEl.onchange = () => {
+      selectedViewId = selectEl.value;
+      renderList();
+    };
+    renderList();
+  }
+  async renderConnectorList(el, viewId, viewMap) {
+    el.empty();
+    const vault = this.app.vault;
+    const adapter = vault.adapter;
+    const activeConnectors = viewMap.get(viewId)?.connectors ?? [];
+    el.createEl("div", { cls: "gantt-section-label", text: "Available Connectors" });
+    let jsFiles = [];
+    try {
+      const listResult = await adapter.list("connectors");
+      const allFiles = listResult?.files ?? [];
+      jsFiles = allFiles.filter((f5) => f5.endsWith(".js"));
+    } catch {
+    }
+    if (jsFiles.length === 0) {
+      el.createEl("p", { cls: "gantt-empty-hint", text: "Place .js connector scripts in the connectors/ directory at your vault root." });
+      return;
+    }
+    for (const scriptPath of jsFiles) {
+      const fileName = scriptPath.split("/").pop() ?? scriptPath;
+      const connectorId = fileName.replace(/\.js$/, "");
+      const isActive = activeConnectors.includes(connectorId);
+      let meta = { name: connectorId, refreshInterval: 0, config: {} };
+      try {
+        const raw = await adapter.read(`obsidian-gantt-data/connectors/${connectorId}.json`);
+        if (raw) {
+          const cfg = JSON.parse(raw);
+          meta = { name: cfg.name ?? connectorId, refreshInterval: cfg.refreshInterval ?? 0, config: cfg.config ?? {} };
+        }
+      } catch {
+      }
+      const card = el.createDiv("gantt-connector-card");
+      const header = card.createDiv("gantt-connector-header");
+      const toggle = header.createDiv("gantt-toggle-icon");
+      toggle.className = isActive ? "gantt-toggle-icon on" : "gantt-toggle-icon off";
+      if (isActive)
+        toggle.textContent = "\u2713";
+      toggle.title = isActive ? "Click to disable" : "Click to enable";
+      toggle.onclick = async () => {
+        const view = viewMap.get(viewId);
+        if (!view)
+          return;
+        const newActive = !view.connectors.includes(connectorId);
+        if (newActive) {
+          view.connectors.push(connectorId);
+        } else {
+          view.connectors = view.connectors.filter((c4) => c4 !== connectorId);
+        }
+        const viewRaw = await adapter.read(`obsidian-gantt-data/views/${viewId}.json`);
+        if (viewRaw) {
+          const vd = JSON.parse(viewRaw);
+          vd.connectors = view.connectors;
+          await adapter.write(`obsidian-gantt-data/views/${viewId}.json`, JSON.stringify(vd, null, 2));
+        }
+        await this.renderConnectorList(el, viewId, viewMap);
+      };
+      header.createEl("span", { cls: "gantt-connector-name", text: meta.name });
+      header.createEl("span", { cls: "gantt-connector-meta", text: scriptPath });
+      const actions = header.createDiv("gantt-connector-actions");
+      const editBtn = actions.createEl("button", { text: "Configure" });
+      editBtn.style.fontSize = "11px";
+      editBtn.style.padding = "2px 8px";
+      const editForm = card.createDiv();
+      editForm.style.display = "none";
+      editForm.style.marginTop = "10px";
+      editForm.style.padding = "10px";
+      editForm.style.borderTop = "1px solid var(--background-modifier-border)";
+      editBtn.onclick = () => {
+        const visible = editForm.style.display === "block";
+        editForm.style.display = visible ? "none" : "block";
+        if (!visible) {
+          this.renderConnectorEditForm(editForm, connectorId, meta.name, scriptPath, meta.refreshInterval, meta.config);
+        }
+      };
+    }
+  }
+  renderConnectorEditForm(container, connectorId, currentName, currentScript, currentInterval, currentConfig) {
+    container.empty();
+    let editName = currentName;
+    let editScript = currentScript;
+    let editInterval = String(currentInterval);
+    let editConfig = JSON.stringify(currentConfig, null, 2);
+    let configError = "";
+    const row1 = container.createDiv("gantt-inline-row");
+    row1.createEl("label", { text: "Name" });
+    const nameInput = row1.createEl("input", { type: "text" });
+    nameInput.value = editName;
+    nameInput.oninput = () => {
+      editName = nameInput.value;
+    };
+    const row2 = container.createDiv("gantt-inline-row");
+    row2.createEl("label", { text: "Script" });
+    const scriptInput = row2.createEl("input", { type: "text" });
+    scriptInput.value = editScript;
+    scriptInput.oninput = () => {
+      editScript = scriptInput.value;
+    };
+    const row3 = container.createDiv("gantt-inline-row");
+    row3.createEl("label", { text: "Refresh (s)" });
+    const intervalInput = row3.createEl("input", { type: "number", attr: { min: "0", placeholder: "0" } });
+    intervalInput.value = editInterval;
+    intervalInput.oninput = () => {
+      editInterval = intervalInput.value;
+    };
+    row3.createEl("span", { cls: "gantt-connector-meta", text: "0 = manual only" });
+    const configLabel = container.createEl("div", { cls: "gantt-section-label", text: "Config (JSON)" });
+    configLabel.style.marginTop = "8px";
+    const textarea = container.createEl("textarea", { attr: { rows: "5" } });
+    textarea.className = "gantt-inline-row";
+    textarea.style.width = "100%";
+    textarea.style.fontFamily = "var(--font-monospace)";
+    textarea.style.fontSize = "12px";
+    textarea.style.padding = "6px";
+    textarea.style.border = "1px solid var(--background-modifier-border)";
+    textarea.style.borderRadius = "4px";
+    textarea.style.background = "var(--background-primary)";
+    textarea.style.color = "var(--text-normal)";
+    textarea.style.resize = "vertical";
+    textarea.value = editConfig;
+    textarea.oninput = () => {
+      editConfig = textarea.value;
+      try {
+        JSON.parse(editConfig);
+        configError = "";
+        textarea.style.borderColor = "";
+      } catch {
+        configError = "Invalid JSON";
+        textarea.style.borderColor = "var(--text-error)";
+      }
+    };
+    if (configError) {
+      const err = container.createEl("p");
+      err.style.color = "var(--text-error)";
+      err.style.fontSize = "11px";
+      err.textContent = configError;
+    }
+    const btnRow = container.createDiv("gantt-inline-row");
+    btnRow.style.marginTop = "10px";
+    const saveBtn = btnRow.createEl("button", { text: "Save" });
+    saveBtn.className = "mod-cta";
+    saveBtn.style.fontSize = "12px";
+    saveBtn.onclick = async () => {
+      if (configError)
+        return;
+      const configData = editConfig.trim() ? JSON.parse(editConfig) : {};
+      const interval = parseInt(editInterval, 10);
+      const out = {
+        id: connectorId,
+        name: editName || connectorId,
+        script: editScript,
+        refreshInterval: isNaN(interval) ? 0 : interval,
+        config: configData
+      };
+      const vault = this.app.vault;
+      await vault.adapter.write(
+        `obsidian-gantt-data/connectors/${connectorId}.json`,
+        JSON.stringify(out, null, 2)
+      );
+      this.display();
+    };
+    const cancelBtn = btnRow.createEl("button", { text: "Cancel" });
+    cancelBtn.style.fontSize = "12px";
+    cancelBtn.onclick = () => {
+      this.display();
+    };
+  }
+  // ═══════════════════════════════════════════════════════════
+  // Logging Tab
+  // ═══════════════════════════════════════════════════════════
+  renderLoggingTab(el) {
+    const ls = pluginSettings.logSettings;
+    new import_obsidian2.Setting(el).setName("Enable logging").setDesc("Record communication data between Gantt chart and connectors to daily log files").addToggle((t4) => t4.setValue(ls.enabled).onChange(async (v5) => {
+      ls.enabled = v5;
+      await saveSettings(this.plugin, { logSettings: ls });
+    }));
+    new import_obsidian2.Setting(el).setName("Minimum level").setDesc("Debug captures raw data samples; Error only records failures").addDropdown((d4) => d4.addOption("debug", "Debug \u2014 all details").addOption("info", "Info \u2014 key steps").addOption("warn", "Warn \u2014 issues only").addOption("error", "Error \u2014 failures only").setValue(ls.level).onChange(async (v5) => {
+      ls.level = v5;
+      await saveSettings(this.plugin, { logSettings: ls });
+    }));
+    new import_obsidian2.Setting(el).setName("Retention").setDesc("Days to keep log files before auto-deletion").addText((t4) => t4.setValue(String(ls.retentionDays)).setPlaceholder("30").onChange(async (v5) => {
+      const n3 = parseInt(v5, 10);
+      if (!isNaN(n3) && n3 > 0) {
+        ls.retentionDays = n3;
+        await saveSettings(this.plugin, { logSettings: ls });
+      }
+    }));
+    el.lastChild?.querySelector("input")?.setAttribute("type", "number");
+    el.lastChild?.querySelector("input")?.setAttribute("style", "width: 70px;");
+    el.createEl("p", {
+      cls: "gantt-empty-hint",
+      text: "Log files: obsidian-gantt-data/logs/gantt-YYYY-MM-DD.json"
+    });
+  }
+};
+
 // src/view.tsx
 var VIEW_TYPE = "obsidian-gantt-view";
-var GanttView = class extends import_obsidian2.ItemView {
+var GanttView = class extends import_obsidian3.ItemView {
   constructor(leaf) {
     super(leaf);
     this.store = null;
@@ -8281,8 +9583,9 @@ var GanttView = class extends import_obsidian2.ItemView {
   }
   async onOpen() {
     this.platform = createObsidianPlatform(this.app);
-    bindObsidianFetch(this.platform, import_obsidian2.requestUrl);
+    bindObsidianFetch(this.platform, import_obsidian3.requestUrl);
     this.store = createGanttStore(this.platform);
+    this.store.setHolidayConfig(getSettings().holidayConfig);
     const vault = this.app.vault;
     const BASE2 = "obsidian-gantt-data";
     for (const sub of ["tags", "settings"]) {
@@ -8372,8 +9675,22 @@ var GanttView = class extends import_obsidian2.ItemView {
 };
 
 // src/main.ts
-var GanttPlugin = class extends import_obsidian3.Plugin {
+var GanttPlugin = class extends import_obsidian4.Plugin {
   async onload() {
+    const data = await this.loadData();
+    const saved = data && typeof data === "object" ? data : {};
+    const settings = { ...DEFAULT_SETTINGS, ...saved };
+    await saveSettings(this, settings);
+    const vault = this.app.vault;
+    if (!data?.holidayConfig) {
+      const migrated = await migrateHolidayConfig(this, vault);
+      if (migrated) {
+        await saveSettings(this, { holidayConfig: migrated });
+      }
+    }
+    const logStorage = createObsidianStorage(vault.adapter);
+    await initLogStore(logStorage, getSettings().logSettings);
+    this.addSettingTab(new GanttSettingTab(this.app, this));
     this.registerView(
       VIEW_TYPE,
       (leaf) => new GanttView(leaf)
@@ -8390,6 +9707,7 @@ var GanttPlugin = class extends import_obsidian3.Plugin {
     });
   }
   async onunload() {
+    await destroyLogStore();
   }
   async activateView() {
     const { workspace } = this.app;
