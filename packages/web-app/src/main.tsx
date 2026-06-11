@@ -1,8 +1,9 @@
 import { render } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { createGanttStore, GanttChart } from '@obsidian-gantt/ui';
-import type { GanttPlatform, IStorage, Theme, IConnectorLoader, ConnectorContext, CsvParseOptions } from '@obsidian-gantt/core';
+import type { GanttPlatform, IStorage, Theme, IConnectorLoader, ConnectorModule, ConnectorContext, CsvParseOptions } from '@obsidian-gantt/core';
 import { parseCSV } from '@obsidian-gantt/core';
+import { createWebLogger, pruneWebLogs } from './logger';
 
 // ── Browser localStorage adapter ──────────────────────────────────
 
@@ -43,21 +44,71 @@ const browserTheme: Theme = {
   variables: {},
 };
 
-// ── Dummy connector loader ────────────────────────────────────────
+// ── Web connector loader ──────────────────────────────────────────
 
-const dummyConnectorLoader: IConnectorLoader = {
-  async load(_scriptPath: string) {
-    throw new Error('Connector loading not implemented in web demo');
+const webConnectorLoader: IConnectorLoader = {
+  async load(scriptPath: string): Promise<ConnectorModule> {
+    // Try multiple base paths: relative to current origin, then relative to the page
+    const bases = ['.', '/connectors'];
+    let source: string | null = null;
+
+    for (const base of bases) {
+      try {
+        const url = `${base}/${scriptPath}`;
+        const response = await window.fetch(url);
+        if (response.ok) {
+          source = await response.text();
+          break;
+        }
+      } catch { /* try next base */ }
+    }
+
+    if (!source) {
+      throw new Error(`Connector script not found: ${scriptPath}`);
+    }
+
+    // Execute the connector script in a controlled scope
+    const moduleCode = `
+      const module = { exports: {} };
+      const exports = module.exports;
+      ${source}
+      return module.exports;
+    `;
+
+    // eslint-disable-next-line no-new-func
+    const fn = new Function(moduleCode);
+    const mod = fn() as ConnectorModule;
+
+    if (!mod || typeof mod.fetch !== 'function' || typeof mod.transform !== 'function') {
+      throw new Error(
+        `Connector script must export fetch() and transform() functions. Found: ${Object.keys(mod ?? {}).join(', ')}`
+      );
+    }
+
+    // Validate detail method pairing
+    const hasFetchDetail = typeof mod.fetchDetail === 'function';
+    const hasTransformDetail = typeof mod.transformDetail === 'function';
+    if (hasFetchDetail !== hasTransformDetail) {
+      throw new Error(
+        `Connector script must export both fetchDetail() and transformDetail() together, or neither.`
+      );
+    }
+
+    return mod;
   },
 };
 
 // ── Web connector context factory ──────────────────────────────────
 
-function createWebConnectorContext(config: Record<string, unknown>, viewState?: any): ConnectorContext {
+function createWebConnectorContext(connectorCfg: Record<string, unknown>, viewState?: any, connectorId?: string): ConnectorContext {
+  const source = connectorId ? `connector:${connectorId}` : 'connector';
+  const logger = createWebLogger(source);
+  const innerConfig = (connectorCfg.config ?? connectorCfg) as Record<string, unknown>;
   return {
-    config,
+    config: innerConfig,
     viewState,
-    log: (...args: unknown[]) => console.log('[Gantt Connector]', ...args),
+    log: (message: string) => logger.info(message),
+    logger,
     request: (url: string, opts?: RequestInit) => window.fetch(url, opts),
     readFile: async (path: string): Promise<string> => {
       const response = await window.fetch(path);
@@ -80,8 +131,9 @@ function createWebConnectorContext(config: Record<string, unknown>, viewState?: 
 const platform: GanttPlatform = {
   storage: browserStorage,
   fetch: window.fetch.bind(window),
-  connectorLoader: dummyConnectorLoader,
-  createConnectorContext: (config: Record<string, unknown>, viewState?: any) => createWebConnectorContext(config, viewState),
+  connectorLoader: webConnectorLoader,
+  createConnectorContext: (config: Record<string, unknown>, viewState?: any, connectorId?: string) => createWebConnectorContext(config, viewState, connectorId),
+  createLogger: (source: string) => createWebLogger(source),
   watcher: null,
   theme: browserTheme,
   setIcon(el: HTMLElement, name: string) {
@@ -204,9 +256,16 @@ async function seedSampleData() {
   await platform.storage.write('views/demo.json', JSON.stringify(view, null, 2));
   await platform.storage.write('cache/sample.json', JSON.stringify(cache, null, 2));
   await platform.storage.write('edits/demo.json', JSON.stringify(edits, null, 2));
+
+  // Also seed a connector config so detail fetching can locate the connector
+  const connectorCfg = { script: 'connectors/api-connector.js', config: { baseUrl: 'http://localhost:3456', pushDelay: 800, failEvery: 0 } };
+  await platform.storage.write('connectors/sample.json', JSON.stringify(connectorCfg, null, 2));
 }
 
 // ── App ────────────────────────────────────────────────────────────
+
+// Prune expired logs on startup
+pruneWebLogs();
 
 function App() {
   const store = createGanttStore(platform);

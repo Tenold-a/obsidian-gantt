@@ -30,7 +30,7 @@ cat > "$PKG/README.md" << 'SETUPEOF'
 obsidian-gantt-test/
 ├── connectors/
 │   ├── csv-connector.js       # CSV 文件连接器
-│   ├── test-api-connector.js  # 测试 API 连接器
+│   ├── api-connector.js       # 测试 API 连接器
 │   ├── sample-persons.csv     # 示例：人员数据
 │   ├── sample-projects.csv    # 示例：项目数据
 │   └── sample-tasks.csv       # 示例：任务数据
@@ -59,7 +59,7 @@ obsidian-gantt-test/
 
 ### 方式二：测试 API 服务（支持增删改）
 
-1. 将 `connectors/test-api-connector.js` 复制到插件 connectors 目录
+1. 将 `connectors/api-connector.js` 复制到插件 connectors 目录
 
 2. 启动测试服务：
    ```bash
