@@ -75,7 +75,7 @@ export function applyStatusCascade(
 
 const EDITABLE_FIELDS = [
   'title', 'startDate', 'endDate', 'progress', 'status',
-  'personId', 'projectId', 'parentId', 'dependencies', 'tags', 'url',
+  'personId', 'projectId', 'parentId', 'dependencies', 'tags', 'url', 'description',
 ] as const;
 
 type EditableField = typeof EDITABLE_FIELDS[number];

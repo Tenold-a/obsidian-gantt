@@ -36,6 +36,10 @@ export type { CsvParseOptions } from './csv-parser';
 export { parseICS, parseICSDates, classifyICSEvents } from './ics-parser';
 export type { ICSEvent } from './ics-parser';
 
+// Re-export logger
+export { createLogEntry, meetsLevel, DEFAULT_LOG_SETTINGS } from './logger';
+export type { ILogger, LogEntry, LogLevel, LogSettings } from './logger';
+
 /** Lifecycle status for tasks and projects. */
 export type TaskStatus = 'pending' | 'in-progress' | 'cancelled' | 'pending-online' | 'online' | 'completed';
 
@@ -70,6 +74,26 @@ export interface Task {
   /** Link back to source system */
   url?: string;
   /** Connector-specific extra data (not merged, pass-through for rendering) */
+  metadata?: Record<string, unknown>;
+}
+
+/** Rich detail for a single task, fetched on demand via fetchDetail(). */
+export interface TaskDetail {
+  id: string;
+  title: string;
+  startDate?: string;
+  endDate?: string;
+  progress?: number;
+  status?: TaskStatus;
+  personId?: string;
+  projectId?: string;
+  parentId?: string;
+  dependencies?: string[];
+  tags?: string[];
+  url?: string;
+  /** Markdown description — only available via detail endpoint */
+  description?: string;
+  /** Connector-specific extra data */
   metadata?: Record<string, unknown>;
 }
 
@@ -129,6 +153,20 @@ export interface Project {
   metadata?: Record<string, unknown>;
 }
 
+/** Rich detail for a single project, fetched on demand via fetchDetail(). */
+export interface ProjectDetail {
+  id: string;
+  name: string;
+  status?: TaskStatus;
+  color?: string;
+  description?: string;
+  requester?: string;
+  keyDates?: KeyDate[];
+  keyLinks?: KeyLink[];
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
 /** A managed tag definition with display color. */
 export interface TagDefinition {
   name: string;
@@ -154,6 +192,8 @@ export interface ConnectorContext {
   request: (url: string, options?: RequestInit) => Promise<Response>;
   /** Debug logger */
   log: (message: string) => void;
+  /** Structured logger for recording connector runtime information */
+  logger: ILogger;
   /** Read a local file and return its content as a string */
   readFile?: (path: string) => Promise<string>;
   /** Write content to a local file */
@@ -178,21 +218,34 @@ export interface ConnectorModule {
   fetch: (ctx: ConnectorContext) => Promise<unknown>;
   transform: (rawData: unknown, ctx: ConnectorContext) => CanonicalData;
   /** Optional: push local changes back to the upstream system */
-  push?: (changes: PushChangesPayload, ctx: ConnectorContext) => Promise<PushResult>;
+  push?: (changes: PushChangesPayload, ctx: ConnectorContext, onProgress?: (progress: PushProgress) => void) => Promise<PushResult>;
+  /** Optional: fetch raw detail data for a single project or task */
+  fetchDetail?: (id: string, type: 'project' | 'task', ctx: ConnectorContext) => Promise<unknown>;
+  /** Optional: transform raw detail data into ProjectDetail or TaskDetail. Required if fetchDetail is provided. */
+  transformDetail?: (rawData: unknown, ctx: ConnectorContext) => ProjectDetail | TaskDetail;
 }
 
 /** Payload passed to a connector's push() method. */
 export interface PushChangesPayload {
-  tasks: Task[];
-  projects: Project[];
+  tasks: Partial<Task>[];
+  projects: Partial<Project>[];
   deletedTaskIds: string[];
   deletedProjectIds: string[];
+}
+
+/** Progress callback payload for push operations. */
+export interface PushProgress {
+  current: number;
+  total: number;
+  message: string;
 }
 
 /** Result returned by a connector's push() method. */
 export interface PushResult {
   success: boolean;
   error?: string;
+  /** Per-item failures for partial push rollback. Absent = all-or-nothing. */
+  failedItems?: { id: string; type: 'task' | 'project'; error: string }[];
 }
 
 /** Configuration for a connector instance. */
@@ -248,7 +301,7 @@ export interface LocalTask {
 /** A partial Task stored as a user override. */
 export type TaskOverride = Partial<
   Pick<Task, 'startDate' | 'endDate' | 'progress' | 'personId' | 'projectId' | 'parentId' | 'dependencies' | 'tags' | 'title' | 'status' | 'url'>
->;
+> & { description?: string };
 
 // ============================================================
 // Local Storage File Schemas
@@ -267,6 +320,8 @@ export interface EditsOverlay {
   localTasks: Task[];
   /** Project-level field overrides keyed by project ID */
   projectOverrides?: Record<string, Partial<Pick<Project, 'name' | 'status' | 'description' | 'requester' | 'keyDates' | 'keyLinks' | 'tags'>>>;
+  /** Person-level field overrides keyed by person ID */
+  personOverrides?: Record<string, Partial<Pick<Person, 'name' | 'position'>>>;
   /** Task IDs marked for deletion */
   deletedTasks?: string[];
   /** Project IDs marked for deletion */
@@ -300,6 +355,19 @@ export interface ViewDefinition {
     /** Override day width in pixels */
     dayWidth?: number;
   };
+}
+
+// ============================================================
+// Field input memory
+// ============================================================
+
+/** memory/<view-id>.json — recently used values for autocomplete suggestions. */
+export interface FieldMemory {
+  persons: string[];
+  projects: string[];
+  urls: string[];
+  tags: string[];
+  dependencies: string[];
 }
 
 // ============================================================
@@ -349,7 +417,9 @@ export interface GanttPlatform {
   fetch: typeof globalThis.fetch;
   connectorLoader: IConnectorLoader;
   /** Create a ConnectorContext for executing connector scripts */
-  createConnectorContext: (config: Record<string, unknown>, viewState?: ConnectorContext['viewState']) => ConnectorContext;
+  createConnectorContext: (config: Record<string, unknown>, viewState?: ConnectorContext['viewState'], connectorId?: string) => ConnectorContext;
+  /** Create a platform-appropriate logger instance for the given source */
+  createLogger: (source: string) => ILogger;
   watcher: IWatcher | null;
   theme: Theme;
   /** Render a Lucide SVG icon inside the given element. Obsidian delegates to Obsidian.setIcon. */
