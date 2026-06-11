@@ -1,6 +1,7 @@
 import type { GanttPlatform, Theme } from '@obsidian-gantt/core';
 import { createObsidianStorage } from './storage';
 import { createObsidianConnectorLoader, createObsidianConnectorContext } from './connector-loader';
+import { createObsidianLogger } from './logger';
 import { setIcon, MarkdownRenderer, Component } from 'obsidian';
 
 interface ObsidianAppLike {
@@ -31,8 +32,8 @@ export function createObsidianPlatform(app: ObsidianAppLike): GanttPlatform {
 
   const connectorLoader = createObsidianConnectorLoader(adapter, (...args) => fetchRef.requestUrl(...args));
 
-  const createConnectorContext = (config: Record<string, unknown>, viewState?: any) =>
-    createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args), viewState);
+  const createConnectorContext = (config: Record<string, unknown>, viewState?: any, connectorId?: string) =>
+    createObsidianConnectorContext(config, adapter, (...args) => fetchRef.requestUrl(...args), viewState, connectorId);
 
   const theme: Theme = {
     isDark: () => {
@@ -57,6 +58,7 @@ export function createObsidianPlatform(app: ObsidianAppLike): GanttPlatform {
     fetch: globalThis.fetch.bind(globalThis),
     connectorLoader,
     createConnectorContext,
+    createLogger: (source: string) => createObsidianLogger(source),
     watcher: null, // File watching handled by Obsidian's vault events
     theme,
     setIcon,

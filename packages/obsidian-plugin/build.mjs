@@ -24,8 +24,8 @@ if (existsSync(connectorDir)) {
   }
   copyFileSync(join(connectorDir, 'csv-connector.js'), join(outDir, 'csv-connector.js'));
   console.log('  Copied csv-connector.js');
-  copyFileSync(join(connectorDir, 'test-api-connector.js'), join(outDir, 'test-api-connector.js'));
-  console.log('  Copied test-api-connector.js');
+  copyFileSync(join(connectorDir, 'api-connector.js'), join(outDir, 'api-connector.js'));
+  console.log('  Copied api-connector.js');
   copyFileSync(join(connectorDir, 'sample-persons.csv'), join(outDir, 'sample-persons.csv'));
   console.log('  Copied sample-persons.csv');
   copyFileSync(join(connectorDir, 'sample-projects.csv'), join(outDir, 'sample-projects.csv'));

@@ -1,6 +1,7 @@
-import type { IConnectorLoader, ConnectorModule, ConnectorContext, CsvParseOptions } from '@obsidian-gantt/core';
+import type { IConnectorLoader, ConnectorModule, ConnectorContext, CsvParseOptions, ILogger } from '@obsidian-gantt/core';
 import { PlatformError, parseCSV } from '@obsidian-gantt/core';
 import type { VaultAdapter } from './storage';
+import { createObsidianLogger } from './logger';
 
 export function createObsidianConnectorLoader(
   adapter: VaultAdapter,
@@ -38,6 +39,16 @@ export function createObsidianConnectorLoader(
           );
         }
 
+        // Validate detail method pairing: both or neither
+        const hasFetchDetail = typeof mod.fetchDetail === 'function';
+        const hasTransformDetail = typeof mod.transformDetail === 'function';
+        if (hasFetchDetail !== hasTransformDetail) {
+          throw new PlatformError(
+            `Connector script must export both fetchDetail() and transformDetail() together, or neither. Found: fetchDetail=${hasFetchDetail}, transformDetail=${hasTransformDetail}`,
+            'CONNECTOR_SCRIPT_ERROR',
+          );
+        }
+
         return mod;
       } catch (e) {
         if (e instanceof PlatformError) throw e;
@@ -52,15 +63,20 @@ export function createObsidianConnectorLoader(
 }
 
 export function createObsidianConnectorContext(
-  config: Record<string, unknown>,
+  connectorCfg: Record<string, unknown>,
   vaultAdapter: VaultAdapter,
   requestUrl: (opts: { url: string; method?: string; headers?: Record<string, string>; body?: string }) => Promise<{ json: unknown; status: number }>,
   viewState?: ConnectorContext['viewState'],
+  connectorId?: string,
 ): ConnectorContext {
+  const logger: ILogger = createObsidianLogger(connectorId ? `connector:${connectorId}` : 'connector');
+  // Extract the inner `config` field — connector JSON files wrap config under this key
+  const innerConfig = (connectorCfg.config ?? connectorCfg) as Record<string, unknown>;
   return {
-    config,
+    config: innerConfig,
     viewState,
-    log: (...args: unknown[]) => console.log('[Gantt Connector]', ...args),
+    log: (message: string) => logger.info(message),
+    logger,
     request: async (url: string, opts?: RequestInit): Promise<Response> => {
       const result = await requestUrl({
         url,
