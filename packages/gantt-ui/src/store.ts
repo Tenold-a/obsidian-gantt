@@ -110,6 +110,9 @@ export interface GanttStore {
   // Locate target — set by detail panels to trigger scroll-to-entity
   locateTarget: ReturnType<typeof signal<{ type: 'task'; id: string } | { type: 'project'; id: string } | null>>;
 
+  // Hovered task — set by detail panel task cards on mouse enter/leave
+  hoveredTaskId: ReturnType<typeof signal<string | null>>;
+
   // Scroll
   sharedScrollLeft: ReturnType<typeof signal<number>>;
   personScrollTop: ReturnType<typeof signal<number>>;
@@ -194,6 +197,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
   const views = signal<ViewDefinition[]>([]);
   const currentViewId = signal<string | null>(null);
   const selectedEntity = signal<SelectedEntity | null>(null);
+  const hoveredTaskId = signal<string | null>(null);
   const sharedScrollLeft = signal<number>(0);
   const personScrollTop = signal<number>(0);
   const projectScrollTop = signal<number>(0);
@@ -220,11 +224,9 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
 
   // Field input memory — auto-complete suggestions for manual fields
   const fieldMemory = signal<FieldMemory>({
-    persons: [],
-    projects: [],
-    urls: [],
-    tags: [],
-    dependencies: [],
+    requesters: [],
+    keyDateNames: [],
+    keyLinkNames: [],
   });
 
   // Detail cache: keyed by "<type>:<id>", cleared on connector refresh
@@ -306,12 +308,31 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
   const mergedProjects = computed<Project[]>(() => {
     const overrides = edits.value?.projectOverrides ?? {};
     const deletedProjects = new Set(edits.value?.deletedProjects ?? []);
+    const cache = detailCache.value;
     return projects.value
       .filter(p => p.id && !deletedProjects.has(p.id))
       .map(p => {
+        // Merge detail cache data (enriches canonical with detail endpoint fields)
+        let base = p;
+        for (const c of caches.value) {
+          const detail = cache.get(`${c.connectorId}:project:${p.id}`) as ProjectDetail | undefined;
+          if (detail) {
+            base = {
+              ...base,
+              description: detail.description ?? base.description,
+              requester: detail.requester ?? base.requester,
+              keyDates: detail.keyDates ?? base.keyDates,
+              keyLinks: detail.keyLinks ?? base.keyLinks,
+              tags: detail.tags ?? base.tags,
+              status: detail.status ?? base.status,
+              color: detail.color ?? base.color,
+            };
+            break;
+          }
+        }
         const override = overrides[p.id];
-        if (!override) return p;
-        return { ...p, ...override };
+        if (!override) return base;
+        return { ...base, ...override };
       });
   });
 
@@ -653,17 +674,15 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
       if (raw) {
         const data = JSON.parse(raw) as FieldMemory;
         fieldMemory.value = {
-          persons: data.persons ?? [],
-          projects: data.projects ?? [],
-          urls: data.urls ?? [],
-          tags: data.tags ?? [],
-          dependencies: data.dependencies ?? [],
+          requesters: data.requesters ?? [],
+          keyDateNames: data.keyDateNames ?? [],
+          keyLinkNames: data.keyLinkNames ?? [],
         };
       } else {
-        fieldMemory.value = { persons: [], projects: [], urls: [], tags: [], dependencies: [] };
+        fieldMemory.value = { requesters: [], keyDateNames: [], keyLinkNames: [] };
       }
     } catch {
-      fieldMemory.value = { persons: [], projects: [], urls: [], tags: [], dependencies: [] };
+      fieldMemory.value = { requesters: [], keyDateNames: [], keyLinkNames: [] };
     }
   }
 
@@ -1769,6 +1788,7 @@ export function createGanttStore(platform: GanttPlatform): GanttStore {
     selectedTaskId,
     selectedProjectId,
     locateTarget,
+    hoveredTaskId,
     sharedScrollLeft,
     personScrollTop,
     projectScrollTop,

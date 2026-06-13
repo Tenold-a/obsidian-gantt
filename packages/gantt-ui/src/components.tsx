@@ -304,8 +304,24 @@ export interface TaskBarData {
   color: string;
   isHighlighted: boolean;
   isSelected: boolean;
+  isHovered: boolean;
   isDimmed: boolean;
+  isDragging: boolean;
   progress: number;
+  status: string;
+}
+
+const STATUS_DEFS: Record<string, { color: string; icon: string }> = {
+  pending:          { color: '#888888', icon: 'circle' },
+  'in-progress':    { color: '#2196f3', icon: 'loader' },
+  cancelled:        { color: '#e53935', icon: 'x-circle' },
+  'pending-online': { color: '#fb8c00', icon: 'arrow-up-circle' },
+  online:           { color: '#00897b', icon: 'globe' },
+  completed:        { color: '#4caf50', icon: 'check-circle' },
+};
+
+function getStatusDef(status: string): { color: string; icon: string } {
+  return STATUS_DEFS[status] ?? { color: '#888888', icon: 'circle' };
 }
 
 export function TaskBar(props: {
@@ -316,7 +332,7 @@ export function TaskBar(props: {
   rowHeight: number;
   laneOffset: number;
   paneType: 'person' | 'project';
-  onPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project') => void;
+  onPointerDown: (e: PointerEvent, taskId: string, edge: 'left' | 'right' | 'body', paneType: 'person' | 'project', laneIndex: number) => void;
   onClick: (taskId: string) => void;
   /** Task start date for non-working day overlay computation. */
   startDate?: string | null;
@@ -365,9 +381,12 @@ export function TaskBar(props: {
     });
   }
 
+  const statusDef = getStatusDef(data.status);
+  const showTitle = barWidth > 60;
+
   return (
     <div
-      class={`gantt-task-bar ${data.isSelected ? 'selected' : ''} ${data.isHighlighted ? 'highlighted' : ''} ${data.isDimmed ? 'dimmed' : ''}`}
+      class={`gantt-task-bar ${data.isSelected ? 'selected' : ''} ${data.isHighlighted ? 'highlighted' : ''} ${data.isDimmed ? 'dimmed' : ''} ${data.isHovered ? 'hovered' : ''}`}
       style={{
         position: 'absolute',
         left: `${data.left}px`,
@@ -376,30 +395,35 @@ export function TaskBar(props: {
         height: `${barHeight}px`,
         background: data.color,
         borderRadius: '4px',
-        opacity: data.isDimmed ? 0.3 : 1,
+        opacity: data.isDragging ? 0 : data.isDimmed ? 0.3 : 1,
         cursor: 'grab',
         display: 'flex',
         alignItems: 'center',
-        paddingLeft: '4px',
+        paddingLeft: '24px',
         fontSize: '11px',
         whiteSpace: 'nowrap',
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         color: 'var(--text-on-accent, #fff)',
-        zIndex: data.isSelected ? 1000 : 2 + props.laneIndex,
+        boxSizing: 'border-box',
+        zIndex: data.isSelected ? 1000 : data.isHovered ? 999 : 2 + props.laneIndex,
         animation: data.isSelected ? 'gantt-selected-pulse 1.4s ease-in-out infinite' : 'none',
+        transform: data.isHovered && !data.isSelected ? 'scaleY(1.25)' : 'none',
+        filter: data.isHovered && !data.isSelected ? 'brightness(1.15)' : 'none',
         boxShadow: data.isSelected
           ? 'none'
-          : data.isHighlighted
-            ? '0 0 0 2px var(--gantt-highlight-border, #4A90D9)'
-            : 'none',
-        transition: data.isSelected ? 'none' : 'opacity 0.15s, box-shadow 0.15s',
+          : data.isHovered
+            ? '0 0 0 1px var(--gantt-hover-border, #FFB347), 0 0 8px rgba(255, 179, 71, 0.45)'
+            : data.isHighlighted
+              ? '0 0 0 2px var(--gantt-highlight-border, #4A90D9)'
+              : 'none',
+        transition: data.isSelected ? 'none' : data.isHovered ? 'transform 0.1s, box-shadow 0.1s, filter 0.1s' : 'opacity 0.15s, box-shadow 0.15s',
       }}
       onPointerDown={(e) => {
         const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
         const relX = e.clientX - rect.left;
         const edge = relX < 8 ? 'left' : relX > rect.width - 8 ? 'right' : 'body';
-        props.onPointerDown(e, data.id, edge, paneType);
+        props.onPointerDown(e, data.id, edge, paneType, props.laneIndex);
       }}
       onPointerMove={(e) => {
         if (showHandles) {
@@ -418,6 +442,48 @@ export function TaskBar(props: {
       }}
       title={`${data.title}`}
     >
+      {/* Status stripe with icon */}
+      <div
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: '18px',
+          height: '100%',
+          background: statusDef.color,
+          clipPath: 'polygon(0 0, 15px 0, 18px 5px, 15px 100%, 0 100%)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+          zIndex: 3,
+        }}
+      >
+        <Icon
+          name={statusDef.icon}
+          size={10}
+          style={{
+            opacity: 0.95,
+            filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.35))',
+          }}
+        />
+      </div>
+      {/* Progress fill — darker shade from left */}
+      {data.progress > 0 && data.progress <= 1 && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: `${data.progress * 100}%`,
+            height: '100%',
+            background: 'rgba(0, 0, 0, 0.2)',
+            borderRadius: '1px 0 0 1px',
+            pointerEvents: 'none',
+            zIndex: 0,
+          }}
+        />
+      )}
       {/* Non-working day overlays */}
       {overlays.map((ol, i) => (
         <div
@@ -442,7 +508,7 @@ export function TaskBar(props: {
         />
       ))}
       {showHandles && <span class="gantt-bar-handle gantt-bar-handle-left" />}
-      {data.width > 40 ? data.title : ''}
+      {showTitle ? data.title : ''}
       {showHandles && <span class="gantt-bar-handle gantt-bar-handle-right" />}
     </div>
   );
@@ -584,6 +650,7 @@ export function isTodayDate(date: string): boolean {
 export function KeyDateMarker(props: {
   leftPx: number;
   groupTopY: number;
+  groupHeight: number;
   name: string;
   date: string;
   color?: string;
@@ -600,12 +667,12 @@ export function KeyDateMarker(props: {
       style={{
         position: 'absolute',
         left: `${props.leftPx - size / 2}px`,
-        top: `${props.groupTopY + 1}px`,
+        top: `${props.groupTopY + (props.groupHeight - size) / 2}px`,
         width: `${size}px`,
         height: `${size}px`,
         background: bg,
         transform: 'rotate(45deg)',
-        zIndex: 3,
+        zIndex: 1001,
         pointerEvents: 'auto',
         cursor: props.onPointerDown ? 'ew-resize' : 'help',
         display: 'flex',

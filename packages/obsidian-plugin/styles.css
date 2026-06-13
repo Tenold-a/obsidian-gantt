@@ -10,6 +10,9 @@
   --gantt-today-color: var(--text-accent);
   --gantt-highlight-border: var(--text-accent);
   --gantt-row-highlight-bg: var(--background-modifier-hover);
+  --gantt-hover-border: #FFB347;
+  --gantt-selected-border: #FF6B35;
+  --gantt-selected-row-bg: rgba(255, 107, 53, 0.12);
   --gantt-weekend-bg: rgba(0, 0, 0, 0.07);
   --gantt-holiday-bg: rgba(255, 0, 0, 0.08);
   --gantt-weekend-text: var(--text-faint);
@@ -20,6 +23,9 @@
 
 /* Dark theme overrides */
 .theme-dark {
+  --gantt-hover-border: #FFB347;
+  --gantt-selected-border: #FF6B35;
+  --gantt-selected-row-bg: rgba(255, 107, 53, 0.18);
   --gantt-weekend-bg: rgba(255, 255, 255, 0.08);
   --gantt-holiday-bg: rgba(255, 80, 80, 0.12);
   --gantt-weekend-text: var(--text-faint);
@@ -44,6 +50,10 @@
 .gantt-task-bar.highlighted {
   opacity: 1;
   filter: brightness(1.05);
+}
+
+.gantt-task-bar.hovered {
+  opacity: 1;
 }
 
 /* Bar resize handles */

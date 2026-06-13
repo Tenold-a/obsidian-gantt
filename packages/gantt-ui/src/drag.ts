@@ -76,6 +76,8 @@ export interface DragState {
   currentPersonId: string | null;
   /** Row index for ghost bar positioning */
   rowIndex: number;
+  /** Lane index within the group for ghost bar vertical positioning */
+  laneIndex: number;
   /** Scroll offset of the timeline container at drag start */
   scrollTopStart: number;
   /** Y position of the timeline body top at drag start */
@@ -104,6 +106,7 @@ export function createDragHandler(store: GanttStore) {
     taskId: string,
     edge: 'left' | 'right' | 'body',
     paneType: 'person' | 'project',
+    laneIndex: number,
   ) {
     const task = store.mergedTasks.value.find(t => t.id === taskId);
     if (!task) return;
@@ -154,6 +157,7 @@ export function createDragHandler(store: GanttStore) {
       originalPersonId: personId,
       currentPersonId: personId,
       rowIndex,
+      laneIndex,
       scrollTopStart: scrollEl?.scrollTop ?? 0,
       bodyTopStart: bodyRect?.top ?? 0,
     };
@@ -204,6 +208,7 @@ export function createDragHandler(store: GanttStore) {
       originalPersonId: null,
       currentPersonId: null,
       rowIndex,
+      laneIndex: 0,
       scrollTopStart: 0,
       bodyTopStart: 0,
       keyDateIndex,

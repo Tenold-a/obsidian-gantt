@@ -363,11 +363,9 @@ export interface ViewDefinition {
 
 /** memory/<view-id>.json — recently used values for autocomplete suggestions. */
 export interface FieldMemory {
-  persons: string[];
-  projects: string[];
-  urls: string[];
-  tags: string[];
-  dependencies: string[];
+  requesters: string[];
+  keyDateNames: string[];
+  keyLinkNames: string[];
 }
 
 // ============================================================

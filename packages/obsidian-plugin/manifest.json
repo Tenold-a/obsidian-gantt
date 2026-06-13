@@ -1,7 +1,7 @@
 {
   "id": "obsidian-gantt",
   "name": "Gantt Chart",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minAppVersion": "1.4.0",
   "description": "Universal Gantt chart plugin with connector-based data integration. Supports person and project views with drag-and-drop editing.",
   "author": "Tenold-a",
