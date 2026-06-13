@@ -7,6 +7,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUT="${1:-$ROOT/obsidian-gantt-test.zip}"
+# Resolve relative paths to absolute before we cd
+if [[ "$OUTPUT" != /* ]]; then OUTPUT="$PWD/$OUTPUT"; fi
 
 TMP="$(mktemp -d)"
 trap "rm -rf $TMP" EXIT

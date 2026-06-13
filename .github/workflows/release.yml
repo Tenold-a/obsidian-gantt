@@ -27,7 +27,7 @@ jobs:
           npm run build:plugin
 
       - name: Build test package
-        run: bash scripts/package-test.sh obsidian-gantt-test.zip
+        run: bash scripts/package-test.sh "${{ github.workspace }}/obsidian-gantt-test.zip"
 
       - name: Create Release
         run: |
@@ -38,6 +38,6 @@ jobs:
             packages/obsidian-plugin/main.js.map \
             packages/obsidian-plugin/manifest.json \
             packages/obsidian-plugin/styles.css \
-            obsidian-gantt-test.zip
+            "${{ github.workspace }}/obsidian-gantt-test.zip"
         env:
           GH_TOKEN: ${{ github.token }}
